@@ -12,8 +12,8 @@ import {
   Edit3,
   RotateCcw,
   XCircle,
-  Lock,
   MapPin,
+  Sparkles,
 } from 'lucide-react';
 import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
@@ -39,6 +39,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [extractedItems, setExtractedItems] = useState<ExtractedSparePart[]>([]);
   const [skippedRows, setSkippedRows] = useState<SkippedRow[]>([]);
+  const [repairedCount, setRepairedCount] = useState<number>(0);
   const [isSkippedModalOpen, setIsSkippedModalOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [warningAlert, setWarningAlert] = useState<string | null>(null);
@@ -76,6 +77,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
       stopCamera();
       setExtractedItems([]);
       setSkippedRows([]);
+      setRepairedCount(0);
       setIsSkippedModalOpen(false);
       setIsProcessing(false);
       setStatusMessage('');
@@ -87,7 +89,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
     };
   }, [isOpen, stopCamera]);
 
-  // التحقق الصارم من اكتمال قراءة الورقة 100% قبل السماح برفعها لقاعدة البيانات
+  // إحصائيات وفحص الورقة المقروءة
   const sheetValidation = useMemo(() => {
     const invalidRowsCount = extractedItems.filter(
       (item) =>
@@ -115,41 +117,43 @@ export const OcrModal: React.FC<OcrModalProps> = ({
   if (!isOpen) return null;
 
   /**
-   * معالجة الصورة الحقيقية واستخراج كافة أصناف جدول جرد SAP (مثل الـ 37 صنفاً بالكامل) بدون أي بيانات وهمية
+   * معالجة الصورة بنفس آلية المحاكي 100% مع الخوارزميات المساعدة الذكية
    */
   const processImageDirectly = async (rawDataUrl: string) => {
     setIsProcessing(true);
     setWarningAlert(null);
-    setStatusMessage('⚡ جاري القراءة الفورية الكاملة لجميع أصناف الورقة وفحص الـ 10 أرقام والمواقع وعلامات (×)...');
+    setRepairedCount(0);
+    setStatusMessage('⚡ جاري القراءة السريعة لكامل الورقة وتطبيق الخوارزميات المساعدة لتصحيح الأرقام والمواقع وعلامات (✓ / ×)...');
 
     try {
-      // تدوير تلقائي للأوراق المصورة طولياً (Portrait -> Landscape) وبوضوح 2000px لقراءة 37 سطراً كاملة
+      // معالجة مطابقة للمحاكي تماماً (1600px دون تدوير قسري مزدوج)
       const calibratedUrl = await prepareImageForAi(rawDataUrl, {
-        autoRotate: true,
-        maxDimension: 2000,
+        maxDimension: 1600,
         enhanceContrast: true,
       });
       setLastImage(calibratedUrl);
 
       let result = await parseTableWithGeminiVision(calibratedUrl);
 
-      // إذا لم يجد أسطراً في الاتجاه الأول، يجرب التدوير العكسي تلقائياً
+      // خوارزمية المساعدة التلقائية للاتجاه: إذا كانت الورقة مقلوبة أو مصورة بزاوية صعبة ولم تُقرأ من المحاولة الأولى، تدور 270 درجة تلقائياً
       if (!result.items || result.items.length === 0) {
-        const rotatedAlt = await rotateImageDegrees(calibratedUrl, 180);
-        const retryResult = await parseTableWithGeminiVision(rotatedAlt);
+        setStatusMessage('⚡ جاري تعديل زاوية الورقة تلقائياً وإعادة القراءة...');
+        const rotated270 = await rotateImageDegrees(calibratedUrl, 270);
+        const retryResult = await parseTableWithGeminiVision(rotated270);
         if (retryResult.items && retryResult.items.length > 0) {
           result = retryResult;
-          setLastImage(rotatedAlt);
+          setLastImage(rotated270);
         }
       }
 
       if (result.items && result.items.length > 0) {
         setExtractedItems(result.items);
+        setRepairedCount(result.repairedCount || 0);
 
         if (result.skippedRows && result.skippedRows.length > 0) {
           setSkippedRows(result.skippedRows);
           playHighPitchWarningAlert();
-          const warnMsg = `⛔ تحذير هام للعمل الميداني: قراءة الورقة ناقصة! تم قراءة (${result.items.length}) صنف ولكن يوجد (${result.skippedRows.length}) سطر غير واضح أو ناقص — يرجى إعادة تصوير أو رفع الورقة مرة أخرى بوضوح تام أو تصحيح النواقص قبل الحفظ.`;
+          const warnMsg = `⚠️ تم قراءة (${result.items.length}) صنف بنجاح، ويوجد (${result.skippedRows.length}) سطر غير واضح. يمكنك حفظ الأصناف المقروءة فوراً أو مراجعة السطر غير الواضح أو إعادة رفع الورقة.`;
           setWarningAlert(warnMsg);
           setStatusMessage(warnMsg);
         } else {
@@ -159,7 +163,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
             (i) => i.is_missing === 1 || i.status === 'غير موجودة'
           ).length;
           setStatusMessage(
-            `✅ الورقة مكتملة القراءة 100%! تم قراءة (${result.items.length}) صنف بالكامل — منها (${missingCount}) معلمة بـ × غير موجودة.`
+            `✅ اكتملت قراءة الورقة بنجاح 100%! (${result.items.length} صنف — منها ${missingCount} معلمة بـ × غير موجودة)`
           );
         }
       } else {
@@ -168,7 +172,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
         playHighPitchWarningAlert();
         const errWarn =
           result.message ||
-          '⛔ تحذير: قراءة الورقة غير مكتملة أو الصورة غير واضحة — يرجى إعادة تصوير أو رفع الورقة مرة أخرى (لا يُسمح بأي قراءة ناقصة أو وهمية في العمل الميداني).';
+          '⚠️ لم يتم العثور على جدول واضح في هذه الصورة — يرجى الضغط على "تدوير 90° ↺" أو إعادة تصوير/رفع الورقة بوضوح.';
         setWarningAlert(errWarn);
         setStatusMessage(errWarn);
       }
@@ -176,7 +180,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
       console.error('Error processing image:', err);
       playHighPitchWarningAlert();
       const errWarn =
-        '⛔ تحذير: حدث خطأ أثناء قراءة الورقة — يرجى إعادة رفع أو تصوير الورقة مرة أخرى بوضوح.';
+        '⚠️ حدث خطأ أثناء قراءة الورقة — يرجى إعادة رفع أو تصوير الورقة مرة أخرى.';
       setWarningAlert(errWarn);
       setStatusMessage(errWarn);
     } finally {
@@ -191,7 +195,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
     if (!lastImage || isProcessing) return;
     setIsProcessing(true);
     setWarningAlert(null);
-    setStatusMessage('⚡ جاري تدوير الورقة 90° وإعادة قراءة جميع الأصناف...');
+    setStatusMessage('⚡ جاري تدوير الورقة 90° وإعادة قراءة كامل الأصناف...');
     try {
       const newlyRotated = await rotateImageDegrees(lastImage, 270);
       setLastImage(newlyRotated);
@@ -199,10 +203,10 @@ export const OcrModal: React.FC<OcrModalProps> = ({
 
       if (result.items && result.items.length > 0) {
         setExtractedItems(result.items);
+        setRepairedCount(result.repairedCount || 0);
         if (result.skippedRows && result.skippedRows.length > 0) {
           setSkippedRows(result.skippedRows);
-          playHighPitchWarningAlert();
-          const warnMsg = `⛔ تحذير: يوجد (${result.skippedRows.length}) سطر غير مكتمل في الورقة — يرجى إعادة رفع الورقة بوضوح أو مراجعة النواقص.`;
+          const warnMsg = `⚠️ تم استخراج (${result.items.length}) صنف ويوجد (${result.skippedRows.length}) سطر غير واضح.`;
           setWarningAlert(warnMsg);
           setStatusMessage(warnMsg);
         } else {
@@ -211,9 +215,8 @@ export const OcrModal: React.FC<OcrModalProps> = ({
           setStatusMessage(`✅ الورقة مكتملة القراءة 100% (${result.items.length} صنف)!`);
         }
       } else {
-        playHighPitchWarningAlert();
         const warnMsg =
-          '⛔ لم يتم العثور على قراءة مكتملة بعد التدوير — يرجى إعادة تصوير أو رفع الورقة مرة أخرى بوضوح.';
+          '⚠️ لم تظهر أسطر واضحة بعد التدوير — جرب الضغط على تدوير 90° مرة أخرى أو أعد رفع الورقة.';
         setWarningAlert(warnMsg);
         setStatusMessage(warnMsg);
       }
@@ -233,37 +236,12 @@ export const OcrModal: React.FC<OcrModalProps> = ({
   };
 
   /**
-   * فتح ألبوم الصور بدقة عالية (2000px / جودة 90) لضمان قراءة كافة الـ 37 صنفاً
-   */
-  const pickFromGallery = async () => {
-    try {
-      const photo = await CapCamera.getPhoto({
-        quality: 90,
-        width: 2000,
-        height: 2000,
-        allowEditing: false,
-        correctOrientation: true,
-        resultType: CameraResultType.Base64,
-        source: CameraSource.Photos,
-      });
-
-      if (photo && photo.base64String) {
-        await analyzeImageWithGemini(photo.base64String);
-      }
-    } catch (error) {
-      console.error('إلغاء أو تعذر فتح الألبوم:', error);
-    }
-  };
-
-  /**
-   * التقاط صورة من الكاميرا بدقة عالية (2000px / جودة 90)
+   * التقاط صورة من الكاميرا بدون قص مربع (بدون فرض width/height متساويين يقصان أطراف الورقة في الأندرويد!)
    */
   const takePicture = async (source: CameraSource = CameraSource.Camera) => {
     try {
       const image = await CapCamera.getPhoto({
         quality: 90,
-        width: 2000,
-        height: 2000,
         allowEditing: false,
         resultType: CameraResultType.Base64,
         source: source,
@@ -288,17 +266,20 @@ export const OcrModal: React.FC<OcrModalProps> = ({
     }
     if (!videoRef.current) return;
     const canvas = document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth || 2000;
-    canvas.height = videoRef.current.videoHeight || 1400;
+    canvas.width = videoRef.current.videoWidth || 1600;
+    canvas.height = videoRef.current.videoHeight || 1200;
     const ctx = canvas.getContext('2d');
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const rawDataUrl = canvas.toDataURL('image/jpeg', 0.90);
+      const rawDataUrl = canvas.toDataURL('image/jpeg', 0.88);
       stopCamera();
       await processImageDirectly(rawDataUrl);
     }
   };
 
+  /**
+   * قراءة ملف الصورة من الألبوم بنفس طريقة المحاكي تماماً (FileReader المباشر بدون تشويه أبعاد الصورة)
+   */
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -317,15 +298,13 @@ export const OcrModal: React.FC<OcrModalProps> = ({
     setExtractedItems([]);
     setSkippedRows([]);
     setWarningAlert(null);
-    if (Capacitor.isNativePlatform()) {
-      pickFromGallery();
-    } else if (fileInputRef.current) {
+    if (fileInputRef.current) {
       fileInputRef.current.click();
     }
   };
 
   /**
-   * تبديل علامة (× غير موجودة / ✓ موجودة) لأي سطر في جدول المعاينة قبل الحفظ
+   * تبديل علامة (× غير موجودة / ✓ موجودة) لأي سطر بضغطة واحدة
    */
   const handleToggleMissingItem = (index: number) => {
     setExtractedItems((prev) =>
@@ -344,16 +323,20 @@ export const OcrModal: React.FC<OcrModalProps> = ({
   };
 
   /**
-   * حفظ الورقة في قاعدة البيانات — مشروط باكتمال قراءة الورقة 100%
+   * حفظ كافة الأصناف الصحيحة المستخرجة من الورقة فوراً دون رفض تعسفي
    */
   const handleSaveToDatabase = async () => {
-    if (!sheetValidation.isComplete) {
+    const validToSave = extractedItems.filter(
+      (item) =>
+        strict10DigitRegexFilter(item.part_number) &&
+        isValidSpecificLocation(item.location_code)
+    );
+    if (validToSave.length === 0) {
       playHighPitchWarningAlert();
-      setIsSkippedModalOpen(true);
       return;
     }
     setIsProcessing(true);
-    await onSaveItems(extractedItems);
+    await onSaveItems(validToSave);
     setIsProcessing(false);
     stopCamera();
     onClose();
@@ -374,6 +357,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
 
   const handleDismissAllSkipped = () => {
     setSkippedRows([]);
+    setWarningAlert(null);
   };
 
   return (
@@ -389,10 +373,10 @@ export const OcrModal: React.FC<OcrModalProps> = ({
               </div>
               <div>
                 <h2 className="text-sm sm:text-base font-bold text-white">
-                  الفحص الدقيق لأوراق الجرد (SAP Inventory Controller)
+                  الماسح الذكي لأوراق الجرد (مدعوم بالخوارزميات المساعدة)
                 </h2>
                 <p className="text-[10px] text-amber-300/90">
-                  قراءة حقيقية كاملة 100% لجميع الأصناف (37 صنفاً) + منع أي قراءة ناقصة أو وهمية
+                  قراءة كامل الورقة بأي عدد أصناف + ترميم الـ 10 أرقام + استنتاج الموقع السياقي + تمييز مرن لـ (✓ / ×)
                 </p>
               </div>
             </div>
@@ -437,29 +421,18 @@ export const OcrModal: React.FC<OcrModalProps> = ({
                 </button>
               )}
 
-              {Capacitor.isNativePlatform() ? (
-                <button
-                  type="button"
-                  onClick={pickFromGallery}
-                  disabled={isProcessing}
-                  className="px-4 py-2.5 rounded-xl bg-[#2D1B15] hover:bg-[#40271E] text-amber-200 border border-[#FF8F00]/50 font-bold text-xs flex items-center gap-2 cursor-pointer transition-colors"
-                >
-                  <Upload className="w-4 h-4 text-amber-400" />
-                  <span>رفع الورقة من الألبوم ⚡</span>
-                </button>
-              ) : (
-                <label className="px-4 py-2.5 rounded-xl bg-[#2D1B15] hover:bg-[#40271E] text-amber-200 border border-[#FF8F00]/50 font-bold text-xs flex items-center gap-2 cursor-pointer transition-colors">
-                  <Upload className="w-4 h-4 text-amber-400" />
-                  <span>رفع الورقة من الألبوم ⚡</span>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={handleFileUpload}
-                    className="hidden"
-                  />
-                </label>
-              )}
+              {/* استخدام نفس قارئ الملفات المباشر المطابق للمحاكي 100% في الأندرويد والويب لمنع تشويه أو قص الصور */}
+              <label className="px-4 py-2.5 rounded-xl bg-[#2D1B15] hover:bg-[#40271E] text-amber-200 border border-[#FF8F00]/50 font-bold text-xs flex items-center gap-2 cursor-pointer transition-colors">
+                <Upload className="w-4 h-4 text-amber-400" />
+                <span>رفع الورقة من الألبوم ⚡</span>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+              </label>
 
               {lastImage && (
                 <button
@@ -474,34 +447,22 @@ export const OcrModal: React.FC<OcrModalProps> = ({
               )}
             </div>
 
-            {/* زر رفع وحفظ الورقة: لا يفتح إلا إذا كانت الورقة مكتملة القراءة 100% */}
+            {/* زر رفع وحفظ الورقة: متاح دائماً لحفظ كافة الأصناف الصحيحة المستخرجة من الورقة */}
             <button
               onClick={handleSaveToDatabase}
               disabled={extractedItems.length === 0 || isProcessing}
               className={`px-5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 shadow-lg transition-all ${
-                sheetValidation.isComplete && !isProcessing
+                extractedItems.length > 0 && !isProcessing
                   ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/50 cursor-pointer active:scale-95'
-                  : extractedItems.length > 0 && !sheetValidation.isComplete
-                  ? 'bg-red-900/80 hover:bg-red-800 text-red-100 border border-red-500 cursor-pointer'
                   : 'bg-neutral-800 text-neutral-500 cursor-not-allowed border border-neutral-700'
               }`}
             >
-              {sheetValidation.isComplete ? (
-                <>
-                  <Save className="w-4 h-4" />
-                  <span>رفع وحفظ الورقة المكتملة ({extractedItems.length} صنف)</span>
-                </>
-              ) : extractedItems.length > 0 ? (
-                <>
-                  <Lock className="w-4 h-4 text-red-300" />
-                  <span>قراءة ناقصة ({sheetValidation.totalIncomplete} سطر) — أعد الرفع أو صحح</span>
-                </>
-              ) : (
-                <>
-                  <Save className="w-4 h-4" />
-                  <span>رفع الورقة لقاعدة البيانات</span>
-                </>
-              )}
+              <Save className="w-4 h-4" />
+              <span>
+                {extractedItems.length > 0
+                  ? `رفع وحفظ الورقة (${extractedItems.length} صنف)`
+                  : 'رفع الورقة لقاعدة البيانات'}
+              </span>
             </button>
           </div>
 
@@ -517,7 +478,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
                 />
                 <div className="absolute inset-4 border border-dashed border-amber-400/80 rounded-lg pointer-events-none flex items-center justify-center">
                   <span className="text-[11px] text-amber-200 bg-black/75 px-3 py-1 rounded-full font-bold">
-                    تأكد من ظهور زوايا الورقة الأربعة وكافة الأسطر بوضوح
+                    تأكد من ظهور زوايا الورقة وكافة الأسطر بوضوح
                   </span>
                 </div>
               </div>
@@ -533,68 +494,65 @@ export const OcrModal: React.FC<OcrModalProps> = ({
                   <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
                   <span>{statusMessage}</span>
                 </span>
-                <span className="text-amber-400 font-mono text-[11px] font-bold">Gemini 3 Vision</span>
+                <span className="text-amber-400 font-mono text-[11px] font-bold">Fast Assistive Vision</span>
               </div>
             )}
 
-            {/* شريط التحذير الصارم عند وجود أي نقص في الورقة أو عدم وضوح */}
+            {/* شريط التنبيه الذكي عند وجود أسطر غير واضحة */}
             {!isProcessing && warningAlert && (
-              <div className="p-4 rounded-xl bg-red-950/90 border-2 border-red-500 text-red-100 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="p-3.5 rounded-xl bg-amber-950/90 border border-amber-500/80 text-amber-100 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div className="flex items-start gap-2.5">
-                  <AlertTriangle className="w-6 h-6 text-red-400 shrink-0 mt-0.5" />
+                  <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
                   <div>
-                    <div className="font-black text-xs sm:text-sm text-red-200">
-                      تحذير عدم اكتمال قراءة الورقة (مرفوضة للعمل الميداني)
+                    <div className="font-black text-xs sm:text-sm text-amber-200">
+                      تنبيه فحص الورقة الميداني
                     </div>
-                    <p className="text-xs text-red-300 mt-1 leading-relaxed">
+                    <p className="text-xs text-amber-200/90 mt-0.5 leading-relaxed">
                       {warningAlert}
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                <div className="flex flex-wrap items-center gap-2 self-end sm:self-center shrink-0">
                   <button
                     type="button"
                     onClick={handleReuploadSheet}
-                    className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-[#FF6D00] to-[#E65100] hover:from-[#FF8500] hover:to-[#F57C00] text-white font-black text-xs flex items-center gap-1.5 shadow-md cursor-pointer"
+                    className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#FF6D00] to-[#E65100] hover:from-[#FF8500] hover:to-[#F57C00] text-white font-black text-xs flex items-center gap-1.5 shadow cursor-pointer"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
-                    <span>إعادة رفع / تصوير الورقة مرة أخرى</span>
+                    <span>إعادة رفع الورقة</span>
                   </button>
                   {skippedRows.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setIsSkippedModalOpen(true)}
-                      className="px-3 py-2 rounded-xl bg-red-800 hover:bg-red-700 text-white font-bold text-xs flex items-center gap-1 cursor-pointer border border-red-400/50"
-                    >
-                      <Edit3 className="w-3.5 h-3.5" />
-                      <span>مراجعة النواقص ({skippedRows.length})</span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setIsSkippedModalOpen(true)}
+                        className="px-3 py-1.5 rounded-xl bg-amber-800 hover:bg-amber-700 text-white font-bold text-xs flex items-center gap-1 cursor-pointer border border-amber-400/50"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>تصحيح ({skippedRows.length})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDismissAllSkipped}
+                        className="px-3 py-1.5 rounded-xl bg-emerald-800 hover:bg-emerald-700 text-emerald-100 font-bold text-xs flex items-center gap-1 cursor-pointer border border-emerald-500/50"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>اعتماد الأصناف المقروءة ({extractedItems.length})</span>
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
             )}
 
-            {/* شريط اكتمال الورقة وإحصائيات الموجود وغير الموجود (×) */}
+            {/* شريط إحصائيات الورقة المقروءة */}
             {!isProcessing && extractedItems.length > 0 && (
-              <div
-                className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs ${
-                  sheetValidation.isComplete
-                    ? 'bg-emerald-950/70 border-emerald-600/70 text-emerald-200'
-                    : 'bg-red-950/80 border-red-500/80 text-red-200'
-                }`}
-              >
-                <div className="flex flex-wrap items-center gap-3 font-bold">
-                  {sheetValidation.isComplete ? (
-                    <span className="flex items-center gap-1.5 text-emerald-300">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                      الورقة مكتملة القراءة 100% ({extractedItems.length} صنف)
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1.5 text-red-300">
-                      <AlertTriangle className="w-4 h-4 text-red-400" />
-                      الورقة ناقصة: يوجد ({sheetValidation.totalIncomplete}) سطر غير مكتمل يمنع رفع الورقة
-                    </span>
-                  )}
+              <div className="p-3 rounded-xl border bg-emerald-950/60 border-emerald-600/60 text-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+                <div className="flex flex-wrap items-center gap-2.5 font-bold">
+                  <span className="flex items-center gap-1.5 text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    الأصناف المستخرجة: ({extractedItems.length} صنف)
+                  </span>
 
                   <span className="px-2 py-0.5 rounded-md bg-black/40 text-emerald-300 border border-emerald-700/50">
                     ✓ موجودة: {sheetValidation.presentItemsCount}
@@ -607,6 +565,13 @@ export const OcrModal: React.FC<OcrModalProps> = ({
                   <span className="px-2 py-0.5 rounded-md bg-amber-950/80 text-amber-300 border border-amber-700/50">
                     المواقع الفعلية: {sheetValidation.uniqueLocationsCount} موقع
                   </span>
+
+                  {repairedCount > 0 && (
+                    <span className="px-2 py-0.5 rounded-md bg-orange-950/90 text-amber-200 border border-amber-500/50 flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 text-amber-400" />
+                      تم تصحيح {repairedCount} رقم تلقائياً بالخوارزميات المساعدة
+                    </span>
+                  )}
                 </div>
 
                 <button
@@ -615,7 +580,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
                   className="px-3 py-1.5 rounded-lg bg-[#2D1B15] hover:bg-[#40271E] text-amber-300 border border-amber-500/40 font-bold text-xs flex items-center gap-1.5 self-end sm:self-auto cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  <span>إعادة رفع الورقة</span>
+                  <span>ورقة أخرى</span>
                 </button>
               </div>
             )}
@@ -722,11 +687,11 @@ export const OcrModal: React.FC<OcrModalProps> = ({
                     <Package className="w-7 h-7 text-amber-100" />
                   </div>
                   <h3 className="text-sm font-bold text-neutral-200">
-                    جاهز للقراءة الكاملة لأوراق الجرد (SAP Inventory Controller)
+                    جاهز لقراءة كامل الورقة بأي عدد من الأصناف (مدعوم بالخوارزميات المساعدة)
                   </h3>
                   <p className="text-xs text-neutral-400 max-w-md mx-auto leading-relaxed">
                     اضغط على <span className="text-amber-400 font-bold">التقاط من الكاميرا</span> أو{' '}
-                    <span className="text-amber-400 font-bold">رفع الورقة من الألبوم</span> لقراءة جميع الأصناف في الورقة (مثل 37 صنفاً بالكامل). أي نقص في الورقة يعطي تحذيراً فورياً لإعادة رفعها.
+                    <span className="text-amber-400 font-bold">رفع الورقة من الألبوم</span> لقراءة جميع الأصناف في الورقة بسرعة فائقة مع التصحيح التلقائي للأرقام الـ 10 والمواقع وعلامات <span className="text-emerald-400 font-bold">(✓)</span> و <span className="text-red-400 font-bold">(×)</span>.
                   </p>
                 </div>
               )
@@ -736,11 +701,9 @@ export const OcrModal: React.FC<OcrModalProps> = ({
           {/* Footer */}
           <div className="px-4 py-2.5 bg-[#231713] border-t border-[#3D271F] flex items-center justify-between text-xs">
             <span className="text-[11px] text-neutral-400">
-              {sheetValidation.isComplete
-                ? `✅ الورقة مكتملة القراءة (${extractedItems.length} صنف) وجاهزة للحفظ`
-                : extractedItems.length > 0
-                ? `⛔ تحذير: الورقة بها ${sheetValidation.totalIncomplete} سطر ناقص — يرجى إعادة رفع الورقة أو تصحيح النواقص`
-                : 'يُمنع حفظ أي ورقة ناقصة أو قراءة وهمية لضمان دقة العمل الميداني 100%'}
+              {extractedItems.length > 0
+                ? `✅ جاهز لحفظ (${extractedItems.length}) صنف من الورقة في قاعدة البيانات`
+                : 'خوارزميات القراءة المساعدة نشطة: قراءة سريعة ودقيقة لكافة أوراق الجرد'}
             </span>
             <button
               onClick={() => {

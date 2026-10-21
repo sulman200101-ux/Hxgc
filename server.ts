@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 dotenv.config();
 
@@ -33,10 +33,10 @@ function charToDigitMapper(raw: any, defaultValue: number = 1): number {
 
   let str = String(raw)
     .trim()
-    .replace(/[Oo]/g, '0')
+    .replace(/[OoQD]/g, '0')
     .replace(/[Il|!]/g, '1')
     .replace(/[Zz]/g, '2')
-    .replace(/[Ss]/g, '5')
+    .replace(/[Ss$]/g, '5')
     .replace(/[Bb]/g, '8')
     .replace(/[Gg]/g, '6')
     .replace(/[q]/g, '9');
@@ -49,15 +49,25 @@ function strict10DigitMaterialFilter(raw: any): string | null {
   if (!raw) return null;
   let cleaned = String(raw)
     .trim()
-    .replace(/[\[\]\(\)\{\}\=\|\&\~\\\/@\#\$\%\^\*\+\?\!\;\:\"\'\`<>_\s-]/g, '')
-    .replace(/[Oo]/g, '0')
-    .replace(/[Il|!]/g, '1');
+    .replace(/[OoQD]/g, '0')
+    .replace(/[Il|!]/g, '1')
+    .replace(/[Zz]/g, '2')
+    .replace(/[Ss$]/g, '5')
+    .replace(/[Gg]/g, '6')
+    .replace(/[Bb]/g, '8');
 
   const exact10 = cleaned.match(/(10\d{8})/);
-  if (exact10 && cleaned.length === 10) return exact10[1];
+  if (exact10) return exact10[1];
 
   const digits = cleaned.replace(/[^0-9]/g, '');
-  if (/^\d{10}$/.test(digits)) return digits;
+  if (/^\d{10}$/.test(digits)) {
+    if (/^[47]00\d{7}$/.test(digits)) return '1' + digits.slice(1);
+    return digits;
+  }
+  // ترميم الأرقام ذات الـ 9 خانات إذا طمس خط الجدول الرقم الأول (1) أو أحد أصفار البادئة (1000)
+  if (/^00\d{7}$/.test(digits)) return '1' + digits;
+  if (/^100\d{6}$/.test(digits)) return '1000' + digits.slice(3);
+
   return null;
 }
 
@@ -68,26 +78,43 @@ function dynamicLocationNormalizer(rawLoc: any): string {
     .toUpperCase()
     .replace(/عام/g, '')
     .replace(/موقع[:\s]*/g, '')
-    .replace(/^(002\s*02|0020|002|C006|M016|D04D|BIN|LOC|LOCATION|STORAGE[:\s]*)/gi, '')
+    .replace(/\b(002\s*02|0020|002|C006|M016|D04D|BIN|LOC|LOCATION|STORAGE\s*BIN)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
   if (!cleaned) return '';
 
-  // SAP Storage Bin compact format (e.g. N01B1, N01B2, N01BB1, N01BB2, N01C1, N01C2, N01D1, N01D2, N01FL1)
-  const compactMatch = cleaned.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{0,2})\b/);
+  // إصلاح بصري لرموز المواقع (NO1B2 -> N01B2, N01FLI -> N01FL1)
+  let sapFixed = cleaned
+    .replace(/\b([A-Z])[Oo](\d)/g, '$10$2')
+    .replace(/\b([A-Z]\d)[Oo]/g, '$10')
+    .replace(/\b([A-Z])[Il|](\d)/g, '$11$2')
+    .replace(/\b([A-Z]\d)[Il|]([A-Z])/g, '$11$2')
+    .replace(/([A-Z]{1,3})[Il|]\b/g, '$11')
+    .replace(/([A-Z]{1,3})[Oo]\b/g, '$10');
+
+  const splitSap = sapFixed.match(/^([A-Z]\d{2})\s+([A-Z]{1,3}\d{0,2})$/);
+  if (splitSap) {
+    sapFixed = `${splitSap[1]}${splitSap[2]}`;
+  }
+
+  const compactMatch = sapFixed.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{0,2})\b/);
   if (compactMatch && !['C006', 'M016', 'D04D'].includes(compactMatch[1])) {
     return compactMatch[1];
   }
 
-  const match3 = cleaned.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]+\s+[0-9A-Z]+)\b/);
+  const match3 = sapFixed.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]+\s+[0-9A-Z]+)\b/);
   if (match3) return match3[1].replace(/\s+/g, ' ').trim();
 
-  const match2 = cleaned.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]+)\b/);
+  const match2 = sapFixed.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]+)\b/);
   if (match2) return match2[1].replace(/\s+/g, ' ').trim();
 
-  if (/^[A-Z][A-Z0-9\s-]{1,14}$/i.test(cleaned) && !['C006', 'M016', 'D04D', 'EA', 'SET', 'PK', 'SH', 'CO', 'AY'].includes(cleaned)) {
-    return cleaned;
+  if (
+    /^[A-Z0-9][A-Z0-9\s\/._-]{1,18}$/i.test(sapFixed) &&
+    /[A-Z]/i.test(sapFixed) &&
+    !['C006', 'M016', 'D04D', 'EA', 'SET', 'PK', 'SH', 'CO', 'AY'].includes(sapFixed)
+  ) {
+    return sapFixed;
   }
 
   return '';
@@ -95,10 +122,19 @@ function dynamicLocationNormalizer(rawLoc: any): string {
 
 function detectMissingFromCheckMark(item: any): boolean {
   if (!item) return false;
-  if (item.is_missing === true || item.is_missing === 1) return true;
+  if (item.is_missing === true || item.is_missing === 1 || item.is_missing === 'true') return true;
   if (item.status === 'غير موجودة') return true;
   const check = String(item.check ?? item.check_mark ?? item.checkMark ?? '').trim().toUpperCase();
-  return check === 'X' || check === '×' || check === '✗' || check === '✘' || check === 'MISSING';
+  return (
+    check === 'X' ||
+    check === '×' ||
+    check === '✗' ||
+    check === '✘' ||
+    check === '✕' ||
+    check === '✖' ||
+    check === 'MISSING' ||
+    check === 'NOT FOUND'
+  );
 }
 
 app.post('/api/gemini/parse-table', async (req, res) => {
@@ -132,41 +168,49 @@ app.post('/api/gemini/parse-table', async (req, res) => {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const prompt = `You are an expert industrial AI vision system specialized in reading ASMO "SAP Inventory Controller" paper sheets (which typically contain up to 37 rows per sheet).
+    const prompt = `You are an expert industrial AI vision system specialized in reading ASMO "SAP Inventory Controller" spare parts sheets (in any orientation: landscape or rotated 90 degrees portrait).
 
-CRITICAL TABLE COLUMN RULES:
-The SAP Inventory Controller table has these columns from left to right:
-1. "#" (Row sequence number: 3 to 5 digits like 18195, 198, 247, 654, 1190, 653, 7832, 7831) -> Extract as "seq" ONLY. NEVER output "#" as "part_number"!
-2. "Material" (Part Number: ALWAYS a 10-digit number starting with 100, e.g. "1001523111", "1000029819", "1000036377", "1000082689", "1000082688", "1000986659", "1000986658") -> Extract the COMPLETE 10 digits as "part_number". If any row is cut off or its 10-digit Material is unreadable/incomplete, output the partial digits or "INCOMPLETE" so the system warns the user to re-capture the sheet!
-3. "Plant" (e.g. C006, M016, D04D) and "Area" (e.g. 002) -> Ignore. Do NOT confuse with Storage Bin.
-4. "Storage Bin" (Exact Location Code: e.g. "N01B1", "N01B2", "N01BB1", "N01BB2", "N01C1", "N01C2", "N01D1", "N01D2", "N01FL1", "N11C2", "N06C1") -> Extract the exact bin code for each row as "location". NEVER return "عام" or "General".
+TABLE COLUMNS (in order):
+1. "#" (Short sequence number: 1 to 5 digits like 198, 653, 654, 8428, 18195) -> Extract as "seq". NEVER put "#" in "part_number"!
+2. "Material" (Part Number: 10-digit number starting with 100, e.g. "1001523111", "1000029819", "1000082689", "1001023714") -> Extract the full 10 digits as "part_number". Even if a pen mark touches a digit, read the 10-digit number starting with 100 carefully.
+3. "Plant" (C006, M016, D04D) and "Area" (002) -> Ignore.
+4. "Storage Bin" (Exact Location Code: e.g. "N01B1", "N01B2", "N01BB1", "N01BB2", "N01C1", "N01C2", "N01D1", "N01D2", "N01FL1", "N11C2", "N06C1") -> Extract as "location". If a row belongs to the same bin group as the row above it, output that bin code. NEVER output "عام".
 5. "Bun" (Unit: EA, PK, AY, SET, SH, CO).
-6. "QTY" (Integer quantity: e.g. 2, 50, 4, 100, 10, 5, 1, 85, 131, 52, 20, 6, 3, 7, 9, 27, 8) -> Extract as integer "quantity".
+6. "QTY" (Integer quantity) -> Extract as integer "quantity".
 7. "Check" (Handwritten mark column):
-   - Inspect the handwritten mark in the "Check" column carefully for EVERY SINGLE ROW:
-   - If the row has a handwritten "X" / "×" / cross mark (indicating the part is NOT FOUND / missing, such as row #654 1000082689 in N01B2, row #5633 1000844521 in N01BB1, row #6452 1000933836 in N01BB1), set "check_mark": "X" and "is_missing": true.
-   - If the row has a handwritten checkmark "✓" or is normal, set "check_mark": "CHECK" and "is_missing": false.
-8. "Remark" (Handwritten notes in Remark column, e.g. "+90", "+3", "+96", "+5", "-7", "+10", "+1", "+2", "F1", "F2") -> Extract as "remark".
-9. "Material Description" (Full English description of the spare part, e.g. "GASKET PUMP CCR UNIT 1,2 &3 SEAL", "INSULATOR: FOR COLLET BODY") -> Extract as "description".
+   - If marked with handwritten cross "X" or "×" -> set "is_missing": true and "check_mark": "X".
+   - If marked with handwritten checkmark "✓", "✔", "/", or left blank -> set "is_missing": false and "check_mark": "CHECK". Never fail on messy handwriting in the Check column!
+8. "Remark" (Handwritten note like "+90", "+3", "+96", "-7", "F1", "F2") -> Extract as "remark".
+9. "Material Description" (English description) -> Extract as "description".
 
-STRICT FIELD-WORK MANDATE:
-- Extract EVERY SINGLE ROW from the very first row at the top to the very last row at the bottom (all 37 rows if the sheet has 37 rows). NEVER skip, merge, or truncate any row, even if two rows have similar descriptions or similar Material numbers in different bins!
-- If any visible row at the top or bottom is cut off or blurry, include it with "part_number": "INCOMPLETE_ROW" so the field worker receives a warning to re-photograph the sheet.
-- Return ONLY a valid JSON array of objects:
+MANDATE:
+- Extract EVERY SINGLE ITEM ROW on the sheet from top to bottom (whether the sheet has 5 rows, 24 rows, 36 rows, 37 rows, or more).
+- Ignore table headers, page footers, and blank margins.
+- Return ONLY a valid JSON array:
   [{"seq": 18195, "part_number": "1001523111", "location": "N01B1", "quantity": 2, "check_mark": "CHECK", "is_missing": false, "remark": "", "description": "GASKET PUMP CCR UNIT 1,2 &3 SEAL"}]`;
 
     const candidateModels = [
-      'gemini-3-flash-preview',
-      'gemini-3.1-flash-lite-preview',
-      'gemini-flash-latest',
+      { name: 'gemini-3-flash-preview', minimalThinking: true },
+      { name: 'gemini-3.5-flash', minimalThinking: false },
+      { name: 'gemini-3.6-flash', minimalThinking: false },
+      { name: 'gemini-flash-lite-latest', minimalThinking: false },
     ];
     let response: any = null;
     let lastError: any = null;
 
-    for (const model of candidateModels) {
+    for (const m of candidateModels) {
       try {
+        const configObj: any = {
+          responseMimeType: 'application/json',
+          maxOutputTokens: 8192,
+          temperature: 0.0,
+        };
+        if (m.minimalThinking) {
+          configObj.thinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
+        }
+
         response = await ai.models.generateContent({
-          model,
+          model: m.name,
           contents: {
             parts: [
               { text: prompt },
@@ -178,11 +222,7 @@ STRICT FIELD-WORK MANDATE:
               },
             ],
           },
-          config: {
-            responseMimeType: 'application/json',
-            maxOutputTokens: 8192,
-            temperature: 0.0,
-          },
+          config: configObj,
         });
 
         if (response && response.text) {
@@ -191,7 +231,7 @@ STRICT FIELD-WORK MANDATE:
       } catch (err: any) {
         lastError = err;
         const msg = String(err?.message || err);
-        console.warn(`Model ${model} notice: ${msg.slice(0, 120)}`);
+        console.warn(`Model ${m.name} notice: ${msg.slice(0, 120)}`);
       }
     }
 
@@ -235,17 +275,38 @@ STRICT FIELD-WORK MANDATE:
       ? parsed.inventory
       : Object.values(parsed).find(Array.isArray) || [];
 
+    // استنتاج الموقع الفعلي من السطور المجاورة إذا طمست علامة اليد خانة الموقع في سطر واحد
+    let lastValidLoc = '';
+    const preNormalized = rawItems.map((item) => {
+      const rawLoc = item.location ?? item.location_code ?? item.bin ?? item.storage_bin ?? item.storageBin ?? '';
+      let normLoc = dynamicLocationNormalizer(rawLoc);
+      if (normLoc) {
+        lastValidLoc = normLoc;
+      } else if (lastValidLoc) {
+        normLoc = lastValidLoc;
+      }
+      return { ...item, _normLocation: normLoc };
+    });
+
+    let nextValidLoc = '';
+    for (let i = preNormalized.length - 1; i >= 0; i--) {
+      if (preNormalized[i]._normLocation) {
+        nextValidLoc = preNormalized[i]._normLocation;
+      } else if (nextValidLoc) {
+        preNormalized[i]._normLocation = nextValidLoc;
+      }
+    }
+
     const validItems: any[] = [];
     const skippedRows: any[] = [];
 
-    rawItems.forEach((item, idx) => {
+    preNormalized.forEach((item, idx) => {
       const rawPart = String(
         item.part_number ?? item.partNumber ?? item.material ?? item.part ?? item.part_no ?? item['Part Number'] ?? ''
       ).trim();
 
       let finalPartNumber = strict10DigitMaterialFilter(rawPart);
-      const rawLoc = item.location ?? item.location_code ?? item.bin ?? item.storage_bin ?? item.storageBin ?? '';
-      const normLocation = dynamicLocationNormalizer(rawLoc);
+      const normLocation = item._normLocation || '';
       const rawQty = item.quantity ?? item.qty ?? item.total_qty ?? item.stock ?? 1;
       const normQuantity = charToDigitMapper(rawQty, 1);
       const isMissing = detectMissingFromCheckMark(item);
@@ -272,22 +333,22 @@ STRICT FIELD-WORK MANDATE:
           remark,
           description_en: desc,
         });
-      } else {
+      } else if (rawPart.replace(/[^0-9]/g, '').length > 0) {
         const cleanDigits = rawPart.replace(/[^0-9]/g, '');
-        let reason = 'بيانات السطر غير مكتملة — يرجى إعادة تصوير الورقة';
+        let reason = 'بيانات السطر غير مكتملة';
         if (!finalPartNumber) {
           reason =
             cleanDigits.length > 0 && cleanDigits.length <= 5
               ? `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام`
-              : `رقم القطعة (${rawPart || 'فارغ'}) ناقص ولا يتكون من 10 أرقام كاملة — أعد رفع الورقة`;
+              : `رقم القطعة (${rawPart || 'فارغ'}) ناقص ولا يتكون من 10 أرقام كاملة`;
         } else if (!normLocation) {
-          reason = `اسم الموقع غير محدد في عمود Storage Bin (يُمنع إدخال موقع عام)`;
+          reason = `اسم الموقع غير واضح في عمود Storage Bin`;
         }
 
         skippedRows.push({
           id: `skip-${idx + 1}`,
           row_number: idx + 1,
-          raw_text: `${rawPart || '---'} | ${rawLoc || '---'} | ${normQuantity} | ${isMissing ? '× غير موجودة' : '✓'} | ${desc}`,
+          raw_text: `${rawPart || '---'} | ${normLocation || '---'} | ${normQuantity} | ${isMissing ? '× غير موجودة' : '✓'} | ${desc}`,
           part_number: rawPart,
           location: normLocation,
           quantity: normQuantity,
@@ -322,7 +383,7 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
     res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-release.apk"');
     return res.sendFile(apkFilePath);
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.4.0/asmo-inventory-v1.4.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.5.0/asmo-inventory-v1.5.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);

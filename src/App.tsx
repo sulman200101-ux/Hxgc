@@ -551,7 +551,7 @@ export default function App() {
             <Camera className="w-4 h-4 text-[#FFD54F]" />
           </div>
           <span className="tracking-wide text-white drop-shadow">
-            التعرف الفائق على النصوص (37 صنفاً)
+            التعرف الفائق على النصوص (قراءة كامل الورقة)
           </span>
         </button>
       </div>
