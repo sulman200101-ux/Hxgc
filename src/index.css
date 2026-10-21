@@ -1,0 +1,15 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&family=Amiri:wght@400;700&family=Noto+Sans+Arabic:wght@400;600;700&family=Tajawal:wght@400;500;700;800;900&display=swap');
+
+body {
+  word-spacing: 2px;
+}
+
+.pdf-container, .pdf-root, .pdf-template {
+  font-family: 'Cairo', 'Tajawal', 'Noto Sans Arabic', 'Amiri', sans-serif !important;
+  direction: rtl !important;
+  text-align: right !important;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: normal !important;
+  word-spacing: 4px !important;
+}

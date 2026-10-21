@@ -1,0 +1,6 @@
+{
+  "name": "إدارة مخزون قطع الغيار - أسمو (ASMO)",
+  "description": "تطبيق جرد ومخزون قطع الغيار لشركة أسمو (ASMO) مع إدارة المواقع، إحصائيات المخزون، والتعرف الفائق على النصوص OCR.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
