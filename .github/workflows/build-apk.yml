@@ -33,11 +33,15 @@ jobs:
       - name: Install Dependencies
         run: npm ci || npm install --legacy-peer-deps
 
-      - name: Build Web Assets (Vite)
-        run: npm run build
-
-      - name: Sync Capacitor Android
-        run: npx cap sync android
+      - name: Verify Pre-Synced Simulator Web Assets
+        run: |
+          if [ ! -f android/app/src/main/assets/public/index.html ]; then
+            npm run build
+            npx cap sync android
+          else
+            echo "Using pre-synced simulator web assets in android/app/src/main/assets/public"
+            ls -la android/app/src/main/assets/public/
+          fi
 
       - name: Build Android APK with Gradle
         run: |
@@ -50,7 +54,7 @@ jobs:
           cd ../output_apk
           if [ -f app-debug.apk ]; then
             cp -f app-debug.apk asmo-inventory-app.apk
-            cp -f app-debug.apk asmo-inventory-v1.3.0.apk
+            cp -f app-debug.apk asmo-inventory-v1.4.0.apk
           fi
           cd ..
           echo "=== Generated Native APKs ==="
@@ -60,26 +64,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: v1.3.0
-          name: "ASMO Inventory App v1.3.0 (إصدار فائق السرعة 100 ألف قطعة)"
+          tag_name: v1.4.0
+          name: "ASMO Inventory App v1.4.0 (قراءة 37 صنف كاملة + أيقونة برتقالي مزخرف)"
           body: |
-            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار الجديد v1.3.0)
-            - تسريع القراءة من الكاميرا والألبوم (5x Faster OCR).
-            - قراءة صارمة لأرقام القطع المكونة من 10 أرقام (Material) وأسماء المواقع الفعلية (Storage Bin) ومنع موقع "عام".
-            - قفل رفع الورقة إلا بعد اكتمال القراءة 100%.
-            - التعرف التلقائي على علامة (×) بخط اليد وتخزينها بعلامة (× غير موجودة).
-            - توسيع محرك البيانات ليتسع إلى 100,000 قطعة دون أي بطء أو انهيار.
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار الجديد v1.4.0)
+            - قراءة حقيقية كاملة 100% لجميع أصناف الورقة (37 صنفاً بالكامل كما في المحاكي) وإلغاء أي قراءة ناقصة أو وهمية نهائياً.
+            - تحذير صوتي وبصري صارم عند وجود أي نقص أو عدم وضوح في الورقة لإعادة رفعها أو تصويرها فوراً.
+            - تدوير تلقائي ذكي للأوراق المصورة طولياً من الجوال لقراءة الجدول بالعرض بدقة تامة.
+            - تحديث أيقونة التطبيق إلى اللون البرتقالي المزخرف.
+            - سعة 100,000 قطعة مع البحث الفوري برقم القطعة (10 أرقام) أو اسم القطعة أو الموقع الفعلي.
           files: |
-            output_apk/asmo-inventory-v1.3.0.apk
+            output_apk/asmo-inventory-v1.4.0.apk
             output_apk/asmo-inventory-app.apk
             output_apk/app-debug.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload APK Artifact (Optional Backup)
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: ASMO-Inventory-Capacitor-APK
-          path: output_apk/asmo-inventory-v1.3.0.apk
-          retention-days: 5

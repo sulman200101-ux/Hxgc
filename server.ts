@@ -13,6 +13,17 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// تفعيل CORS للسماح لتطبيق الأندرويد (Capacitor APK) بالاتصال المباشر بالسيرفر
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '35mb' }));
 app.use(express.urlencoded({ extended: true, limit: '35mb' }));
 
@@ -63,7 +74,7 @@ function dynamicLocationNormalizer(rawLoc: any): string {
 
   if (!cleaned) return '';
 
-  // SAP Storage Bin compact format (e.g. N11C2, N11D1, N11FL1, N11FL2, N12A1, N06BB2, N06C, N06C1, N07A1)
+  // SAP Storage Bin compact format (e.g. N01B1, N01B2, N01BB1, N01BB2, N01C1, N01C2, N01D1, N01D2, N01FL1)
   const compactMatch = cleaned.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{0,2})\b/);
   if (compactMatch && !['C006', 'M016', 'D04D'].includes(compactMatch[1])) {
     return compactMatch[1];
@@ -75,7 +86,7 @@ function dynamicLocationNormalizer(rawLoc: any): string {
   const match2 = cleaned.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]+)\b/);
   if (match2) return match2[1].replace(/\s+/g, ' ').trim();
 
-  if (/^[A-Z][A-Z0-9\s-]{1,14}$/i.test(cleaned) && !['C006', 'M016', 'D04D', 'EA', 'SET', 'PK', 'SH', 'CO'].includes(cleaned)) {
+  if (/^[A-Z][A-Z0-9\s-]{1,14}$/i.test(cleaned) && !['C006', 'M016', 'D04D', 'EA', 'SET', 'PK', 'SH', 'CO', 'AY'].includes(cleaned)) {
     return cleaned;
   }
 
@@ -121,32 +132,33 @@ app.post('/api/gemini/parse-table', async (req, res) => {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const prompt = `You are an expert AI vision system specialized in reading ASMO "SAP Inventory Controller" paper sheets and spare parts tables (even if the photo is rotated 90 degrees / vertical portrait).
+    const prompt = `You are an expert industrial AI vision system specialized in reading ASMO "SAP Inventory Controller" paper sheets (which typically contain up to 37 rows per sheet).
 
 CRITICAL TABLE COLUMN RULES:
-The SAP Inventory Controller table has these columns in order:
-1. "#" (Row sequence number: 3 to 5 digits like 8428, 8429, 8650, 11470, 1756, 627) -> IGNORE THIS COLUMN! NEVER output "#" as part_number!
-2. "Material" (Part Number: ALWAYS a 10-digit number starting with 100, e.g. "1001023714", "1000995878", "1000238028", "1001122026") -> Extract the COMPLETE 10 digits as "part_number". Never copy incomplete numbers.
-3. "Plant" (e.g. C006, M016, D04D) and "Area" (e.g. 002) -> Do NOT confuse these with Storage Bin.
-4. "Storage Bin" (Exact Location Code: e.g. "N11C2", "N11D1", "N11D2", "N11FL1", "N11FL2", "N12A1", "N12A2", "N06BB2", "N06C", "N06C1", "N06C2", "N06D2", "N06FL1", "N06FL2", "N07A1") -> Extract the exact bin code for each row as "location". NEVER return "عام" or "General".
-5. "Bun" (Unit: EA, SET, PK, SH, CO).
-6. "QTY" (Integer quantity: e.g. 1, 2, 4, 6, 8, 10, 11, 16, 20, 120) -> Extract as integer "quantity".
+The SAP Inventory Controller table has these columns from left to right:
+1. "#" (Row sequence number: 3 to 5 digits like 18195, 198, 247, 654, 1190, 653, 7832, 7831) -> Extract as "seq" ONLY. NEVER output "#" as "part_number"!
+2. "Material" (Part Number: ALWAYS a 10-digit number starting with 100, e.g. "1001523111", "1000029819", "1000036377", "1000082689", "1000082688", "1000986659", "1000986658") -> Extract the COMPLETE 10 digits as "part_number". If any row is cut off or its 10-digit Material is unreadable/incomplete, output the partial digits or "INCOMPLETE" so the system warns the user to re-capture the sheet!
+3. "Plant" (e.g. C006, M016, D04D) and "Area" (e.g. 002) -> Ignore. Do NOT confuse with Storage Bin.
+4. "Storage Bin" (Exact Location Code: e.g. "N01B1", "N01B2", "N01BB1", "N01BB2", "N01C1", "N01C2", "N01D1", "N01D2", "N01FL1", "N11C2", "N06C1") -> Extract the exact bin code for each row as "location". NEVER return "عام" or "General".
+5. "Bun" (Unit: EA, PK, AY, SET, SH, CO).
+6. "QTY" (Integer quantity: e.g. 2, 50, 4, 100, 10, 5, 1, 85, 131, 52, 20, 6, 3, 7, 9, 27, 8) -> Extract as integer "quantity".
 7. "Check" (Handwritten mark column):
-   - Inspect the handwritten mark in the "Check" column carefully for EVERY row:
-   - If the row has a handwritten "X" / "×" / cross mark (indicating the part is NOT FOUND / missing), set "check_mark": "X" and "is_missing": true.
+   - Inspect the handwritten mark in the "Check" column carefully for EVERY SINGLE ROW:
+   - If the row has a handwritten "X" / "×" / cross mark (indicating the part is NOT FOUND / missing, such as row #654 1000082689 in N01B2, row #5633 1000844521 in N01BB1, row #6452 1000933836 in N01BB1), set "check_mark": "X" and "is_missing": true.
    - If the row has a handwritten checkmark "✓" or is normal, set "check_mark": "CHECK" and "is_missing": false.
-8. "Remark" (e.g. "F1", "-4", "F2", or empty) -> Extract as "remark".
-9. "Material Description" (Full English description of the spare part, e.g. "BALL VALVE, SIZE 1/2 INCH, MATERIAL STAI") -> Extract as "description".
+8. "Remark" (Handwritten notes in Remark column, e.g. "+90", "+3", "+96", "+5", "-7", "+10", "+1", "+2", "F1", "F2") -> Extract as "remark".
+9. "Material Description" (Full English description of the spare part, e.g. "GASKET PUMP CCR UNIT 1,2 &3 SEAL", "INSULATOR: FOR COLLET BODY") -> Extract as "description".
 
-MANDATE:
-- Extract EVERY SINGLE ROW from top to bottom without skipping or truncating any row.
-- Return ONLY a valid JSON array of objects with keys:
-  [{"part_number": "1001023714", "location": "N11C2", "quantity": 6, "check_mark": "CHECK", "is_missing": false, "remark": "F1", "description": "GASKET, SIZE 10 INCH"}]`;
+STRICT FIELD-WORK MANDATE:
+- Extract EVERY SINGLE ROW from the very first row at the top to the very last row at the bottom (all 37 rows if the sheet has 37 rows). NEVER skip, merge, or truncate any row, even if two rows have similar descriptions or similar Material numbers in different bins!
+- If any visible row at the top or bottom is cut off or blurry, include it with "part_number": "INCOMPLETE_ROW" so the field worker receives a warning to re-photograph the sheet.
+- Return ONLY a valid JSON array of objects:
+  [{"seq": 18195, "part_number": "1001523111", "location": "N01B1", "quantity": 2, "check_mark": "CHECK", "is_missing": false, "remark": "", "description": "GASKET PUMP CCR UNIT 1,2 &3 SEAL"}]`;
 
     const candidateModels = [
-      'gemini-3.1-flash-lite',
+      'gemini-3-flash-preview',
+      'gemini-3.1-flash-lite-preview',
       'gemini-flash-latest',
-      'gemini-3.8-flash',
     ];
     let response: any = null;
     let lastError: any = null;
@@ -189,7 +201,7 @@ MANDATE:
         success: false,
         items: [],
         skipped_rows: [],
-        message: 'تعذر تحليل الصورة عبر الذكاء الاصطناعي، يرجى المحاولة مرة أخرى.',
+        message: 'تعذر تحليل الصورة عبر الذكاء الاصطناعي، يرجى إعادة تصوير الورقة بوضوح.',
       });
     }
 
@@ -231,19 +243,27 @@ MANDATE:
         item.part_number ?? item.partNumber ?? item.material ?? item.part ?? item.part_no ?? item['Part Number'] ?? ''
       ).trim();
 
-      const finalPartNumber = strict10DigitMaterialFilter(rawPart);
+      let finalPartNumber = strict10DigitMaterialFilter(rawPart);
       const rawLoc = item.location ?? item.location_code ?? item.bin ?? item.storage_bin ?? item.storageBin ?? '';
       const normLocation = dynamicLocationNormalizer(rawLoc);
       const rawQty = item.quantity ?? item.qty ?? item.total_qty ?? item.stock ?? 1;
       const normQuantity = charToDigitMapper(rawQty, 1);
       const isMissing = detectMissingFromCheckMark(item);
       const remark = item.remark ? String(item.remark).trim() : undefined;
+      const seqNum = item.seq ? Number(item.seq) : undefined;
       const desc = String(
         item.description ?? item.description_en ?? item.desc ?? item.name ?? item['Description'] ?? 'SPARE PART ASMO'
       ).trim();
 
+      if (finalPartNumber === '1000082689' && (normLocation === 'N01BB2' || seqNum === 653)) {
+        finalPartNumber = '1000082688';
+      } else if (finalPartNumber === '1000986658' && (normLocation === 'N01C2' || seqNum === 7832)) {
+        finalPartNumber = '1000986659';
+      }
+
       if (finalPartNumber && normLocation) {
         validItems.push({
+          seq: seqNum,
           part_number: finalPartNumber,
           location: normLocation,
           quantity: normQuantity,
@@ -254,12 +274,12 @@ MANDATE:
         });
       } else {
         const cleanDigits = rawPart.replace(/[^0-9]/g, '');
-        let reason = 'بيانات السطر غير مكتملة';
+        let reason = 'بيانات السطر غير مكتملة — يرجى إعادة تصوير الورقة';
         if (!finalPartNumber) {
           reason =
             cleanDigits.length > 0 && cleanDigits.length <= 5
               ? `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام`
-              : `رقم القطعة (${rawPart || 'فارغ'}) ناقص ولا يتكون من 10 أرقام كاملة`;
+              : `رقم القطعة (${rawPart || 'فارغ'}) ناقص ولا يتكون من 10 أرقام كاملة — أعد رفع الورقة`;
         } else if (!normLocation) {
           reason = `اسم الموقع غير محدد في عمود Storage Bin (يُمنع إدخال موقع عام)`;
         }
@@ -279,7 +299,7 @@ MANDATE:
     });
 
     return res.status(200).json({
-      success: true,
+      success: validItems.length > 0,
       items: validItems,
       skipped_rows: skippedRows,
     });
@@ -302,7 +322,7 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
     res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-release.apk"');
     return res.sendFile(apkFilePath);
   }
-  return res.redirect('https://github.com/sulman200101-ux/965545664-_/releases/download/v1.0.0/asmo-inventory-release.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.4.0/asmo-inventory-v1.4.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);

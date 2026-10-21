@@ -541,17 +541,17 @@ export default function App() {
         )}
       </main>
 
-      {/* الزر البرتقالي العائم أسفل الشاشة لفتح نافذة الكاميرا والألبوم (Gemini Vision) */}
+      {/* الزر البرتقالي المزخرف العائم أسفل الشاشة لفتح نافذة الكاميرا والألبوم (Gemini Vision) */}
       <div className="fixed bottom-6 inset-x-0 flex justify-center z-40 pointer-events-none">
         <button
           onClick={() => setIsOcrOpen(true)}
-          className="pointer-events-auto px-6 py-3.5 rounded-full bg-gradient-to-r from-amber-600 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-400 text-neutral-950 font-black text-sm sm:text-base flex items-center gap-2.5 shadow-2xl shadow-amber-950/80 border-2 border-amber-300/40 active:scale-95 transition-all cursor-pointer group"
+          className="pointer-events-auto px-6 py-3.5 rounded-full bg-gradient-to-r from-[#FF6D00] via-[#FF8F00] to-[#E65100] hover:from-[#FF8500] hover:to-[#FF6D00] text-white font-black text-sm sm:text-base flex items-center gap-3 shadow-2xl shadow-orange-950/90 border-2 border-[#FFD54F] active:scale-95 transition-all cursor-pointer group relative overflow-hidden"
         >
-          <div className="w-8 h-8 rounded-full bg-neutral-950 text-amber-400 flex items-center justify-center group-hover:scale-110 transition-transform">
-            <Camera className="w-4 h-4" />
+          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#3E1C0A] to-[#1F0D05] border border-[#FFB74D] text-[#FFB74D] flex items-center justify-center group-hover:scale-110 transition-transform relative">
+            <Camera className="w-4 h-4 text-[#FFD54F]" />
           </div>
-          <span className="tracking-wide text-neutral-950 drop-shadow-sm">
-            التعرف الفائق على النصوص
+          <span className="tracking-wide text-white drop-shadow">
+            التعرف الفائق على النصوص (37 صنفاً)
           </span>
         </button>
       </div>

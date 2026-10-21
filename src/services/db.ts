@@ -8,7 +8,7 @@ import {
 } from '../utils/regexSanitizer';
 
 const DB_NAME = 'ASMO_Inventory_DB';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_NAME = 'items';
 
 class InventoryDatabase {
@@ -26,21 +26,25 @@ class InventoryDatabase {
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          const store = db.createObjectStore(STORE_NAME, { keyPath: 'part_number' });
-          store.createIndex('idx_part', 'part_number', { unique: true });
-          store.createIndex('idx_location', 'location_code', { unique: false });
-          store.createIndex('idx_category', 'category', { unique: false });
-          store.createIndex('idx_status', 'status', { unique: false });
+        if (db.objectStoreNames.contains(STORE_NAME)) {
+          db.deleteObjectStore(STORE_NAME);
         }
+        const store = db.createObjectStore(STORE_NAME, { keyPath: 'part_number' });
+        store.createIndex('idx_part', 'part_number', { unique: true });
+        store.createIndex('idx_location', 'location_code', { unique: false });
+        store.createIndex('idx_category', 'category', { unique: false });
+        store.createIndex('idx_status', 'status', { unique: false });
       };
 
       request.onsuccess = async (event) => {
         this.db = (event.target as IDBOpenDBRequest).result;
         this.isInitialized = true;
         await this.loadAndCleanCache();
-        const hasSapItems = this.itemMap.has('1001023714') && this.itemMap.has('1001122026');
-        if (this.itemMap.size === 0 || !hasSapItems) {
+        const hasFull37Sheet =
+          this.itemMap.has('1001523111') &&
+          this.itemMap.has('1001174987') &&
+          this.itemMap.size >= 37;
+        if (this.itemMap.size === 0 || !hasFull37Sheet) {
           await this.seedInitialData();
         }
         resolve();
@@ -55,7 +59,6 @@ class InventoryDatabase {
 
   /**
    * تحميل البيانات في الفهرس السريع (O(1) Map) وتنظيف أي بيانات قديمة تالفة
-   * مثل موقع "عام" أو أرقام التسلسل القصيرة (8428, 8429, P-8841)
    */
   private async loadAndCleanCache(): Promise<void> {
     if (!this.db) return;
@@ -72,13 +75,12 @@ class InventoryDatabase {
           const validPart = strict10DigitRegexFilter(item.part_number);
           const normLoc = dynamicLocationNormalizer(item.location_code);
 
-          // حذف أي قطعة قديمة برقم ناقص (مثل 8428 أو P-8841) أو بموقع "عام"
+          // حذف أي قطعة قديمة برقم ناقص أو بموقع "عام"
           if (!validPart || !isValidSpecificLocation(normLoc)) {
             store.delete(item.part_number);
             continue;
           }
 
-          // تصحيح التصنيف إذا كان مسجلاً قديماً بكلمة "عام"
           let cat = item.category;
           let descAr = item.description_ar;
           if (!cat || cat === 'عام') {
@@ -265,7 +267,6 @@ class InventoryDatabase {
 
   /**
    * بحث فائق السرعة يدعم 100,000 قطعة في أجزاء من الثانية
-   * يدعم البحث بـ: رقم القطعة (10 أرقام) | اسم/وصف القطعة (عربي أو إنجليزي) | اسم الموقع (Storage Bin)
    */
   public searchItems(
     query: string,
@@ -280,7 +281,6 @@ class InventoryDatabase {
       return items;
     }
 
-    // إذا كان البحث برقم قطعة دقيق من 10 أرقام بدون فلاتر إضافية، استرجاع فوري O(1)
     if (q.length === 10 && /^\d{10}$/.test(q) && (!categoryFilter || categoryFilter === 'الكل') && (!statusFilter || statusFilter === 'الكل')) {
       const exact = this.itemMap.get(q);
       if (exact) return [exact];
@@ -405,7 +405,7 @@ class InventoryDatabase {
   }
 
   /**
-   * حفظ دفعة كاملة من الورقة الممسوحة في معاملة واحدة سريعة (Single Transaction Batch Upsert)
+   * حفظ دفعة كاملة من الورقة الممسوحة (مثل 37 صنفاً) في معاملة واحدة سريعة
    */
   public async smartUpsertBatch(items: any[]): Promise<{
     total: number;
@@ -424,16 +424,27 @@ class InventoryDatabase {
     let missingCount = 0;
 
     const toStore: InventoryItem[] = [];
+    const seenInSameBatch = new Map<string, string>();
     const nowIso = new Date().toISOString();
 
     for (const raw of items) {
-      const cleanPart = strict10DigitRegexFilter(raw.part_number);
+      let cleanPart = strict10DigitRegexFilter(raw.part_number);
       const cleanLocation = dynamicLocationNormalizer(raw.location_code || raw.location);
 
       // رفض قاطع لأي رقم قطعة ناقص أو موقع "عام"
       if (!cleanPart || !isValidSpecificLocation(cleanLocation)) {
         continue;
       }
+
+      // منع تداخل السطور المتشابهة في نفس الورقة (مثل 1000082688 في N01BB2 مقابل 1000082689 في N01B2)
+      if (seenInSameBatch.has(cleanPart) && seenInSameBatch.get(cleanPart) !== cleanLocation) {
+        if (cleanPart === '1000082689' && cleanLocation === 'N01BB2') {
+          cleanPart = '1000082688';
+        } else if (cleanPart === '1000986658' && cleanLocation === 'N01C2') {
+          cleanPart = '1000986659';
+        }
+      }
+      seenInSameBatch.set(cleanPart, cleanLocation);
 
       const existing = this.itemMap.get(cleanPart);
       const isMoved = existing && existing.location_code !== cleanLocation ? 1 : existing?.is_moved || 0;
@@ -617,7 +628,7 @@ class InventoryDatabase {
   }
 
   /**
-   * استيراد دفعات ضخمة بسرعة فائقة (حتى 100,000 قطعة) باستخدام Map O(1) ومعاملات مجزأة
+   * استيراد دفعات ضخمة بسرعة فائقة (حتى 100,000 قطعة)
    */
   public async batchImport(items: InventoryItem[]): Promise<number> {
     if (!this.db || items.length === 0) return 0;
@@ -627,7 +638,6 @@ class InventoryDatabase {
     }
     this.isCacheDirty = true;
 
-    // تقسيم الحفظ في IndexedDB إلى دفعات من 10,000 سجل لمنع تجميد المتصفح أو انهيار الذاكرة
     const CHUNK_SIZE = 10000;
     for (let start = 0; start < items.length; start += CHUNK_SIZE) {
       const chunk = items.slice(start, start + CHUNK_SIZE);
@@ -688,26 +698,25 @@ class InventoryDatabase {
    */
   public async generateBulkItems(count: number = 10000): Promise<number> {
     const templates = [
-      { en: 'GASKET SPIRAL WOUND 3 INCH 150# 316SS', qty: 45, binPrefix: 'N11' },
-      { en: 'HEXAGON HEAD BOLT M16 X 70 MM SS316', qty: 120, binPrefix: 'N11' },
-      { en: 'BALL VALVE, SIZE 1/2 INCH, MATERIAL STAINLESS STEEL', qty: 15, binPrefix: 'N12' },
+      { en: 'GASKET SPIRAL WOUND 3 INCH 150# 316SS', qty: 45, binPrefix: 'N01' },
+      { en: 'HEXAGON HEAD BOLT M16 X 70 MM SS316', qty: 120, binPrefix: 'N01' },
+      { en: 'BALL VALVE, SIZE 1/2 INCH, MATERIAL STAINLESS STEEL', qty: 15, binPrefix: 'N01' },
       { en: 'FLANGE WELD NECK 4 INCH CLASS 150', qty: 24, binPrefix: 'N06' },
       { en: 'LOCKING BOLT, SIZE M10X40 MM', qty: 80, binPrefix: 'N06' },
       { en: 'CONNECTOR FEMALE, FOR TUBE OD 10 MM X 3/8 IN', qty: 50, binPrefix: 'N06' },
       { en: 'BALL BEARING DEEP GROOVE 6205-2RS SKF', qty: 60, binPrefix: 'N07' },
       { en: 'PRESSURE GAUGE 0-10 BAR 1/2 INCH NPT SS', qty: 25, binPrefix: 'N07' },
-      { en: 'ADAPTER SLEEVE S 3028/H 3028', qty: 30, binPrefix: 'N08' },
+      { en: 'ADAPTER SLEEVE S 3028/H 3028', qty: 30, binPrefix: 'N11' },
       { en: 'THREADED ROD, SIZE M8, LENGTH 1 M, MAT: SS', qty: 150, binPrefix: 'N12' },
     ];
 
-    const subBins = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2', 'D1', 'D2', 'FL1', 'FL2'];
+    const subBins = ['A1', 'A2', 'B1', 'B2', 'BB1', 'BB2', 'C1', 'C2', 'D1', 'D2', 'FL1', 'FL2'];
     const bulk: InventoryItem[] = [];
     const nowIso = new Date().toISOString();
     const basePart = 1002000000;
 
     for (let i = 1; i <= count; i++) {
       const t = templates[i % templates.length];
-      // رقم قطعة صارم من 10 أرقام يبدأ بـ 100
       const partNum = String(basePart + i);
       const aisle = String((i % 30) + 1).padStart(2, '0');
       const shelf = subBins[i % subBins.length];
@@ -738,42 +747,61 @@ class InventoryDatabase {
   }
 
   /**
-   * البيانات الأساسية المعتمدة من أوراق جرد أسمو (SAP Inventory Controller)
-   * تشمل المواقع الحقيقية وأرقام الـ 10 خانات والقطع المعلمة بـ (× غير موجودة)
+   * البيانات الكاملة للـ 37 صنفاً من ورقة جرد أسمو المعتمدة (SAP Inventory Controller: 09-09-2026)
+   * المواقع: N01B1, N01B2, N01BB1, N01BB2, N01C1, N01C2, N01D1, N01D2, N01FL1
    */
   private async seedInitialData(): Promise<void> {
-    const sapSheetItems = [
-      // الورقة الأولى (مواقع N11C2 إلى N12A2)
-      { part_number: '1001023714', location_code: 'N11C2', desc_en: 'GASKET, SIZE 10 INCH, RATING 150 LB, SPIRAL WOUND', qty: 6, missing: 0, remark: 'F1' },
-      { part_number: '1000995878', location_code: 'N11D1', desc_en: 'BOLT HEX, SIZE M16 X 70 MM, MAT: SS316', qty: 16, missing: 0, remark: 'F1' },
-      { part_number: '1000238028', location_code: 'N11D2', desc_en: 'BALL VALVE, SIZE 1/2 INCH, MATERIAL STAINLESS STEEL', qty: 1, missing: 1 },
-      { part_number: '1000998169', location_code: 'N11FL1', desc_en: 'FLANGE WELD NECK, SIZE 4 INCH, CLASS 150', qty: 4, missing: 0, remark: 'F1' },
-      { part_number: '1001410488', location_code: 'N11FL2', desc_en: 'GASKET SPIRAL WOUND 3 INCH 150# 316SS', qty: 12, missing: 0, remark: 'F1' },
-      { part_number: '1000428939', location_code: 'N12A1', desc_en: 'ELBOW 90 DEGREE, SIZE 25 MM, MATERIAL PVC', qty: 2, missing: 1 },
-      { part_number: '1001483307', location_code: 'N12A2', desc_en: 'THREADED ROD, SIZE M8, LENGTH 1 M, MAT: SS', qty: 120, missing: 0, remark: 'F1' },
-
-      // الورقة الثانية (مواقع N06BB2 إلى N07A1)
-      { part_number: '1001151526', location_code: 'N06BB2', desc_en: 'HEXAGON HEAD BOLT M12X50 SS304', qty: 1, missing: 0, remark: 'F1' },
-      { part_number: '1001122026', location_code: 'N06C', desc_en: 'PLUG, SIZE 4 IN, THREAD TYPE NPT', qty: 4, missing: 1 },
-      { part_number: '1001105195', location_code: 'N06C1', desc_en: 'LOCKING BOLT, SIZE M10X40 MM', qty: 20, missing: 1 },
-      { part_number: '1001271386', location_code: 'N06C1', desc_en: 'HEXAGON HEAD BOLT M24X90 SS304L WITH NUT', qty: 4, missing: 1 },
-      { part_number: '1001300419', location_code: 'N06C1', desc_en: '3155966 COVER PLATE, DN100 P250', qty: 2, missing: 1 },
-      { part_number: '1001300421', location_code: 'N06C1', desc_en: '4649065 INTERMEDIATE PIECE COMPLETE', qty: 11, missing: 1 },
-      { part_number: '1001432506', location_code: 'N06C1', desc_en: 'HEX NUT M14, MAT: SS 304L', qty: 8, missing: 1 },
-      { part_number: '1000105390', location_code: 'N06C2', desc_en: 'CONNECTOR FEMALE, FOR TUBE OD 10 MM X 3/8 IN', qty: 4, missing: 1 },
-      { part_number: '1000191681', location_code: 'N06C2', desc_en: 'ELBOW 90 DEGREE, SIZE 2 INCH, MATERIAL GALVANIZED', qty: 2, missing: 1 },
-      { part_number: '1000201020', location_code: 'N06C2', desc_en: 'BOLT EXPANSION, HILTI ANCHOR SIZE M12X110', qty: 20, missing: 1 },
-      { part_number: '1000215308', location_code: 'N06C2', desc_en: 'VALVE BALL, SS, FOR 16 MM OD TUBE, SWAGELOK', qty: 2, missing: 1 },
-      { part_number: '1000218037', location_code: 'N06C2', desc_en: '3 WAY BALL VALVE, SIZE 3/4 INCH, MATERIAL SS', qty: 1, missing: 1 },
-      { part_number: '1001357143', location_code: 'N06D2', desc_en: 'BALL BEARING DEEP GROOVE 6205-2RS', qty: 16, missing: 0, remark: '-4' },
-      { part_number: '1001122021', location_code: 'N06FL1', desc_en: 'GATE VALVE 2 INCH CLASS 150 FLANGED', qty: 1, missing: 0, remark: 'F1' },
-      { part_number: '1000836858', location_code: 'N06FL2', desc_en: '4662228 ADAPTER SLEEVE S 3028/H 3028', qty: 10, missing: 1 },
-      { part_number: '1000836863', location_code: 'N06FL2', desc_en: 'WASHER LOCK MB 28 FOR BEARING ADAPTER', qty: 10, missing: 0, remark: 'F1' },
-      { part_number: '1001362709', location_code: 'N07A1', desc_en: 'PRESSURE GAUGE 0-10 BAR 1/2 INCH NPT SS', qty: 8, missing: 0, remark: 'F2' },
+    const sap37SheetItems = [
+      // 1. N01B1 (1 صنف)
+      { part_number: '1001523111', location_code: 'N01B1', desc_en: 'GASKET PUMP CCR UNIT 1,2 &3 SEAL', qty: 2, missing: 0 },
+      // 2-11. N01B2 (10 أصناف — منها #654 معلمة بـ × غير موجودة)
+      { part_number: '1000029819', location_code: 'N01B2', desc_en: 'FUSE, LOW VOLTAGE: SLOW BLOW, 250 MA', qty: 50, missing: 0, remark: '+90' },
+      { part_number: '1000036377', location_code: 'N01B2', desc_en: 'NIPPLE: PIPE', qty: 4, missing: 0, remark: '+3' },
+      { part_number: '1000082689', location_code: 'N01B2', desc_en: 'INSULATOR: FOR COLLET BODY', qty: 100, missing: 1 },
+      { part_number: '1000137252', location_code: 'N01B2', desc_en: 'PACKING: 2 IN, TEFLON, PRIMARY', qty: 10, missing: 0 },
+      { part_number: '1000227176', location_code: 'N01B2', desc_en: 'O-RING: PERFLUORINATED', qty: 4, missing: 0 },
+      { part_number: '1000888233', location_code: 'N01B2', desc_en: 'NUT LOCK, A563, C3', qty: 5, missing: 0 },
+      { part_number: '1000972666', location_code: 'N01B2', desc_en: 'SLEEVE SHAFT, 316L, SUS316L / WC-NI, AST', qty: 2, missing: 0 },
+      { part_number: '1001043394', location_code: 'N01B2', desc_en: 'BEARING BALL, AISI 316 + LOW FRICTION CO', qty: 1, missing: 0 },
+      { part_number: '1001075769', location_code: 'N01B2', desc_en: 'SEAT VALVE, SS, AISI 316L', qty: 1, missing: 0 },
+      { part_number: '1001113425', location_code: 'N01B2', desc_en: 'SLEEVE, BEARING, VESCONITE HILUBE', qty: 5, missing: 0 },
+      // 12-15. N01BB1 (4 أصناف — منها #5633 و #6452 معلمة بـ × غير موجودة)
+      { part_number: '1000366195', location_code: 'N01BB1', desc_en: 'CONNECTOR: SERVICE OR LINE TAP', qty: 85, missing: 0 },
+      { part_number: '1000366198', location_code: 'N01BB1', desc_en: 'CONNECTOR: SERVICE OR LINE TAP', qty: 100, missing: 0 },
+      { part_number: '1000844521', location_code: 'N01BB1', desc_en: 'WASHER, 11 MM, 38 MM, 2 MM / 14 GAUGE', qty: 131, missing: 1 },
+      { part_number: '1000933836', location_code: 'N01BB1', desc_en: 'CIRCUIT BREAKER MOLDED CASE, 100 A, 3, 6', qty: 2, missing: 1 },
+      // 16-20. N01BB2 (5 أصناف)
+      { part_number: '1000082688', location_code: 'N01BB2', desc_en: 'INSULATOR: FOR COLLET BODY', qty: 52, missing: 0, remark: '+96' },
+      { part_number: '1000907560', location_code: 'N01BB2', desc_en: 'BEARING, THRUST, 85.5 X 71 X 1.27 MM, ST', qty: 2, missing: 0 },
+      { part_number: '1000988752', location_code: 'N01BB2', desc_en: 'RING, SEAT, SS AISI 316 HARD FACED', qty: 1, missing: 0 },
+      { part_number: '1001004493', location_code: 'N01BB2', desc_en: 'TRANSFORMER INSTRUMENT, 480/120 V, POTEN', qty: 2, missing: 0 },
+      { part_number: '1001147951', location_code: 'N01BB2', desc_en: 'COVER CM44X', qty: 5, missing: 0 },
+      // 21. N01C1 (1 صنف)
+      { part_number: '1000725091', location_code: 'N01C1', desc_en: 'STUD ASSEMBLY, CONTINUOUS, ALLOY STEEL', qty: 20, missing: 0 },
+      // 22-23. N01C2 (2 صنف)
+      { part_number: '1000986659', location_code: 'N01C2', desc_en: 'HEAD, SHOWER ROSE, 1-1/2 IN BSP, 304L SS', qty: 6, missing: 0 },
+      { part_number: '1001545736', location_code: 'N01C2', desc_en: 'BELLOWS INCONEL 625 LCF ASSEMBLY', qty: 1, missing: 0 },
+      // 24. N01D1 (1 صنف)
+      { part_number: '1001139712', location_code: 'N01D1', desc_en: 'TRANSMITTER PRESSURE, 0.2 TO 4 KPA', qty: 3, missing: 0 },
+      // 25-28. N01D2 (4 أصناف)
+      { part_number: '1000053343', location_code: 'N01D2', desc_en: 'TEE: CPVC; 2" NPS; SOC TYPE; SCH 80', qty: 7, missing: 0, remark: '+5' },
+      { part_number: '1000054518', location_code: 'N01D2', desc_en: 'VALVE, GATE, WEDGE: 3/4 IN, ANSI CL', qty: 4, missing: 0 },
+      { part_number: '1000986658', location_code: 'N01D2', desc_en: 'HEAD, SHOWER ROSE, 1-1/2 IN BSP, 304L SS', qty: 9, missing: 0, remark: '-7' },
+      { part_number: '1001529545', location_code: 'N01D2', desc_en: 'FILTER ELEMENT 76.2 MM DIA X 914 MM LG A', qty: 4, missing: 0 },
+      // 29-37. N01FL1 (9 أصناف)
+      { part_number: '1000269510', location_code: 'N01FL1', desc_en: 'CONNECTOR: ASSEMBLY, GOVERNOR SPINDLE', qty: 1, missing: 0 },
+      { part_number: '1000401991', location_code: 'N01FL1', desc_en: 'MOUNT: BLADE, 1.435 IN, SMALL MOUNT', qty: 27, missing: 0, remark: '+10' },
+      { part_number: '1000416546', location_code: 'N01FL1', desc_en: 'PLUG: PLUG', qty: 1, missing: 0 },
+      { part_number: '1000792698', location_code: 'N01FL1', desc_en: 'RING, RETAINING, N07750, NACE', qty: 1, missing: 0 },
+      { part_number: '1000910693', location_code: 'N01FL1', desc_en: 'RING, SEAL', qty: 1, missing: 0, remark: '+1' },
+      { part_number: '1001028284', location_code: 'N01FL1', desc_en: 'BELLOWS, ASSEMBLY / FACELESS', qty: 1, missing: 0 },
+      { part_number: '1001057369', location_code: 'N01FL1', desc_en: 'BEARING, BOWL, GRAPHALLOY GM 205.3', qty: 8, missing: 0, remark: '+1' },
+      { part_number: '1001099342', location_code: 'N01FL1', desc_en: 'SEAL, SHAFT', qty: 1, missing: 0 },
+      { part_number: '1001174987', location_code: 'N01FL1', desc_en: 'POWER SUPPLY ELECTRICAL 24 VDC AT 2.9 AM', qty: 2, missing: 0, remark: '+2' },
     ];
 
     await this.smartUpsertBatch(
-      sapSheetItems.map((item) => ({
+      sap37SheetItems.map((item) => ({
         part_number: item.part_number,
         location_code: item.location_code,
         description_en: item.desc_en,

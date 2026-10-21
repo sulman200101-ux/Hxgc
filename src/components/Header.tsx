@@ -49,15 +49,23 @@ export const Header: React.FC<HeaderProps> = ({
           {/* الشعار والعنوان */}
           <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-start">
             <div className="flex items-center gap-2.5">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#D97706] to-[#92400E] flex items-center justify-center shadow-md shadow-amber-950/50 border border-amber-500/30">
-                <span className="text-white font-black text-lg tracking-wider">A</span>
+              <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#FF7A00] via-[#E65100] to-[#9E2A00] flex items-center justify-center shadow-lg shadow-orange-950/80 border-2 border-[#FFB74D] relative overflow-hidden">
+                <svg className="absolute inset-0 w-full h-full opacity-35 pointer-events-none" viewBox="0 0 44 44" fill="none">
+                  <rect x="3" y="3" width="38" height="38" rx="9" stroke="#FFE082" strokeWidth="1.2" strokeDasharray="3 2" />
+                  <circle cx="22" cy="22" r="16" stroke="#FFD54F" strokeWidth="1" />
+                  <path d="M22 3L25 8L22 13L19 8L22 3Z" fill="#FFD54F" />
+                  <path d="M22 31L25 36L22 41L19 36L22 31Z" fill="#FFD54F" />
+                  <path d="M3 22L8 19L13 22L8 25L3 22Z" fill="#FFD54F" />
+                  <path d="M31 22L36 19L41 22L36 25L31 22Z" fill="#FFD54F" />
+                </svg>
+                <span className="relative z-10 text-white font-black text-lg tracking-wider drop-shadow">A</span>
               </div>
               <div>
                 <div className="flex items-center gap-2">
                   <h1 className="text-lg sm:text-xl font-bold text-white tracking-tight leading-tight">
                     قطع الغيار - أسمو
                   </h1>
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30">
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-orange-500/25 text-amber-200 font-bold border border-amber-400/40">
                     سعة 100,000+ قطعة
                   </span>
                 </div>

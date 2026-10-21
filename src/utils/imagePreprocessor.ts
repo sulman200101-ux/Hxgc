@@ -1,7 +1,8 @@
 /**
  * وحدة المعالجة السريعة للصور من الكاميرا أو الألبوم (Ultra-Fast AI Image Preprocessor)
- * - ضغط ذكي وسريع بأبعاد مثالية (1800px) وجودة (0.86) لتسريع الرفع والقراءة بنسبة 500%
- *   مع الحفاظ على وضوح كافة الأرقام الـ 10 وأسماء المواقع وعلامات اليد (✓ / ×)
+ * - تدوير تلقائي ذكي للأوراق المصورة طولياً (Portrait -> Landscape 270°) لقراءة كافة الـ 37 صنفاً في الورقة
+ * - ضغط ذكي بأبعاد عالية الوضوح (2000px) وجودة (0.90) لتسريع الرفع والقراءة
+ *   مع الحفاظ التام على دقة كافة الأرقام الـ 10 وأسماء المواقع وعلامات اليد (✓ / ×)
  */
 
 export interface PreProcessingOptions {
@@ -12,7 +13,7 @@ export interface PreProcessingOptions {
 }
 
 /**
- * معايرة وتجهيز الصورة لـ Gemini Vision بسرعة فائقة (أقل من 80 ملي ثانية)
+ * معايرة وتجهيز الصورة لـ Gemini Vision بسرعة فائقة
  */
 export async function prepareImageForAi(
   imageSource: string,
@@ -27,9 +28,13 @@ export async function prepareImageForAi(
         const origW = img.naturalWidth || img.width;
         const origH = img.naturalHeight || img.height;
 
-        const shouldRotateCcw = options.forceRotateCcw === true;
-        // 1800px هو الحجم المثالي لقراءة جدول جرد من 40 سطر في أقل من ثانيتين دون بطء رفع الملفات الضخمة
-        const maxDim = options.maxDimension || 1800;
+        // أوراق جرد أسمو (SAP Inventory Controller) مصممة بالعرض (Landscape).
+        // إذا التقط المستخدم الصورة بالطول من الجوال (origH > origW * 1.05)، نقوم بتدويرها تلقائياً 90 درجة عكس عقارب الساعة (270°)
+        // لتصبح الأسطر الـ 37 أفقية ومقروءة بنسبة 100% كما في المحاكي تماماً.
+        const isPortraitSheet = options.autoRotate !== false && origH > origW * 1.05;
+        const shouldRotateCcw = options.forceRotateCcw === true || isPortraitSheet;
+
+        const maxDim = options.maxDimension || 2000;
 
         let targetW = shouldRotateCcw ? origH : origW;
         let targetH = shouldRotateCcw ? origW : origH;
@@ -54,7 +59,7 @@ export async function prepareImageForAi(
         }
 
         if (options.enhanceContrast !== false) {
-          ctx.filter = 'contrast(1.18) brightness(1.03)';
+          ctx.filter = 'contrast(1.16) brightness(1.02)';
         }
 
         if (shouldRotateCcw) {
@@ -65,8 +70,7 @@ export async function prepareImageForAi(
           ctx.drawImage(img, 0, 0, targetW, targetH);
         }
 
-        // جودة 0.86 توفر توازناً مثالياً بين سرعة الإرسال الفورية ودقة قراءة الأرقام وعلامات ×
-        const resultUrl = canvas.toDataURL('image/jpeg', 0.86);
+        const resultUrl = canvas.toDataURL('image/jpeg', 0.90);
         resolve(resultUrl);
       } catch (err) {
         console.warn('Image calibration failed, using original:', err);
@@ -110,7 +114,7 @@ export async function rotateImageDegrees(
         ctx.rotate((degrees * Math.PI) / 180);
         ctx.drawImage(img, -origW / 2, -origH / 2);
 
-        resolve(canvas.toDataURL('image/jpeg', 0.86));
+        resolve(canvas.toDataURL('image/jpeg', 0.90));
       } catch (err) {
         resolve(imageSource);
       }

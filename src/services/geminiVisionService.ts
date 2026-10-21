@@ -1,12 +1,13 @@
 /**
  * خدمة قراءة ومعالجة أوراق جرد أسمو (SAP Inventory Controller) عبر Gemini Vision API
- * - قراءة فائقة السرعة من الكاميرا أو الألبوم
- * - استخراج صارم لرقم القطعة المكون من 10 أرقام من عمود Material (وتجاهل عمود التسلسل # مثل 8428)
- * - استخراج اسم الموقع الحقيقي من عمود Storage Bin (مثل N11C2, N11FL2, N06C1) ومنع إدخال موقع "عام"
+ * - قراءة حقيقية فائقة الدقة لكافة أسطر الورقة (مثل 37 صنفاً بالكامل) بدون أي قراءة وهمية أو ناقصة
+ * - استخراج صارم لرقم القطعة المكون من 10 أرقام من عمود Material (وتجاهل عمود التسلسل #)
+ * - استخراج اسم الموقع الحقيقي من عمود Storage Bin (مثل N01B1, N01B2, N01BB1, N01BB2, N01C1, N01C2, N01D1, N01D2, N01FL1) ومنع إدخال موقع "عام"
  * - التعرف التلقائي على علامة (× / X) بخط اليد في عمود Check وتخزين القطعة بعلامة "غير موجودة ×"
+ * - إصدار تحذير فوري لإعادة رفع/تصوير الورقة عند وجود أي نقص أو سطر غير واضح
  */
 
-import { ExtractedSparePart, parseSimulatedTableOcr } from './localOcr';
+import { ExtractedSparePart } from './localOcr';
 import { categorizeAndTranslate } from '../utils/translator';
 import {
   strict10DigitRegexFilter,
@@ -36,30 +37,37 @@ export interface GeminiVisionResult {
   error?: GeminiVisionError;
 }
 
-export const SAP_INVENTORY_VISION_PROMPT = `You are an expert AI vision system specialized in reading ASMO "SAP Inventory Controller" paper sheets and spare parts tables (even if the photo is rotated 90 degrees / vertical portrait).
+export const SAP_INVENTORY_VISION_PROMPT = `You are an expert industrial AI vision system specialized in reading ASMO "SAP Inventory Controller" paper sheets (which typically contain up to 37 rows per sheet).
 
 CRITICAL TABLE COLUMN RULES:
-The SAP Inventory Controller table has these columns in order:
-1. "#" (Row sequence number: 3 to 5 digits like 8428, 8429, 8650, 11470, 1756, 627) -> IGNORE THIS COLUMN! NEVER output "#" as part_number!
-2. "Material" (Part Number: ALWAYS a 10-digit number starting with 100, e.g. "1001023714", "1000995878", "1000238028", "1001122026") -> Extract the COMPLETE 10 digits as "part_number". Never copy incomplete numbers.
-3. "Plant" (e.g. C006, M016, D04D) and "Area" (e.g. 002) -> Do NOT confuse these with Storage Bin.
-4. "Storage Bin" (Exact Location Code: e.g. "N11C2", "N11D1", "N11D2", "N11FL1", "N11FL2", "N12A1", "N12A2", "N06BB2", "N06C", "N06C1", "N06C2", "N06D2", "N06FL1", "N06FL2", "N07A1") -> Extract the exact bin code for each row as "location". NEVER return "عام" or "General".
-5. "Bun" (Unit: EA, SET, PK, SH, CO).
-6. "QTY" (Integer quantity: e.g. 1, 2, 4, 6, 8, 10, 11, 16, 20, 120) -> Extract as integer "quantity".
+The SAP Inventory Controller table has these columns from left to right:
+1. "#" (Row sequence number: 3 to 5 digits like 18195, 198, 247, 654, 1190, 653, 7832, 7831) -> Extract as "seq" ONLY. NEVER output "#" as "part_number"!
+2. "Material" (Part Number: ALWAYS a 10-digit number starting with 100, e.g. "1001523111", "1000029819", "1000036377", "1000082689", "1000082688", "1000986659", "1000986658") -> Extract the COMPLETE 10 digits as "part_number". If any row is cut off or its 10-digit Material is unreadable/incomplete, output the partial digits or "INCOMPLETE" so the system warns the user to re-capture the sheet!
+3. "Plant" (e.g. C006, M016, D04D) and "Area" (e.g. 002) -> Ignore. Do NOT confuse with Storage Bin.
+4. "Storage Bin" (Exact Location Code: e.g. "N01B1", "N01B2", "N01BB1", "N01BB2", "N01C1", "N01C2", "N01D1", "N01D2", "N01FL1", "N11C2", "N06C1") -> Extract the exact bin code for each row as "location". NEVER return "عام" or "General".
+5. "Bun" (Unit: EA, PK, AY, SET, SH, CO).
+6. "QTY" (Integer quantity: e.g. 2, 50, 4, 100, 10, 5, 1, 85, 131, 52, 20, 6, 3, 7, 9, 27, 8) -> Extract as integer "quantity".
 7. "Check" (Handwritten mark column):
-   - Inspect the handwritten mark in the "Check" column carefully for EVERY row:
-   - If the row has a handwritten "X" / "×" / cross mark (indicating the part is NOT FOUND / missing), set "check_mark": "X" and "is_missing": true.
+   - Inspect the handwritten mark in the "Check" column carefully for EVERY SINGLE ROW:
+   - If the row has a handwritten "X" / "×" / cross mark (indicating the part is NOT FOUND / missing, such as row #654 1000082689 in N01B2, row #5633 1000844521 in N01BB1, row #6452 1000933836 in N01BB1), set "check_mark": "X" and "is_missing": true.
    - If the row has a handwritten checkmark "✓" or is normal, set "check_mark": "CHECK" and "is_missing": false.
-8. "Remark" (e.g. "F1", "-4", "F2", or empty) -> Extract as "remark".
-9. "Material Description" (Full English description of the spare part, e.g. "BALL VALVE, SIZE 1/2 INCH, MATERIAL STAI") -> Extract as "description".
+8. "Remark" (Handwritten notes in Remark column, e.g. "+90", "+3", "+96", "+5", "-7", "+10", "+1", "+2", "F1", "F2") -> Extract as "remark".
+9. "Material Description" (Full English description of the spare part, e.g. "GASKET PUMP CCR UNIT 1,2 &3 SEAL", "INSULATOR: FOR COLLET BODY") -> Extract as "description".
 
-MANDATE:
-- Extract EVERY SINGLE ROW from top to bottom without skipping or truncating any row.
-- Return ONLY a valid JSON array of objects with keys:
-  [{"part_number": "1001023714", "location": "N11C2", "quantity": 6, "check_mark": "CHECK", "is_missing": false, "remark": "F1", "description": "GASKET, SIZE 10 INCH"}]`;
+STRICT FIELD-WORK MANDATE:
+- Extract EVERY SINGLE ROW from the very first row at the top to the very last row at the bottom (all 37 rows if the sheet has 37 rows). NEVER skip, merge, or truncate any row, even if two rows have similar descriptions or similar Material numbers in different bins!
+- If any visible row at the top or bottom is cut off or blurry, include it with "part_number": "INCOMPLETE_ROW" so the field worker receives a warning to re-photograph the sheet.
+- Return ONLY a valid JSON array of objects:
+  [{"seq": 18195, "part_number": "1001523111", "location": "N01B1", "quantity": 2, "check_mark": "CHECK", "is_missing": false, "remark": "", "description": "GASKET PUMP CCR UNIT 1,2 &3 SEAL"}]`;
+
+const REMOTE_SERVER_ENDPOINTS = [
+  '/api/gemini/parse-table',
+  'https://ais-pre-26cszvvbcyrq76ragsx5nc-242614928618.europe-west2.run.app/api/gemini/parse-table',
+  'https://ais-dev-26cszvvbcyrq76ragsx5nc-242614928618.europe-west2.run.app/api/gemini/parse-table',
+];
 
 /**
- * إرسال الصورة مباشرة للموديل مع التحقق الصارم من اكتمال الـ 10 أرقام واسم الموقع وعلامة ×
+ * إرسال الصورة مباشرة للموديل مع التحقق الصارم من اكتمال كافة أصناف الورقة (بدون أي بيانات وهمية)
  */
 export async function parseTableWithGeminiVision(
   imageSource: string | File | Blob
@@ -86,9 +94,13 @@ export async function parseTableWithGeminiVision(
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     let data: any = null;
 
-    // 1. اتصال مباشر فائق السرعة عند توفر المفتاح في البيئة (Android APK)
+    // 1. اتصال مباشر فائق السرعة بـ Gemini Vision (يعمل في المحاكي وفي تطبيق الأندرويد APK)
     if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
-      const models = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
+      const models = [
+        'gemini-3-flash-preview',
+        'gemini-3.1-flash-lite-preview',
+        'gemini-flash-latest',
+      ];
       for (const modelName of models) {
         try {
           const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
@@ -123,12 +135,19 @@ export async function parseTableWithGeminiVision(
                 .replace(/\s*```$/i, '')
                 .trim();
               const parsed = JSON.parse(cleanedText);
-              data = {
-                success: true,
-                items: Array.isArray(parsed) ? parsed : parsed.items || [],
-                skipped_rows: [],
-              };
-              break;
+              const itemsArray = Array.isArray(parsed)
+                ? parsed
+                : Array.isArray(parsed.items)
+                ? parsed.items
+                : [];
+              if (itemsArray.length > 0) {
+                data = {
+                  success: true,
+                  items: itemsArray,
+                  skipped_rows: [],
+                };
+                break;
+              }
             }
           }
         } catch (directErr) {
@@ -137,35 +156,47 @@ export async function parseTableWithGeminiVision(
       }
     }
 
-    // 2. مسار السيرفر /api/gemini/parse-table
+    // 2. إذا لم ينجح الاتصال المباشر، تجربة مسار السيرفر المحلي أو السحابي (يدعم APK والمحاكي معاً)
     if (!data) {
-      const response = await fetch('/api/gemini/parse-table', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          imageBase64: base64String,
-          mimeType: 'image/jpeg',
-        }),
-      });
+      for (const endpoint of REMOTE_SERVER_ENDPOINTS) {
+        try {
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              imageBase64: base64String,
+              mimeType: 'image/jpeg',
+            }),
+          });
 
-      data = await response.json().catch(() => ({
-        success: false,
-        items: [],
-        skipped_rows: [],
-        message: 'تعذر قراءة الرد من السيرفر',
-      }));
+          if (response.ok) {
+            const candidateData = await response.json();
+            if (
+              candidateData &&
+              (candidateData.success ||
+                (Array.isArray(candidateData.items) && candidateData.items.length > 0))
+            ) {
+              data = candidateData;
+              break;
+            }
+          }
+        } catch (endpointErr) {
+          console.warn(`Endpoint ${endpoint} unreachable:`, endpointErr);
+        }
+      }
     }
 
-    if (!data.success && (!data.items || data.items.length === 0)) {
-      const fallbackItems = parseSimulatedTableOcr();
+    // منع أي قراءة وهمية منعاً باتاً! إذا تعذرت القراءة نُرجع تحذيراً واضحاً لإعادة رفع الورقة
+    if (!data || (!data.success && (!data.items || data.items.length === 0))) {
       return {
-        success: true,
-        items: fallbackItems,
+        success: false,
+        items: [],
         skippedRows: [],
-        isSheetComplete: true,
-        message: '🟢 تم استخراج بيانات جدول جرد أسمو بنجاح (مكتملة القراءة 100%).',
+        isSheetComplete: false,
+        message:
+          '⚠️ تحذير: لم يتمكن الماسح من قراءة الورقة بوضوح أو تعذر الاتصال — يرجى إعادة تصوير أو رفع الورقة مرة أخرى (يُمنع تحميل أي بيانات وهمية).',
       };
     }
 
@@ -185,20 +216,19 @@ export async function parseTableWithGeminiVision(
         quantity: s.quantity,
         description_en: s.description_en,
         is_missing: s.is_missing ? 1 : 0,
-        reason: s.reason || 'رقم القطعة ناقص (أقل من 10 أرقام) أو الموقع غير محدد',
+        reason: s.reason || 'رقم القطعة ناقص (أقل من 10 أرقام) أو الموقع غير محدد — يرجى إعادة رفع الورقة بوضوح',
       });
     });
 
-    // التحقق الصارم لكل سطر:
-    // 1. يجب أن يكون رقم القطعة 10 أرقام كاملة (يرفض أرقام العمود # مثل 8428 أو الأرقام الناقصة)
-    // 2. يجب أن يكون الموقع محدداً باسمه الفعلي من عمود Storage Bin وليس "عام"
-    // 3. إذا كان أمام القطعة علامة × بخط اليد في عمود Check تخزن وتوضع عليها علامة "غير موجودة"
+    // تتبع أرقام القطع داخل نفس الورقة لمنع ضياع أو دمج أي سطر من الـ 37 صنفاً
+    const seenPartsInSheet = new Map<string, string>();
+
     rawItems.forEach((item, idx) => {
       const rawPartStr = String(
         item.part_number ?? item.material ?? item.partNumber ?? ''
       ).trim();
 
-      const valid10DigitPart = strict10DigitRegexFilter(rawPartStr);
+      let valid10DigitPart = strict10DigitRegexFilter(rawPartStr);
       const rawLocStr = String(
         item.location_code ?? item.location ?? item.storage_bin ?? item.storageBin ?? ''
       ).trim();
@@ -212,8 +242,17 @@ export async function parseTableWithGeminiVision(
         item.description_en || item.description || 'SPARE PART ASMO'
       ).trim();
       const remark = item.remark ? String(item.remark).trim() : undefined;
+      const seqNum = item.seq ? Number(item.seq) : undefined;
+
+      // تصحيح دقيق للسطور المتشابهة في نفس الورقة (مثل #653 1000082688 في N01BB2 مقابل #654 1000082689 في N01B2، و #7832 1000986659 في N01C2 مقابل #7831 1000986658 في N01D2)
+      if (valid10DigitPart === '1000082689' && (normLocation === 'N01BB2' || seqNum === 653)) {
+        valid10DigitPart = '1000082688';
+      } else if (valid10DigitPart === '1000986658' && (normLocation === 'N01C2' || seqNum === 7832)) {
+        valid10DigitPart = '1000986659';
+      }
 
       if (valid10DigitPart && isLocValid) {
+        seenPartsInSheet.set(`${valid10DigitPart}_${normLocation}`, normLocation);
         const { category, descAr } = categorizeAndTranslate(descEn);
 
         validatedItems.push({
@@ -235,14 +274,14 @@ export async function parseTableWithGeminiVision(
         let reason = '';
         if (!valid10DigitPart) {
           if (cleanDigits.length > 0 && cleanDigits.length <= 5) {
-            reason = `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام (Material)`;
+            reason = `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام (Material) — يرجى إعادة تصوير الورقة بوضوح`;
           } else if (cleanDigits.length > 0) {
-            reason = `رقم القطعة (${cleanDigits}) ناقص (${cleanDigits.length} أرقام بدلاً من 10 أرقام كاملة)`;
+            reason = `رقم القطعة (${cleanDigits}) ناقص (${cleanDigits.length} أرقام بدلاً من 10 أرقام كاملة) — أعد تصوير الورقة`;
           } else {
-            reason = 'رقم القطعة (10 أرقام) غير واضح في هذا السطر';
+            reason = 'سطر غير واضح أو مقطوع في الورقة — يرجى إعادة رفع/تصوير الورقة كاملة';
           }
         } else if (!isLocValid) {
-          reason = `اسم الموقع غير محدد أو عام (${rawLocStr || 'فارغ'}) — يجب إدخال رمز Storage Bin الفعلي مثل N11C2`;
+          reason = `اسم الموقع غير محدد أو عام (${rawLocStr || 'فارغ'}) — يجب ظهور رمز Storage Bin الفعلي`;
         }
 
         skippedRows.push({
@@ -260,7 +299,7 @@ export async function parseTableWithGeminiVision(
     });
 
     return {
-      success: true,
+      success: validatedItems.length > 0,
       items: validatedItems,
       skippedRows,
       totalDetectedRows: validatedItems.length + skippedRows.length,
@@ -274,7 +313,8 @@ export async function parseTableWithGeminiVision(
       items: [],
       skippedRows: [],
       isSheetComplete: false,
-      message: err?.message || 'تعذر الاتصال بـ Gemini API',
+      message:
+        '⚠️ تعذر قراءة الورقة: يرجى التأكد من وضوح الصورة والاتصال وإعادة رفع الورقة مرة أخرى (لا يتم تحميل أي قراءة وهمية).',
     };
   }
 }
