@@ -1,3 +1,4 @@
+import { rotateImageDegrees } from '../utils/imagePreprocessor';
 import { createWorker } from 'tesseract.js';
 import { categorizeAndTranslate } from '../utils/translator';
 import { preprocessImageWithOpenCV } from '../utils/imagePreprocessing';
@@ -49,12 +50,25 @@ export async function processOcrFromImage(
     if (onProgress) onProgress(50, 'قراءة الصورة الأصلية...');
     const raw = await worker.recognize(imageSource);
     let extracted = parseRawTextOcr(raw.data.text);
-    if (!extracted.length) {
-      if (onProgress) onProgress(75, 'محاولة تحسين الصورة دون تغيير اتجاهها...');
+    const usable = (rows: ExtractedSparePart[]) => rows.some(row => /^\d{10}$/.test(row.part_number) && isValidSpecificLocation(row.location_code));
+    if (!usable(extracted)) {
+      const source = typeof imageSource === 'string' ? imageSource : await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(imageSource);
+      });
+      for (const [index, degrees] of ([270, 90, 180] as const).entries()) {
+        if (onProgress) onProgress(60 + index * 10, 'محاولة قراءة الورقة باتجاه آخر...');
+        const rotated = await rotateImageDegrees(source, degrees);
+        const attempt = parseRawTextOcr((await worker.recognize(rotated)).data.text);
+        if (attempt.length > extracted.length || usable(attempt)) extracted = attempt;
+        if (usable(extracted)) break;
+      }
+    }
+    if (!usable(extracted)) {
+      if (onProgress) onProgress(90, 'محاولة تحسين الصورة...');
       const preprocessed = await preprocessImageWithOpenCV(imageSource, { rotateCounterClockwise90: false });
       cleanedSource = preprocessed.cleanedDataUrl;
-      const enhanced = await worker.recognize(cleanedSource);
-      extracted = parseRawTextOcr(enhanced.data.text);
+      const enhanced = parseRawTextOcr((await worker.recognize(cleanedSource)).data.text);
+      if (enhanced.length > extracted.length || usable(enhanced)) extracted = enhanced;
     }
 
     if (onProgress) onProgress(100, 'اكتملت المعالجة بنجاح!');

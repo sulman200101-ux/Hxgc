@@ -147,7 +147,7 @@ export function extractStrictQuantity(line: string, partNumber: string, storageB
   }
   if (end < 0) return { total: 0, out: 0 };
   const tail = line.slice(end);
-  const match = tail.match(/^\s*(?:\|\s*)?(?:(?:EA|SET|PK|SH|CO|AY|KG)\s+)?(\d{1,9})(?=\s|\||$)/i);
+  const match = tail.match(/^\s*(?:\|\s*)?(?:(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD)\s+)?(\d{1,9})(?=\s|\||$)/i);
   return { total: match ? Number(match[1]) : 0, out: 0 };
 }
 

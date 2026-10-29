@@ -12,9 +12,14 @@ try {
   ctx.fillText('Material       Storage Bin     QTY     Material Description',40,90);
   ctx.fillText('1001523111     N01B1           12      BOLT M16',40,200);
   const {processOcrFromImage}=await import('/src/services/localOcr.ts');
-  return processOcrFromImage(canvas.toDataURL());
+  const upright=await processOcrFromImage(canvas.toDataURL());
+  const {rotateImageDegrees}=await import('/src/utils/imagePreprocessor.ts');
+  const sideways=await processOcrFromImage(await rotateImageDegrees(canvas.toDataURL(),90));
+  const {extractStrictQuantity}=await import('/src/utils/strictTableParser.ts');
+  return {upright,sideways,paa:extractStrictQuantity('1000129631 M016 002 N17A1 PAA 5 GLOVES','1000129631','N17A1'),zyd:extractStrictQuantity('1001064248 M016 002 N16D2 ZYD 7 F2 GASKET','1001064248','N16D2')};
  });
  console.log(JSON.stringify(result));
- assert.ok(result.some(row=>row.part_number==='1001523111' && row.location_code==='N01B1' && row.qty_total===12 && row.description_en.includes('M16')));
- console.log('PASS actual OCR with all external network requests blocked');
+ assert.equal(result.paa.total,5);assert.equal(result.zyd.total,7);
+ for(const rows of [result.upright,result.sideways]) assert.ok(rows.some(row=>row.part_number==='1001523111' && row.location_code==='N01B1' && row.qty_total===12 && row.description_en.includes('M16')));
+ console.log('PASS upright/sideways OCR and SAP PAA/ZYD quantity columns with external network blocked');
 } finally {await browser.close();}
