@@ -74,3 +74,7 @@ Replaced the legacy Gemini-only scanner with the reviewed local document workflo
 ## 1.6.2: first visual SAP sample
 
 A sideways SAP Inventory Controller sheet was received in chat. It visibly includes Plant/Area/Bun columns, PAA/ZYD units and handwritten Check/Remark cells. No image file was available to the shell runner, so this report does not claim an OCR execution or measured accuracy on that exact attachment. Added fallback rotation attempts when no usable part/bin pairs are found, and bounded quantity extraction for PAA/ZYD units. Offline real-engine tests pass on upright and rotated synthetic images plus SAP-shaped text rows. Handwritten check/remark values still require human review; no inference of a blank mark as checked is allowed. Version 1.6.2 uses versionCode 9 and the existing test signing key.
+
+## Second visual SAP sample
+
+A second chat image shows repeated Material 1000428938 in bin N12A2 with PK quantities 3 and 6. The parser now preserves repeated source rows instead of silently keeping the first. Both single-sheet and batch review display a duplicate warning; existing document validation blocks saving until the operator reconciles the rows. Quantities are not automatically summed and inventory identity remains unique. Regression checks use a transcription of those printed columns; they do not establish handwriting recognition or whole-image OCR accuracy for the attachment. This source change needs inclusion in the next test APK after sample review.

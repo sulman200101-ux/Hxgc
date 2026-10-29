@@ -60,6 +60,7 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }:
         } catch (err) { playOperationSound('uncertain'); setMessage(String(err)); } finally { setBusy(false); }
       }}>اقتراح سطور بالقراءة المحلية</button>}
       {lines.map((line, i) => <fieldset key={i} className="border border-stone-600 p-3 flex flex-wrap gap-2"><legend>السطر {i + 1}</legend>
+        {line.part_number && lines.filter(candidate => candidate.part_number.trim() === line.part_number.trim()).length > 1 && <p role="alert" className="w-full text-red-300">رقم مكرر في الورقة: قارن السطور وحدد الكمية الصحيحة قبل الحفظ؛ لا جمع أو حذف تلقائيًا.</p>}
         <label>Material<input required className="bg-stone-800 w-36 p-1" value={line.part_number} onChange={e => {
           const part_number = e.target.value; const match = dbService.getItemByPartNumber(part_number);
           update(i, { part_number, reviewed: false, ...(match ? { location: match.location_code, description_en: match.description_en, description_ar: match.description_ar } : {}) });

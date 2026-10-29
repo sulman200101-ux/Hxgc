@@ -75,6 +75,7 @@ export function BatchDocumentsPanel({ onChanged }: { onChanged: () => void }) {
         <label>رقم مستند الورقة <input required className="bg-stone-800 p-1" value={sheet.id} placeholder="أدخل رقم الورقة الصحيح لمنع تكرار اعتمادها" onChange={e => patch(sheet.key, { id: e.target.value })} /></label>
         {sheet.message && <p className="text-red-300">{sheet.message}</p>}
         {sheet.lines.map((line, index) => <div key={index} className="border-b border-stone-700 py-3 space-y-2">
+          {line.part_number && sheet.lines.filter(candidate => candidate.part_number.trim() === line.part_number.trim()).length > 1 && <p role="alert" className="text-red-300">رقم مكرر داخل الورقة: راجع الكميات وحدد السطر الصحيح؛ لا يتم جمعها أو حذفها تلقائيًا.</p>}
           <label>رقم القطعة <input required pattern="[0-9]{10}" className="bg-stone-800 p-1" value={line.part_number} onChange={e => patchLine(sheet.key, index, { part_number: e.target.value, reviewed: false })} /></label>
           <label>الكمية <input required type="number" min="0" step="1" className="bg-stone-800 p-1 w-24" value={Number.isFinite(line.quantity) ? line.quantity : ''} onChange={e => patchLine(sheet.key, index, { quantity: e.target.value === '' ? Number.NaN : Number(e.target.value), reviewed: false })} /></label>
           <label>الموقع <input required className="bg-stone-800 p-1 w-28" value={line.location} onChange={e => patchLine(sheet.key, index, { location: e.target.value, reviewed: false })} /></label>

@@ -198,7 +198,6 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
 
   const lines = rawText.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
   const results: ExtractedSparePart[] = [];
-  const seenParts = new Set<string>();
 
   for (const line of lines) {
     // ==========================================
@@ -211,11 +210,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
       continue;
     }
 
-    // منع التكرار لنفس رقم القطعة في نفس المسح
-    if (seenParts.has(partNumber)) {
-      continue;
-    }
-    seenParts.add(partNumber);
+    // Retain repeated source rows for review; document validation prevents duplicate stock identities.
 
     // 2. عمود الموقع (Storage Bin)
     const storageBin = extractStrictStorageBin(line, partNumber);
