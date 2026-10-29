@@ -163,7 +163,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
             (i) => i.is_missing === 1 || i.status === 'غير موجودة'
           ).length;
           setStatusMessage(
-            `✅ اكتملت قراءة الورقة بنجاح 100%! (${result.items.length} صنف — منها ${missingCount} معلمة بـ × غير موجودة)`
+            `✅ اكتملت القراءة الأولية؛ راجع النتائج! (${result.items.length} صنف — منها ${missingCount} معلمة بـ × غير موجودة)`
           );
         }
       } else {
@@ -212,7 +212,7 @@ export const OcrModal: React.FC<OcrModalProps> = ({
         } else {
           setSkippedRows([]);
           setWarningAlert(null);
-          setStatusMessage(`✅ الورقة مكتملة القراءة 100% (${result.items.length} صنف)!`);
+          setStatusMessage(`✅ قراءة أولية تتطلب المراجعة (${result.items.length} صنف)!`);
         }
       } else {
         const warnMsg =

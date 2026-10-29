@@ -1,0 +1,146 @@
+// Run with Node 24+, Chromium, and Playwright available via PLAYWRIGHT_MODULE or npm.
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { stripTypeScriptTypes } from 'node:module';
+import assert from 'node:assert/strict';
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const root = new URL('../', import.meta.url);
+const server = createServer(async (req, res) => {
+  try {
+    if (req.url === '/') { res.end('<html><body>Safety tests</body></html>'); return; }
+    if (!/^\/src\/[a-zA-Z/]+$/.test(req.url)) { res.writeHead(404).end(); return; }
+    const source = await readFile(new URL('.' + req.url + '.ts', root), 'utf8');
+    res.setHeader('Content-Type', 'text/javascript');
+    res.end(stripTypeScriptTypes(source));
+  } catch (error) { res.writeHead(500).end(String(error)); }
+});
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', headless: true, args: ['--no-sandbox'] });
+try {
+  const page = await browser.newPage();
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  const results = await page.evaluate(async () => {
+    const passed = [];
+    const check = (ok, label) => { if (!ok) throw new Error(label); passed.push(label); };
+    const legacy = { part_number: '1000000001', location_code: 'N01B1', description_en: 'BOLT M16', description_ar: 'مسمار M16', category: 'BOLT', qty_total: 10, qty_out: 2, qty_remaining: 8, is_moved: 0, status: 'غير مدقق' };
+    await new Promise((resolve, reject) => {
+      const req = indexedDB.open('ASMO_Inventory_DB', 3);
+      req.onupgradeneeded = () => {
+        const store = req.result.createObjectStore('items', { keyPath: 'part_number' });
+        store.put(legacy);
+        store.put({ ...legacy, part_number: 'legacy-invalid', location_code: 'عام' });
+      };
+      req.onsuccess = () => { req.result.close(); resolve(); }; req.onerror = () => reject(req.error);
+    });
+    const { dbService: db } = await import('/src/services/db');
+    await db.init();
+    check(db.getTotalCount() === 2, 'upgrade preserves all records and does not seed sample data');
+    check(JSON.stringify(db.getItemByPartNumber(legacy.part_number)) === JSON.stringify(legacy), 'upgrade preserves quantities, descriptions and location verbatim');
+    check(!!db.getItemByPartNumber('legacy-invalid'), 'legacy invalid record remains available for review');
+    const snapshot = db.getAllItems(); snapshot[0].qty_total = 999;
+    check(db.getItemByPartNumber(legacy.part_number).qty_total === 10, 'returned data cannot mutate cache');
+    let rejected = false;
+    try { await db.smartUpsertBatch([{ part_number: '1000000001', quantity: 999 }]); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(legacy.part_number).qty_total === 10, 'uncertain OCR cannot change stock');
+    const { strict10DigitRegexFilter } = await import('/src/utils/regexSanitizer');
+    check(strict10DigitRegexFilter('1000000001') === '1000000001' && strict10DigitRegexFilter('100000001') === null && strict10DigitRegexFilter('11000000001') === null && strict10DigitRegexFilter('1O00000001') === null, 'only exact ten digit identifiers accepted without OCR guessing');
+    const { categorizeAndTranslate } = await import('/src/utils/translator');
+    const translated = categorizeAndTranslate('BOLT M16 X 70 MM SS316');
+    check(translated.descAr.includes('M16') && translated.descAr.includes('70') && translated.descAr.includes('SS316') && /[\u0600-\u06ff]/.test(translated.descAr), 'technical translation retains dimensions and specifications');
+    const { suggestTechnicalTranslation, preserveTechnicalSpecifications } = await import('/src/services/partTranslation');
+    const suggestion = suggestTechnicalTranslation('BOLT M16 X 70 MM SS316');
+    check(suggestion.original === 'BOLT M16 X 70 MM SS316' && suggestion.needsReview && suggestion.arabic.includes('M16'), 'translation suggestion preserves original name separately');
+    check(preserveTechnicalSpecifications('BOLT M16 SS316', 'مسمار').includes('M16 SS316'), 'model output cannot silently drop original technical codes');
+    const { pinSecurity } = await import('/src/services/security');
+    await pinSecurity.setup('2468');
+    check(!localStorage.getItem('asmo_pin_verifier_v1').includes('2468'), 'PIN is not stored as plaintext');
+    check(await pinSecurity.verify('2468') && !await pinSecurity.verify('1357'), 'PIN accepts correct and rejects incorrect value');
+    await pinSecurity.change('2468', '8642');
+    check(!await pinSecurity.verify('2468') && await pinSecurity.verify('8642'), 'PIN change invalidates old PIN');
+    let approve = false;
+    window.addEventListener('asmo-authorize-request', () => window.dispatchEvent(new CustomEvent('asmo-authorize-result', { detail: approve })));
+    rejected = false; try { await db.deleteItem(legacy.part_number); } catch { rejected = true; }
+    check(rejected && !!db.getItemByPartNumber(legacy.part_number), 'rejected authorization prevents deletion');
+    approve = true;
+    rejected = false;
+    try { await db.insertOrUpdateItem(legacy.part_number, 'N01B1', 'BOLT M16', 1, 2); } catch { rejected = true; }
+    check(rejected, 'negative remaining stock rejected');
+    await db.insertOrUpdateItem(legacy.part_number, 'N01B1', 'BOLT M16', 10, 10);
+    check(!!db.getItemByPartNumber(legacy.part_number) && db.getItemByPartNumber(legacy.part_number).qty_remaining === 0, 'zero stock record preserved');
+    let backup = JSON.parse(await db.exportBackup());
+    check(backup.audit.length === 1 && backup.audit[0].before.qty_out === 2 && backup.audit[0].after.qty_out === 10, 'committed change has durable before and after audit');
+    await db.wipeAllData();
+    backup = JSON.parse(await db.exportBackup());
+    check(backup.items.length === 0 && backup.audit.length === 2 && backup.audit[1].before.length === 2, 'wipe preserves audit and recoverable before images');
+    const restore = JSON.stringify({ format: 'asmo-backup-v1', items: [legacy] });
+    await db.restoreBackup(restore);
+    check(db.getTotalCount() === 1 && db.getItemByPartNumber(legacy.part_number).qty_remaining === 8, 'valid backup restores original inventory');
+    rejected = false;
+    try { await db.restoreBackup(JSON.stringify({ format: 'asmo-backup-v1', items: [legacy, { ...legacy, qty_out: 100 }] })); } catch { rejected = true; }
+    check(rejected && db.getTotalCount() === 1, 'invalid backup rejected before writes');
+    const { interpretMark } = await import('/src/services/documents');
+    check(interpretMark('', '').status === 'غير مدقق' && interpretMark('✓', '').status === 'مدقق' && interpretMark('X', '').status === 'غير موجودة', 'blank, check and cross have distinct meanings');
+    check(interpretMark('', '-4').shortage === 4 && interpretMark('', 'F4').excludedIncrease, 'shortages and excluded F increases parsed separately');
+    const line = { part_number: legacy.part_number, quantity: 3, location: 'N01B1', description_en: 'BOLT M16', description_ar: 'مسمار M16', check: '', remark: '', reviewed: true };
+    const doc = { id: 'ISSUE-1', kind: 'issue', requester: 'tester', reason: '', lines: [line], status: 'pending', createdAt: '' };
+    const original = new Blob(['original'], { type: 'image/png' });
+    await db.submitDocument({ ...doc, original });
+    let duplicateImage = false;
+    try { await db.submitDocument({ ...doc, id: 'DIFFERENT-ID', original }); } catch (error) { duplicateImage = error.message.includes('تم حفظها مسبقًا'); }
+    check(duplicateImage && (await db.getDocuments()).length === 1, 'same image under another document ID rejected with already-saved warning');
+    check((await db.findDocumentByImage(original)).id === doc.id, 'reselected image recognized before OCR');
+    check(db.getItemByPartNumber(legacy.part_number).qty_remaining === 8, 'document submission does not change stock');
+    await db.approveDocument(doc.id);
+    check(db.getItemByPartNumber(legacy.part_number).qty_remaining === 5, 'issue deducts only approved quantity');
+    rejected = false; try { await db.approveDocument(doc.id); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(legacy.part_number).qty_remaining === 5, 'approved document cannot be applied twice');
+    rejected = false; try { await db.submitDocument(doc); } catch { rejected = true; }
+    check(rejected, 'duplicate document ID rejected');
+    await db.submitDocument({ ...doc, id: 'OVERDRAW', lines: [{ ...line, quantity: 6 }] });
+    rejected = false; try { await db.approveDocument('OVERDRAW'); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(legacy.part_number).qty_remaining === 5 && (await db.getDocuments()).find(d => d.id === 'OVERDRAW').status === 'pending', 'overdraw atomically rolls back approval and stock');
+    await db.submitDocument({ ...doc, id: 'MOVE-1', kind: 'transfer', reason: 'grouping', lines: [{ ...line, quantity: 5, location: 'N02A1' }] });
+    check(db.getItemByPartNumber(legacy.part_number).location_code === 'N01B1', 'pending transfer cannot change actual location');
+    await db.approveDocument('MOVE-1');
+    check(db.getItemByPartNumber(legacy.part_number).location_code === 'N02A1', 'supervisor approval executes transfer');
+    await db.submitDocument({ ...doc, id: 'RECEIPT-1', kind: 'receipt', lines: [{ ...line, quantity: 2, location: 'N02A1' }] });
+    await db.approveDocument('RECEIPT-1');
+    check(db.getItemByPartNumber(legacy.part_number).qty_remaining === 7, 'receipt adds only received quantity');
+    await db.submitDocument({ ...doc, id: 'COUNT-SHORT', kind: 'inventory', lines: [{ ...line, quantity: 7, location: 'N02A1', remark: '- 1' }] });
+    await db.approveDocument('COUNT-SHORT');
+    check(db.getItemByPartNumber(legacy.part_number).qty_remaining === 6, 'approved spaced -1 shortage decrements stock by one');
+    rejected = false; try { await db.approveDocument('COUNT-SHORT'); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(legacy.part_number).qty_remaining === 6, 'shortage cannot be deducted twice');
+    await db.submitDocument({ ...doc, id: 'COUNT-F', kind: 'inventory', lines: [{ ...line, quantity: 999, location: 'N02A1', remark: 'F4' }] });
+    await db.approveDocument('COUNT-F');
+    check(db.getItemByPartNumber(legacy.part_number).qty_remaining === 6, 'F4 is excluded from stock updates');
+    await db.submitDocument({ ...doc, id: 'COUNT-OVER', kind: 'inventory', lines: [{ ...line, location: 'N02A1', remark: '-7' }] });
+    rejected = false; try { await db.approveDocument('COUNT-OVER'); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(legacy.part_number).qty_remaining === 6, 'shortage greater than available stock rejected');
+    const portable = JSON.parse(await db.exportBackup());
+    check(portable.documents.find(d => d.id === 'ISSUE-1').original.bytes.length === 8, 'portable backup retains original document bytes');
+    await db.restoreBackup(JSON.stringify(portable));
+    rejected = false; try { await db.approveDocument(doc.id); } catch { rejected = true; }
+    check(rejected, 'restoration preserves document replay protection');
+    const { canonicalDocumentId } = await import('/src/services/documents');
+    check(canonicalDocumentId(' doc ١ ') === 'DOC1', 'document ID normalization prevents case, spacing and Arabic digit variants');
+    const { SOUND_PATTERNS } = await import('/src/utils/operationSounds');
+    check(new Set(Object.values(SOUND_PATTERNS).map(pattern => pattern.join(','))).size === 3, 'duplicate, issued and uncertain alerts have distinct tone patterns');
+    const patterns = [];
+    window.AudioContext = class {
+      currentTime = 0; state = 'running'; destination = {};
+      createOscillator() { const oscillator = { frequency: { value: 0 }, connect() {}, disconnect() {}, start() {}, stop() { patterns.push(oscillator.frequency.value); } }; return oscillator; }
+      createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {}, disconnect() {} }; }
+    };
+    const { playOperationSound } = await import('/src/utils/operationSounds');
+    for (const kind of ['duplicate', 'issued', 'uncertain']) playOperationSound(kind);
+    check(patterns.join(',') === Object.values(SOUND_PATTERNS).flat().join(','), 'audio playback schedules the expected oscillator tones');
+    for (let i = 0; i < 5; i++) await pinSecurity.verify('0000');
+    rejected = false; try { await pinSecurity.verify('8642'); } catch { rejected = true; }
+    check(rejected, 'repeated PIN failures trigger temporary lockout');
+    return passed;
+  });
+  assert.ok(results.length >= 16);
+  results.forEach(label => console.log('PASS', label));
+  console.log(`${results.length} browser checks passed`);
+} finally { await browser.close(); server.close(); }

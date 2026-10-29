@@ -1,4 +1,6 @@
-import { InventoryItem, LocationSummary } from '../types';
+import { canonicalDocumentId, documentImageHash, interpretMark, validateDocument, type StockDocument } from './documents';
+import { authorizeMutation } from './security';
+import type { InventoryItem, LocationSummary } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
 import {
   sanitizeLocationCode,
@@ -8,7 +10,7 @@ import {
 } from '../utils/regexSanitizer';
 
 const DB_NAME = 'ASMO_Inventory_DB';
-const DB_VERSION = 4;
+const DB_VERSION = 6;
 const STORE_NAME = 'items';
 
 class InventoryDatabase {
@@ -26,28 +28,29 @@ class InventoryDatabase {
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-        if (db.objectStoreNames.contains(STORE_NAME)) {
-          db.deleteObjectStore(STORE_NAME);
+        const store = db.objectStoreNames.contains(STORE_NAME)
+          ? request.transaction!.objectStore(STORE_NAME)
+          : db.createObjectStore(STORE_NAME, { keyPath: 'part_number' });
+        for (const [name, key, unique] of [
+          ['idx_part', 'part_number', true], ['idx_location', 'location_code', false],
+          ['idx_category', 'category', false], ['idx_status', 'status', false],
+        ] as const) {
+          if (!store.indexNames.contains(name)) store.createIndex(name, key, { unique });
         }
-        const store = db.createObjectStore(STORE_NAME, { keyPath: 'part_number' });
-        store.createIndex('idx_part', 'part_number', { unique: true });
-        store.createIndex('idx_location', 'location_code', { unique: false });
-        store.createIndex('idx_category', 'category', { unique: false });
-        store.createIndex('idx_status', 'status', { unique: false });
+        const documents = db.objectStoreNames.contains('documents') ? request.transaction!.objectStore('documents') : db.createObjectStore('documents', { keyPath: 'id' });
+        if (!documents.indexNames.contains('originalHash')) documents.createIndex('originalHash', 'originalHash', { unique: true });
+        if (!db.objectStoreNames.contains('audit')) db.createObjectStore('audit', { keyPath: 'id', autoIncrement: true });
+
       };
 
       request.onsuccess = async (event) => {
         this.db = (event.target as IDBOpenDBRequest).result;
-        this.isInitialized = true;
-        await this.loadAndCleanCache();
-        const hasFull37Sheet =
-          this.itemMap.has('1001523111') &&
-          this.itemMap.has('1001174987') &&
-          this.itemMap.size >= 37;
-        if (this.itemMap.size === 0 || !hasFull37Sheet) {
-          await this.seedInitialData();
-        }
-        resolve();
+        this.db.onversionchange = () => { this.db?.close(); this.db = null; this.isInitialized = false; };
+        try {
+          await this.loadAndCleanCache();
+          this.isInitialized = true;
+          resolve();
+        } catch (error) { reject(error); }
       };
 
       request.onerror = (event) => {
@@ -61,57 +64,17 @@ class InventoryDatabase {
    * تحميل البيانات في الفهرس السريع (O(1) Map) وتنظيف أي بيانات قديمة تالفة
    */
   private async loadAndCleanCache(): Promise<void> {
-    if (!this.db) return;
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.getAll();
-
-      request.onsuccess = () => {
-        const rawItems: InventoryItem[] = request.result || [];
-        this.itemMap.clear();
-
-        for (const item of rawItems) {
-          const validPart = strict10DigitRegexFilter(item.part_number);
-          const normLoc = dynamicLocationNormalizer(item.location_code);
-
-          // حذف أي قطعة قديمة برقم ناقص أو بموقع "عام"
-          if (!validPart || !isValidSpecificLocation(normLoc)) {
-            store.delete(item.part_number);
-            continue;
-          }
-
-          let cat = item.category;
-          let descAr = item.description_ar;
-          if (!cat || cat === 'عام') {
-            const translated = categorizeAndTranslate(item.description_en || '');
-            cat = translated.category;
-            if (!descAr) descAr = translated.descAr;
-          }
-
-          const isMissing = item.is_missing === 1 || item.status === 'غير موجودة' ? 1 : 0;
-          const cleanedItem: InventoryItem = {
-            ...item,
-            part_number: validPart,
-            location_code: normLoc,
-            category: cat,
-            description_ar: descAr || item.description_en,
-            is_missing: isMissing,
-            status: isMissing ? 'غير موجودة' : item.status,
-            qty_remaining: isMissing ? 0 : Math.max(0, (Number(item.qty_total) || 0) - (Number(item.qty_out) || 0)),
-          };
-
-          this.itemMap.set(validPart, cleanedItem);
-        }
-
-        this.rebuildCacheArray();
-        resolve();
-      };
-
-      request.onerror = () => {
-        reject(request.error);
-      };
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    const items = await new Promise<InventoryItem[]>((resolve, reject) => {
+      const tx = this.db!.transaction(STORE_NAME, 'readonly');
+      const request = tx.objectStore(STORE_NAME).getAll();
+      tx.oncomplete = () => resolve(request.result);
+      tx.onabort = () => reject(tx.error);
+      tx.onerror = () => reject(tx.error);
     });
+    // Preserve legacy records verbatim. Invalid identifiers must be reviewed, never discarded.
+    this.itemMap = new Map(items.map(item => [item.part_number, item]));
+    this.rebuildCacheArray();
   }
 
   private rebuildCacheArray(): void {
@@ -123,7 +86,7 @@ class InventoryDatabase {
     if (this.isCacheDirty) {
       this.rebuildCacheArray();
     }
-    return this.cache;
+    return structuredClone(this.cache);
   }
 
   public getTotalCount(): number {
@@ -179,7 +142,7 @@ class InventoryDatabase {
 
   public getItemByPartNumber(partNumber: string): InventoryItem | undefined {
     const clean = String(partNumber || '').trim();
-    return this.itemMap.get(clean);
+    return structuredClone(this.itemMap.get(clean));
   }
 
   public getItemsByLocation(locationCode: string): InventoryItem[] {
@@ -351,13 +314,17 @@ class InventoryDatabase {
     isMissingFlag?: number,
     remark?: string
   ): Promise<InventoryItem> {
-    const cleanPart = strict10DigitRegexFilter(partNum) || partNum.trim();
+    await authorizeMutation('insertOrUpdateItem');
+    const cleanPart = partNum.trim();
+    if (!/^\d{10}$/.test(cleanPart)) throw new Error('رقم القطعة يجب أن يكون عشرة أرقام');
+    if (![qty, qtyOut].every(v => Number.isSafeInteger(v) && v >= 0) || qtyOut > qty) throw new Error('كمية غير صالحة أو رصيد سالب');
     const cleanLocation = sanitizeLocationCode(locCode);
     if (!isValidSpecificLocation(cleanLocation)) {
       throw new Error('يجب تحديد اسم الموقع الفعلي (يُمنع إدخال موقع عام)');
     }
 
     const existing = this.itemMap.get(cleanPart);
+    if (existing && existing.location_code !== cleanLocation) throw new Error('استخدم طلب نقل مستقل لتغيير الموقع');
     const isMoved = existing && existing.location_code !== cleanLocation ? 1 : existing?.is_moved || 0;
     const isMissing =
       isMissingFlag !== undefined
@@ -414,189 +381,41 @@ class InventoryDatabase {
     movedCount: number;
     missingCount: number;
   }> {
-    if (!this.db || items.length === 0) {
-      return { total: 0, insertedCount: 0, updatedCount: 0, movedCount: 0, missingCount: 0 };
-    }
-
-    let insertedCount = 0;
-    let updatedCount = 0;
-    let movedCount = 0;
-    let missingCount = 0;
-
-    const toStore: InventoryItem[] = [];
-    const seenInSameBatch = new Map<string, string>();
-    const nowIso = new Date().toISOString();
-
-    for (const raw of items) {
-      let cleanPart = strict10DigitRegexFilter(raw.part_number);
-      const cleanLocation = dynamicLocationNormalizer(raw.location_code || raw.location);
-
-      // رفض قاطع لأي رقم قطعة ناقص أو موقع "عام"
-      if (!cleanPart || !isValidSpecificLocation(cleanLocation)) {
-        continue;
-      }
-
-      // منع تداخل السطور المتشابهة في نفس الورقة (مثل 1000082688 في N01BB2 مقابل 1000082689 في N01B2)
-      if (seenInSameBatch.has(cleanPart) && seenInSameBatch.get(cleanPart) !== cleanLocation) {
-        if (cleanPart === '1000082689' && cleanLocation === 'N01BB2') {
-          cleanPart = '1000082688';
-        } else if (cleanPart === '1000986658' && cleanLocation === 'N01C2') {
-          cleanPart = '1000986659';
-        }
-      }
-      seenInSameBatch.set(cleanPart, cleanLocation);
-
-      const existing = this.itemMap.get(cleanPart);
-      const isMoved = existing && existing.location_code !== cleanLocation ? 1 : existing?.is_moved || 0;
-      const isMissing = raw.is_missing === 1 || raw.status === 'غير موجودة' ? 1 : 0;
-      const totalQty = Math.max(0, Number(raw.qty_total ?? raw.quantity ?? 1));
-      const outQty = Number(raw.qty_out ?? 0);
-      const remaining = isMissing ? 0 : Math.max(0, totalQty - outQty);
-
-      const { category, descAr } = categorizeAndTranslate(raw.description_en || '');
-      const finalDescAr = raw.description_ar || existing?.description_ar || descAr;
-      const finalCategory = raw.category && raw.category !== 'عام' ? raw.category : category;
-
-      let status: InventoryItem['status'];
-      if (isMissing) {
-        status = 'غير موجودة';
-        missingCount++;
-        if (existing) updatedCount++;
-        else insertedCount++;
-      } else if (isMoved) {
-        status = 'تم النقل';
-        movedCount++;
-        updatedCount++;
-      } else if (existing) {
-        status = 'محدث';
-        updatedCount++;
-      } else {
-        status = 'مضاف';
-        insertedCount++;
-      }
-
-      const upserted: InventoryItem = {
-        part_number: cleanPart,
-        location_code: cleanLocation,
-        old_location: isMoved && existing ? existing.old_location || existing.location_code : existing?.old_location,
-        description_en: String(raw.description_en || existing?.description_en || 'SPARE PART ASMO').trim(),
-        description_ar: finalDescAr,
-        category: finalCategory,
-        qty_total: totalQty,
-        qty_out: outQty,
-        qty_remaining: remaining,
-        is_moved: isMoved,
-        is_missing: isMissing,
-        remark: raw.remark ?? existing?.remark,
-        status,
-        updated_at: nowIso,
-      };
-
-      toStore.push(upserted);
-      this.itemMap.set(cleanPart, upserted);
-    }
-
-    await this.batchPutInStore(toStore);
-    this.isCacheDirty = true;
-
-    return {
-      total: toStore.length,
-      insertedCount,
-      updatedCount,
-      movedCount,
-      missingCount,
-    };
+    throw new Error('حفظ OCR معطل مؤقتًا: يلزم مراجعة موثقة لكل سطر؛ لم يتغير المخزون');
   }
 
   public async deleteItem(partNumber: string): Promise<void> {
-    if (!this.db) return;
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.delete(partNumber);
-
-      req.onsuccess = () => {
-        this.itemMap.delete(partNumber);
-        this.isCacheDirty = true;
-        resolve();
-      };
-      req.onerror = () => reject(req.error);
-    });
+    await authorizeMutation('حذف قطعة');
+    await this.commitChanges([], [partNumber]);
   }
 
   public async deleteLocation(locationCode: string): Promise<number> {
-    if (!this.db) return 0;
-    const itemsToDelete = this.getItemsByLocation(locationCode);
-    if (itemsToDelete.length === 0) return 0;
-
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-
-      for (const item of itemsToDelete) {
-        store.delete(item.part_number);
-        this.itemMap.delete(item.part_number);
-      }
-
-      tx.oncomplete = () => {
-        this.isCacheDirty = true;
-        resolve(itemsToDelete.length);
-      };
-      tx.onerror = () => reject(tx.error);
-    });
+    await authorizeMutation('حذف موقع');
+    const items = this.getItemsByLocation(locationCode);
+    await this.commitChanges([], items.map(item => item.part_number));
+    return items.length;
   }
 
   public async updateLocationCode(oldCode: string, newCode: string): Promise<void> {
-    const cleanNew = sanitizeLocationCode(newCode);
-    if (!isValidSpecificLocation(cleanNew)) return;
-
-    const itemsToUpdate = this.getItemsByLocation(oldCode);
-    const updatedList: InventoryItem[] = [];
-    const nowIso = new Date().toISOString();
-
-    for (const item of itemsToUpdate) {
-      const updated: InventoryItem = {
-        ...item,
-        old_location: item.old_location || oldCode,
-        location_code: cleanNew,
-        is_moved: 1,
-        status: item.is_missing === 1 ? 'غير موجودة' : 'تم النقل',
-        updated_at: nowIso,
-      };
-      updatedList.push(updated);
-      this.itemMap.set(updated.part_number, updated);
-    }
-
-    await this.batchPutInStore(updatedList);
-    this.isCacheDirty = true;
+    const items = this.getItemsByLocation(oldCode);
+    if (!items.length) return;
+    const id = 'MOVE-' + crypto.randomUUID();
+    await this.submitDocument({ id, kind: 'transfer', requester: 'local-operator', reason: 'طلب تغيير موقع من الواجهة',
+      lines: items.map(item => ({ old_location: item.location_code, part_number: item.part_number, quantity: item.qty_remaining, location: newCode,
+        description_en: item.description_en, description_ar: item.description_ar, check: '', remark: '', reviewed: true })),
+      status: 'pending', createdAt: '' });
+    await this.approveDocument(id);
   }
 
   public async relocateItem(partNumber: string, newLocation: string): Promise<InventoryItem | null> {
-    const item = this.itemMap.get(partNumber);
+    const item = this.getItemByPartNumber(partNumber);
     if (!item) return null;
-
-    const oldLoc = item.location_code;
-    const cleanNewLoc = sanitizeLocationCode(newLocation);
-    if (!isValidSpecificLocation(cleanNewLoc)) return null;
-
-    const now = new Date();
-    const formattedDate = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-
-    const updated: InventoryItem = {
-      ...item,
-      old_location: item.old_location || oldLoc,
-      location_code: cleanNewLoc,
-      is_moved: 1,
-      status: item.is_missing === 1 ? 'غير موجودة' : 'تم النقل',
-      moved_at: formattedDate,
-      updated_at: now.toISOString(),
-    };
-
-    await this.putInStore(updated);
-    this.itemMap.set(partNumber, updated);
-    this.isCacheDirty = true;
-
-    return updated;
+    const id = 'MOVE-' + crypto.randomUUID();
+    await this.submitDocument({ id, kind: 'transfer', requester: 'local-operator', reason: 'طلب نقل من الواجهة',
+      lines: [{ old_location: item.location_code, part_number: partNumber, quantity: item.qty_remaining, location: newLocation, description_en: item.description_en,
+        description_ar: item.description_ar, check: '', remark: '', reviewed: true }], status: 'pending', createdAt: '' });
+    await this.approveDocument(id);
+    return this.getItemByPartNumber(partNumber) || null;
   }
 
   public getMovedItems(): InventoryItem[] {
@@ -612,6 +431,7 @@ class InventoryDatabase {
   }
 
   public async markStatus(partNumber: string, newStatus: InventoryItem['status']): Promise<void> {
+    await authorizeMutation('markStatus');
     const item = this.itemMap.get(partNumber);
     if (!item) return;
     const isMissing = newStatus === 'غير موجودة' ? 1 : 0;
@@ -631,33 +451,196 @@ class InventoryDatabase {
    * استيراد دفعات ضخمة بسرعة فائقة (حتى 100,000 قطعة)
    */
   public async batchImport(items: InventoryItem[]): Promise<number> {
+    await authorizeMutation('batchImport');
     if (!this.db || items.length === 0) return 0;
 
-    for (let i = 0; i < items.length; i++) {
-      this.itemMap.set(items[i].part_number, items[i]);
-    }
-    this.isCacheDirty = true;
-
-    const CHUNK_SIZE = 10000;
-    for (let start = 0; start < items.length; start += CHUNK_SIZE) {
-      const chunk = items.slice(start, start + CHUNK_SIZE);
-      await this.batchPutInStore(chunk);
-    }
+    await this.batchPutInStore(items);
 
     return items.length;
   }
 
   private async batchPutInStore(items: InventoryItem[]): Promise<void> {
-    if (!this.db || items.length === 0) return;
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORE_NAME, 'readwrite');
+    await this.commitChanges(items, []);
+  }
+
+  private async commitChanges(items: InventoryItem[], deletes: string[], clear = false): Promise<void> {
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    await new Promise<void>((resolve, reject) => {
+      const tx = this.db!.transaction([STORE_NAME, 'audit'], 'readwrite');
       const store = tx.objectStore(STORE_NAME);
-      for (let i = 0; i < items.length; i++) {
-        store.put(items[i]);
+      const audit = tx.objectStore('audit');
+      const at = new Date().toISOString();
+      const record = (key: string, after?: InventoryItem) => {
+        const read = store.get(key);
+        read.onsuccess = () => {
+          audit.add({ at, actor: 'local-supervisor', action: after ? 'save' : 'delete', before: read.result, after });
+          if (after) store.put(after); else store.delete(key);
+        };
+      };
+      if (clear) {
+        const read = store.getAll();
+        read.onsuccess = () => { audit.add({ at, actor: 'local-supervisor', action: 'wipe', before: read.result }); store.clear(); };
+      } else {
+        items.forEach(item => record(item.part_number, item));
+        deletes.forEach(key => record(key));
       }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('أُلغيت المعاملة'));
     });
+    await this.loadAndCleanCache();
+  }
+
+  public async getDocuments(): Promise<StockDocument[]> {
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    return new Promise((resolve, reject) => {
+      const tx = this.db!.transaction('documents', 'readonly');
+      const req = tx.objectStore('documents').getAll();
+      tx.oncomplete = () => resolve(req.result);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  public async findDocumentByImage(image: Blob): Promise<StockDocument | undefined> {
+    const hash = await documentImageHash(image);
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    return new Promise((resolve, reject) => {
+      const tx = this.db!.transaction('documents', 'readonly');
+      const req = tx.objectStore('documents').index('originalHash').get(hash);
+      tx.oncomplete = () => resolve(req.result);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  public async submitDocument(doc: StockDocument): Promise<void> {
+    validateDocument(doc);
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    const originalHash = doc.original ? await documentImageHash(doc.original) : undefined;
+    const safe = structuredClone({ ...doc, id: canonicalDocumentId(doc.id), originalHash, lines: doc.lines.map(line => ({ ...line, old_location: this.itemMap.get(line.part_number)?.location_code })), status: 'pending' as const, createdAt: new Date().toISOString(), executedAt: undefined, approvedBy: undefined });
+    await new Promise<void>((resolve, reject) => {
+      const tx = this.db!.transaction('documents', 'readwrite');
+      tx.objectStore('documents').add(safe);
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(new Error(tx.error?.name === 'ConstraintError' ? 'تم حفظها مسبقًا؛ لم يتغير المخزون' : 'تعذر حفظ المستند؛ لم يتغير المخزون'));
+    });
+  }
+
+  public async approveDocument(id: string): Promise<void> {
+    await authorizeMutation('اعتماد مستند بواسطة المشرف');
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    await new Promise<void>((resolve, reject) => {
+      const tx = this.db!.transaction(['documents', STORE_NAME, 'audit'], 'readwrite');
+      const docs = tx.objectStore('documents');
+      const store = tx.objectStore(STORE_NAME);
+      const audit = tx.objectStore('audit');
+      let failure: Error | undefined;
+      const fail = (message: string) => { failure = new Error(message); tx.abort(); };
+      const req = docs.get(id);
+      req.onsuccess = () => {
+        const doc: StockDocument | undefined = req.result;
+        if (!doc || doc.status !== 'pending') { fail('المستند غير متاح أو سبق اعتماده'); return; }
+        try { validateDocument(doc); } catch (error) { fail((error as Error).message); return; }
+        for (const line of doc.lines) {
+          const read = store.get(line.part_number);
+          read.onsuccess = () => {
+            const before: InventoryItem | undefined = read.result;
+            const now = new Date().toISOString();
+            const marks = interpretMark(line.check, line.remark);
+            const { category, descAr } = categorizeAndTranslate(line.description_en);
+            let after: InventoryItem;
+            if (doc.kind !== 'receipt' && !before) { fail('رقم غير موجود: ' + line.part_number); return; }
+            if (doc.kind === 'receipt') {
+              if (!isValidSpecificLocation(line.location)) { fail('موقع غير صالح'); return; }
+              if (before && before.location_code !== line.location) { fail('إضافة لموقع مختلف تستلزم طلب نقل مستقل'); return; }
+              after = before ? { ...before, qty_total: before.qty_total + line.quantity, qty_remaining: before.qty_remaining + line.quantity } : {
+                part_number: line.part_number, location_code: line.location, description_en: line.description_en,
+                description_ar: line.description_ar || descAr, category, qty_total: line.quantity, qty_out: 0,
+                qty_remaining: line.quantity, is_moved: 0, is_missing: 0, status: 'مضاف',
+              };
+            } else if (doc.kind === 'issue') {
+              if (line.quantity > before!.qty_remaining || before!.is_missing === 1) { fail('الكمية تتجاوز الرصيد المتاح'); return; }
+              after = { ...before!, qty_out: before!.qty_out + line.quantity, qty_remaining: before!.qty_remaining - line.quantity };
+            } else if (doc.kind === 'transfer') {
+              if (line.quantity !== before!.qty_remaining || !isValidSpecificLocation(line.location)) { fail('هذا الإصدار يدعم نقل كامل الرصيد المتاح فقط إلى موقع صالح'); return; }
+              after = { ...before!, old_location: before!.location_code, location_code: line.location, is_moved: 1, status: 'تم النقل', moved_at: now };
+            } else {
+              if (marks.excludedIncrease) return; // F1/F2/etc are retained in the document, excluded from stock changes.
+              if (line.location !== before!.location_code) { fail('تغيير الموقع يستلزم طلب نقل'); return; }
+              if (marks.shortage > before!.qty_remaining) { fail('النقص يتجاوز المتاح'); return; }
+              // Approved -N shortages decrement available stock once through document replay protection.
+              after = { ...before!, status: marks.status, is_missing: marks.status === 'غير موجودة' ? 1 : 0, remark: line.remark, qty_out: before!.qty_out + marks.shortage, qty_remaining: before!.qty_remaining - marks.shortage };
+            }
+            if (![after.qty_total, after.qty_out, after.qty_remaining].every(v => Number.isSafeInteger(v) && v >= 0)) { fail('كمية غير صالحة'); return; }
+            after.updated_at = now;
+            store.put(after);
+            audit.add({ at: now, actor: 'local-supervisor', action: doc.kind, documentId: id, before, after });
+          };
+        }
+        const approved = { ...doc, status: 'approved', executedAt: new Date().toISOString(), approvedBy: 'local-supervisor' };
+        docs.put(approved);
+        audit.add({ at: approved.executedAt, actor: approved.approvedBy, action: 'approve-document', documentId: id });
+      };
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(failure || tx.error || new Error('تعذر اعتماد المستند'));
+    });
+    await this.loadAndCleanCache();
+  }
+
+  public getAvailableItems(): InventoryItem[] {
+    return this.getAllItems().filter(item => item.qty_remaining > 0 && item.is_missing !== 1);
+  }
+
+  public async exportBackup(): Promise<string> {
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    const snapshot = await new Promise<{ items: InventoryItem[]; audit: unknown[]; documents: StockDocument[] }>((resolve, reject) => {
+      const tx = this.db!.transaction([STORE_NAME, 'audit', 'documents'], 'readonly');
+      const items = tx.objectStore(STORE_NAME).getAll();
+      const audit = tx.objectStore('audit').getAll();
+      const docs = tx.objectStore('documents').getAll();
+      tx.oncomplete = () => resolve({ items: items.result, audit: audit.result, documents: docs.result });
+      tx.onabort = () => reject(tx.error);
+      tx.onerror = () => reject(tx.error);
+    });
+    const documents = await Promise.all(snapshot.documents.map(async doc => ({
+      ...doc, original: doc.original ? { type: doc.original.type, bytes: Array.from(new Uint8Array(await doc.original.arrayBuffer())) } : undefined,
+    })));
+    return JSON.stringify({ format: 'asmo-backup-v1', createdAt: new Date().toISOString(), ...snapshot, documents });
+  }
+
+  public async restoreBackup(text: string): Promise<void> {
+    await authorizeMutation('استعادة نسخة احتياطية (دمج دون حذف)');
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    const data = JSON.parse(text);
+    if (data.format !== 'asmo-backup-v1' || !Array.isArray(data.items)) throw new Error('نسخة غير صالحة');
+    const keys = new Set<string>();
+    for (const item of data.items) {
+      if (!item || typeof item.part_number !== 'string' || !item.part_number.trim() || item.part_number.length > 128 || keys.has(item.part_number)
+        || ![item.qty_total, item.qty_out, item.qty_remaining].every(v => Number.isSafeInteger(v) && v >= 0)
+        || item.qty_out > item.qty_total || item.qty_remaining > item.qty_total - item.qty_out
+        || typeof item.location_code !== 'string' || typeof item.description_en !== 'string'
+        || typeof item.description_ar !== 'string' || typeof item.category !== 'string') throw new Error('سجل غير صالح في النسخة؛ لم تُطبق الاستعادة');
+      keys.add(item.part_number);
+    }
+    const documents: StockDocument[] = await Promise.all((data.documents || []).map(async (doc: any) => {
+      validateDocument(doc);
+      if (!['pending', 'approved'].includes(doc.status)) throw new Error('حالة مستند غير صالحة');
+      const original = doc.original ? new Blob([new Uint8Array(doc.original.bytes)], { type: doc.original.type }) : undefined;
+      return { ...doc, original, originalHash: original ? await documentImageHash(original) : undefined };
+    }));
+    await new Promise<void>((resolve, reject) => {
+      const tx = this.db!.transaction([STORE_NAME, 'audit', 'documents'], 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const audit = tx.objectStore('audit');
+      for (const item of data.items) {
+        const req = store.get(item.part_number);
+        req.onsuccess = () => { audit.add({ at: new Date().toISOString(), actor: 'local-supervisor', action: 'restore', before: req.result, after: item }); store.put(item); };
+      }
+      // Preserve existing document IDs, especially approvals, to prevent replay after restoration.
+      const docs = tx.objectStore('documents');
+      for (const doc of documents) { const req = docs.get(doc.id); req.onsuccess = () => { if (!req.result) docs.add(doc); }; }
+      audit.add({ at: new Date().toISOString(), actor: 'local-supervisor', action: 'restore-archive', archivedAudit: data.audit || [] });
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+    });
+    await this.loadAndCleanCache();
   }
 
   public async resetAndSeedDatabase(): Promise<void> {
@@ -667,30 +650,12 @@ class InventoryDatabase {
   }
 
   public async wipeAllData(): Promise<void> {
-    if (!this.db) return;
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.clear();
-      req.onsuccess = () => {
-        this.itemMap.clear();
-        this.cache = [];
-        this.isCacheDirty = false;
-        resolve();
-      };
-      req.onerror = () => reject(req.error);
-    });
+    await authorizeMutation('مسح المخزون مع إبقاء سجل التدقيق');
+    await this.commitChanges([], [], true);
   }
 
   private async putInStore(item: InventoryItem): Promise<void> {
-    if (!this.db) return;
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.put(item);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
+    await this.commitChanges([item], []);
   }
 
   /**

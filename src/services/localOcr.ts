@@ -120,7 +120,7 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
         qty_remaining: hasCrossMark ? 0 : Math.max(0, total - out),
         is_missing: hasCrossMark ? 1 : 0,
         status: hasCrossMark ? 'غير موجودة' : 'مضاف',
-        confidence: 'Strict Template (100% Validated)',
+        confidence: 'اقتراح قراءة غير مؤكد',
       });
     }
   }

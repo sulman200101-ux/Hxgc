@@ -51,7 +51,7 @@ TABLE COLUMNS (in order):
 6. "QTY" (Integer quantity) -> Extract as integer "quantity".
 7. "Check" (Handwritten mark column):
    - If marked with handwritten cross "X" or "×" -> set "is_missing": true and "check_mark": "X".
-   - If marked with handwritten checkmark "✓", "✔", "/", or left blank -> set "is_missing": false and "check_mark": "CHECK". Never fail on messy handwriting in the Check column!
+   - If marked with handwritten checkmark "✓", "✔", "/", -> set "is_missing": false and "check_mark": "CHECK". Blank or uncertain marks must be UNVERIFIED; never infer a checkmark.
 8. "Remark" (Handwritten note like "+90", "+3", "+96", "-7", "F1", "F2") -> Extract as "remark".
 9. "Material Description" (English description) -> Extract as "description".
 
@@ -279,12 +279,7 @@ export async function parseTableWithGeminiVision(
       const remark = item.remark ? String(item.remark).trim() : undefined;
       const seqNum = item.seq ? Number(item.seq) : undefined;
 
-      // فك التداخل بين السطور المتشابهة في نفس الورقة (مثل #653 1000082688 في N01BB2 و #7832 1000986659 في N01C2)
-      if (valid10DigitPart === '1000082689' && (normLocation === 'N01BB2' || seqNum === 653)) {
-        valid10DigitPart = '1000082688';
-      } else if (valid10DigitPart === '1000986658' && (normLocation === 'N01C2' || seqNum === 7832)) {
-        valid10DigitPart = '1000986659';
-      }
+
 
       if (valid10DigitPart && isLocValid) {
         const { category, descAr } = categorizeAndTranslate(descEn);
@@ -300,8 +295,8 @@ export async function parseTableWithGeminiVision(
           qty_remaining: isMissing ? 0 : Math.max(0, total - out),
           is_missing: isMissing ? 1 : 0,
           remark,
-          status: isMissing ? 'غير موجودة' : 'مضاف',
-          confidence: 'Assistive AI Vision (100% Validated)',
+          status: isMissing ? 'غير موجودة' : 'غير مدقق',
+          confidence: 'اقتراح قراءة غير مؤكد',
         });
       } else {
         const cleanDigits = rawPartStr.replace(/[^0-9]/g, '');
