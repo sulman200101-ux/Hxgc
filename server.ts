@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -13,7 +13,6 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// تفعيل CORS للسماح لتطبيق الأندرويد (Capacitor APK) بالاتصال المباشر بالسيرفر
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -24,14 +23,16 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '35mb' }));
-app.use(express.urlencoded({ extended: true, limit: '35mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+let isGeminiKeyUnsupported = false;
 
 function charToDigitMapper(raw: any, defaultValue: number = 1): number {
   if (raw === null || raw === undefined) return defaultValue;
   if (typeof raw === 'number') return isNaN(raw) ? defaultValue : Math.max(0, Math.floor(raw));
 
-  let str = String(raw)
+  const str = String(raw)
     .trim()
     .replace(/[OoQD]/g, '0')
     .replace(/[Il|!]/g, '1')
@@ -46,8 +47,18 @@ function charToDigitMapper(raw: any, defaultValue: number = 1): number {
 }
 
 function strict10DigitMaterialFilter(raw: any): string | null {
-  const value = String(raw ?? '').trim();
-  return /^\d{10}$/.test(value) ? value : null;
+  let value = String(raw ?? '').trim();
+  if (/^\d{10}$/.test(value)) return value;
+  const repaired = value
+    .replace(/[OoQD]/g, '0')
+    .replace(/[Il|!]/g, '1')
+    .replace(/[Zz]/g, '2')
+    .replace(/[Ss$]/g, '5')
+    .replace(/[Gg]/g, '6')
+    .replace(/[Bb]/g, '8')
+    .replace(/[^0-9]/g, '');
+  if (/^10\d{8}$/.test(repaired)) return repaired;
+  return null;
 }
 
 function dynamicLocationNormalizer(rawLoc: any): string {
@@ -63,7 +74,6 @@ function dynamicLocationNormalizer(rawLoc: any): string {
 
   if (!cleaned) return '';
 
-  // إصلاح بصري لرموز المواقع (NO1B2 -> N01B2, N01FLI -> N01FL1)
   let sapFixed = cleaned
     .replace(/\b([A-Z])[Oo](\d)/g, '$10$2')
     .replace(/\b([A-Z]\d)[Oo]/g, '$10')
@@ -91,7 +101,7 @@ function dynamicLocationNormalizer(rawLoc: any): string {
   if (
     /^[A-Z0-9][A-Z0-9\s\/._-]{1,18}$/i.test(sapFixed) &&
     /[A-Z]/i.test(sapFixed) &&
-    !['C006', 'M016', 'D04D', 'EA', 'SET', 'PK', 'SH', 'CO', 'AY'].includes(sapFixed)
+    !['C006', 'M016', 'D04D', 'EA', 'SET', 'PK', 'SH', 'CO', 'AY', 'PAA', 'ZYD'].includes(sapFixed)
   ) {
     return sapFixed;
   }
@@ -135,61 +145,54 @@ app.post('/api/gemini/parse-table', async (req, res) => {
     }
     cleanBase64 = cleanBase64.replace(/\s+/g, '');
 
-    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
-    if (!apiKey) {
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    // التحقق من صلاحية صيغة المفتاح أو حالة عدم التطابق لتجنب أخطاء 401 المتكررة والتحويل الفوري للقارئ المحلي
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.startsWith('AIza') || isGeminiKeyUnsupported) {
       return res.status(200).json({
         success: false,
+        fallbackToLocal: true,
         items: [],
         skipped_rows: [],
-        message: 'مفتاح Gemini API غير متاح في بيئة السيرفر.',
+        message: 'يتم استخدام محرك القراءة المحلي الذكي.',
       });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
 
-    const prompt = `You are an expert industrial AI vision system specialized in reading ASMO "SAP Inventory Controller" spare parts sheets (in any orientation: landscape or rotated 90 degrees portrait).
+    const prompt = `You are an expert industrial AI vision system specialized in reading ASMO "SAP Inventory Controller" spare parts sheets (whether upright landscape or rotated 90 degrees portrait/sideways).
 
 TABLE COLUMNS (in order):
-1. "#" (Short sequence number: 1 to 5 digits like 198, 653, 654, 8428, 18195) -> Extract as "seq". NEVER put "#" in "part_number"!
-2. "Material" (Part Number: 10-digit number starting with 100, e.g. "1001523111", "1000029819", "1000082689", "1001023714") -> Extract the full 10 digits as "part_number". Even if a pen mark touches a digit, read the 10-digit number starting with 100 carefully.
+1. "#" (Short sequence number: 1 to 5 digits like 496, 1162, 5466, 11470, 18195) -> Extract as integer "seq". NEVER put "#" in "part_number"!
+2. "Material" (Part Number: 10-digit number starting with 100, e.g. "1001023714", "1001032639", "1001011116", "1000428938") -> Extract the exact 10 digits as "part_number". Even if a pen mark touches a digit, read the 10-digit number starting with 100 carefully.
 3. "Plant" (C006, M016, D04D) and "Area" (002) -> Ignore.
-4. "Storage Bin" (Exact Location Code: e.g. "N01B1", "N01B2", "N01BB1", "N01BB2", "N01C1", "N01C2", "N01D1", "N01D2", "N01FL1", "N11C2", "N06C1") -> Extract as "location". If a row belongs to the same bin group as the row above it, output that bin code. NEVER output "عام".
-5. "Bun" (Unit: EA, PK, AY, SET, SH, CO).
+4. "Storage Bin" (Exact Location Code: e.g. "N11C2", "N11D1", "N11D2", "N11FL1", "N11FL2", "N12A1", "N12A2", "N16D1", "N16D2", "N17A1", "N17A2", "N17B1") -> Extract as "location". Never output "عام".
+5. "Bun" (Unit: EA, PK, AY, SET, SH, CO, PAA, ZYD).
 6. "QTY" (Integer quantity) -> Extract as integer "quantity".
 7. "Check" (Handwritten mark column):
    - If marked with handwritten cross "X" or "×" -> set "is_missing": true and "check_mark": "X".
-   - If marked with handwritten checkmark "✓", "✔", "/", -> set "is_missing": false and "check_mark": "CHECK". Blank or uncertain marks must be UNVERIFIED. Never infer a checkmark.
-8. "Remark" (Handwritten note like "+90", "+3", "+96", "-7", "F1", "F2") -> Extract as "remark".
-9. "Material Description" (English description) -> Extract as "description".
+   - If marked with handwritten checkmark "✓", "✔", "/", -> set "is_missing": false and "check_mark": "✓".
+   - If blank -> set "is_missing": false and "check_mark": "".
+8. "Remark" (Handwritten note like "F1", "F2", "F3", "F5", "F20", "-4", "SET", "+90") -> Extract as "remark".
+9. "Material Description" (Full English technical description including sizes, grades, and dimensions) -> Extract as "description".
 
 MANDATE:
-- Extract EVERY SINGLE ITEM ROW on the sheet from top to bottom (whether the sheet has 5 rows, 24 rows, 36 rows, 37 rows, or more).
-- Ignore table headers, page footers, and blank margins.
-- Return ONLY a valid JSON array:
-  [{"seq": 18195, "part_number": "1001523111", "location": "N01B1", "quantity": 2, "check_mark": "CHECK", "is_missing": false, "remark": "", "description": "GASKET PUMP CCR UNIT 1,2 &3 SEAL"}]`;
+- Extract EVERY SINGLE ITEM ROW on the sheet from top to bottom (e.g. all 29 rows on the sheet), preserving repeated Material rows if a part appears twice on the sheet.
+- Ignore table headers, page footers (e.g. Page 27 of 43), and blank margins.`;
 
-    const candidateModels = [
-      { name: 'gemini-3-flash-preview', minimalThinking: true },
-      { name: 'gemini-3.5-flash', minimalThinking: false },
-      { name: 'gemini-3.6-flash', minimalThinking: false },
-      { name: 'gemini-flash-lite-latest', minimalThinking: false },
-    ];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
     let response: any = null;
-    let lastError: any = null;
 
-    for (const m of candidateModels) {
+    for (const modelName of candidateModels) {
       try {
-        const configObj: any = {
-          responseMimeType: 'application/json',
-          maxOutputTokens: 8192,
-          temperature: 0.0,
-        };
-        if (m.minimalThinking) {
-          configObj.thinkingConfig = { thinkingLevel: ThinkingLevel.MINIMAL };
-        }
-
         response = await ai.models.generateContent({
-          model: m.name,
+          model: modelName,
           contents: {
             parts: [
               { text: prompt },
@@ -201,60 +204,85 @@ MANDATE:
               },
             ],
           },
-          config: configObj,
+          config: {
+            responseMimeType: 'application/json',
+            ...(modelName === 'gemini-3.8-flash'
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  seq: { type: Type.INTEGER },
+                  part_number: { type: Type.STRING },
+                  location: { type: Type.STRING },
+                  quantity: { type: Type.INTEGER },
+                  check_mark: { type: Type.STRING },
+                  is_missing: { type: Type.BOOLEAN },
+                  remark: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                },
+              },
+            },
+          },
         });
 
         if (response && response.text) {
           break;
         }
       } catch (err: any) {
-        lastError = err;
-        const msg = String(err?.message || err);
-        console.warn(`Model ${m.name} notice: ${msg.slice(0, 120)}`);
+        const errMsg = String(err?.message || err || '');
+        if (
+          err?.status === 401 ||
+          err?.status === 403 ||
+          errMsg.includes('401') ||
+          errMsg.includes('UNAUTHENTICATED') ||
+          errMsg.includes('API key not valid') ||
+          errMsg.includes('ACCESS_TOKEN_TYPE_UNSUPPORTED')
+        ) {
+          isGeminiKeyUnsupported = true;
+          break;
+        }
       }
     }
 
     if (!response || !response.text) {
-      console.error('All Gemini model candidates failed:', lastError);
       return res.status(200).json({
         success: false,
+        fallbackToLocal: true,
         items: [],
         skipped_rows: [],
-        message: 'تعذر تحليل الصورة عبر الذكاء الاصطناعي، يرجى إعادة تصوير الورقة بوضوح.',
+        message: 'تعذر تحليل الصورة عبر السيرفر، جاري التحويل للمحرك المحلي.',
       });
     }
 
-    const rawResponseText = response.text || '';
-    let cleanedText = rawResponseText
+    const rawResponseText = response.text || '[]';
+    const cleanedText = rawResponseText
       .trim()
       .replace(/^```json\s*/i, '')
       .replace(/^```\s*/i, '')
       .replace(/\s*```$/i, '')
       .trim();
 
-    let parsed: any = null;
+    let parsed: any = [];
     try {
       parsed = JSON.parse(cleanedText);
-    } catch (e1) {
+    } catch {
       const arrayMatch = cleanedText.match(/\[\s*\{[\s\S]*\}\s*\]/);
       if (arrayMatch) {
         try {
           parsed = JSON.parse(arrayMatch[0]);
-        } catch (e2) {}
+        } catch {}
       }
     }
 
-    if (!parsed) parsed = [];
-
     const rawItems: any[] = Array.isArray(parsed)
       ? parsed
-      : Array.isArray(parsed.items)
+      : Array.isArray(parsed?.items)
       ? parsed.items
-      : Array.isArray(parsed.inventory)
-      ? parsed.inventory
-      : Object.values(parsed).find(Array.isArray) || [];
+      : [];
 
-    // استنتاج الموقع الفعلي من السطور المجاورة إذا طمست علامة اليد خانة الموقع في سطر واحد
     let lastValidLoc = '';
     const preNormalized = rawItems.map((item) => {
       const rawLoc = item.location ?? item.location_code ?? item.bin ?? item.storage_bin ?? item.storageBin ?? '';
@@ -281,43 +309,46 @@ MANDATE:
 
     preNormalized.forEach((item, idx) => {
       const rawPart = String(
-        item.part_number ?? item.partNumber ?? item.material ?? item.part ?? item.part_no ?? item['Part Number'] ?? ''
+        item.part_number ?? item.partNumber ?? item.material ?? item.part ?? ''
       ).trim();
 
-      let finalPartNumber = strict10DigitMaterialFilter(rawPart);
+      const finalPartNumber = strict10DigitMaterialFilter(rawPart);
       const normLocation = item._normLocation || '';
-      const rawQty = item.quantity ?? item.qty ?? item.total_qty ?? item.stock ?? 1;
+      const rawQty = item.quantity ?? item.qty ?? item.total_qty ?? 1;
       const normQuantity = charToDigitMapper(rawQty, 1);
       const isMissing = detectMissingFromCheckMark(item);
-      const remark = item.remark ? String(item.remark).trim() : undefined;
+      const rawCheck = String(item.check_mark ?? item.check ?? '').trim();
+      const checkMark = isMissing
+        ? 'X'
+        : /^(✓|✔|\/|CHECK)$/i.test(rawCheck)
+        ? '✓'
+        : '';
+      const remark = item.remark ? String(item.remark).trim() : '';
       const seqNum = item.seq ? Number(item.seq) : undefined;
       const desc = String(
-        item.description ?? item.description_en ?? item.desc ?? item.name ?? item['Description'] ?? 'SPARE PART ASMO'
+        item.description ?? item.description_en ?? item.desc ?? 'SPARE PART ASMO'
       ).trim();
-
 
       if (finalPartNumber && normLocation) {
         validItems.push({
           seq: seqNum,
           part_number: finalPartNumber,
           location: normLocation,
+          location_code: normLocation,
           quantity: normQuantity,
-          is_missing: isMissing,
-          check_mark: isMissing ? 'X' : String(item.check_mark || 'UNVERIFIED'),
+          qty_total: normQuantity,
+          is_missing: isMissing ? 1 : 0,
+          check_mark: checkMark,
           remark,
           description_en: desc,
         });
       } else if (rawPart.replace(/[^0-9]/g, '').length > 0) {
         const cleanDigits = rawPart.replace(/[^0-9]/g, '');
-        let reason = 'بيانات السطر غير مكتملة';
-        if (!finalPartNumber) {
-          reason =
-            cleanDigits.length > 0 && cleanDigits.length <= 5
-              ? `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام`
-              : `رقم القطعة (${rawPart || 'فارغ'}) ناقص ولا يتكون من 10 أرقام كاملة`;
-        } else if (!normLocation) {
-          reason = `اسم الموقع غير واضح في عمود Storage Bin`;
-        }
+        const reason = !finalPartNumber
+          ? cleanDigits.length <= 5
+            ? `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام`
+            : `رقم القطعة (${rawPart}) ناقص ولا يتكون من 10 أرقام كاملة`
+          : `اسم الموقع غير واضح في عمود Storage Bin`;
 
         skippedRows.push({
           id: `skip-${idx + 1}`,
@@ -344,7 +375,7 @@ MANDATE:
       success: false,
       items: [],
       skipped_rows: [],
-      message: error?.message || 'حدث خطأ أثناء معالجة الصورة عبر Gemini API',
+      message: error?.message || 'حدث خطأ أثناء معالجة الصورة عبر السيرفر',
     });
   }
 });

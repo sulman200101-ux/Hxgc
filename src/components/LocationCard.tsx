@@ -71,15 +71,15 @@ export const LocationCard: React.FC<LocationCardProps> = ({
             )}
 
             {summary.added_count > 0 && (
-              <span className="px-2.5 py-1 rounded-lg bg-emerald-950/60 text-emerald-300 border border-emerald-800/60 text-xs font-bold flex items-center gap-1">
+              <span className="px-2.5 py-1 rounded-lg bg-emerald-950/80 text-emerald-300 border border-emerald-600 text-xs font-black flex items-center gap-1 shadow-sm">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                <span>✓ موجودة ({summary.added_count})</span>
+                <span>✓ مدقق ({summary.added_count})</span>
               </span>
             )}
 
             {summary.unverified_count > 0 && (
-              <span className="px-2.5 py-1 rounded-lg bg-orange-950/60 text-orange-300 border border-orange-800/60 text-xs font-bold flex items-center gap-1">
-                <AlertTriangle className="w-3.5 h-3.5 text-orange-400" />
+              <span className="px-2.5 py-1 rounded-lg bg-amber-950/80 text-amber-300 border border-amber-600/80 text-xs font-bold flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
                 <span>غير مدقق ({summary.unverified_count})</span>
               </span>
             )}
@@ -175,16 +175,19 @@ export const LocationCard: React.FC<LocationCardProps> = ({
             <p className="text-center text-xs text-neutral-500 py-4">لا توجد قطع مطابقة للبحث داخل هذا الموقع</p>
           ) : (
             <>
-              {previewItems.map((item) => {
+              {previewItems.map((item, idx) => {
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
+                const isVerified = !isMissing && item.status === 'مدقق';
                 const isMoved = item.is_moved === 1 || item.status === 'منقول' || item.status === 'تم النقل';
 
                 return (
                   <div
-                    key={item.part_number}
+                    key={`${item.part_number}-${idx}`}
                     className={`rounded-xl p-3 border transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 ${
                       isMissing
                         ? 'bg-red-950/20 border-red-800/60 hover:border-red-500'
+                        : isVerified
+                        ? 'bg-emerald-950/20 border-emerald-600/60 hover:border-emerald-400'
                         : 'bg-[#2C1E18] border-[#432d24] hover:border-amber-500/40'
                     }`}
                   >
@@ -200,15 +203,22 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                         {isMissing ? (
                           <span className="text-[11px] px-2.5 py-0.5 rounded-md font-black bg-red-950 text-red-200 border border-red-500 inline-flex items-center gap-1 shadow-sm">
                             <XCircle className="w-3.5 h-3.5 text-red-400" />
-                            <span>× غير موجودة</span>
+                            <span>× غير موجودة (بانتظار المشرف)</span>
                           </span>
-                        ) : isMoved ? (
-                          <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-600/60">
-                            تم النقل 🟢
+                        ) : isVerified ? (
+                          <span className="text-[11px] px-2.5 py-0.5 rounded-md font-black bg-emerald-950 text-emerald-300 border border-emerald-500 inline-flex items-center gap-1 shadow-sm">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>✓ مدقق</span>
                           </span>
                         ) : (
-                          <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-950/50 text-emerald-300 border border-emerald-700/50">
-                            ✓ موجودة ({item.status})
+                          <span className="text-[11px] px-2.5 py-0.5 rounded-md font-bold bg-amber-950/80 text-amber-300 border border-amber-600/70 inline-flex items-center gap-1">
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                            <span>غير مدقق</span>
+                          </span>
+                        )}
+                        {isMoved && !isMissing && (
+                          <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-600/60">
+                            تم النقل 🟢
                           </span>
                         )}
                       </div>
@@ -223,12 +233,22 @@ export const LocationCard: React.FC<LocationCardProps> = ({
 
                     <div className="flex items-center gap-2 bg-[#1A110D] px-3 py-1.5 rounded-lg border border-[#3E291F] text-xs font-mono justify-between md:justify-start">
                       <div className="text-center px-1.5">
-                        <span className="block text-[10px] text-neutral-400">إجمالي</span>
+                        <span className="block text-[10px] text-neutral-400">العدد الأصلي</span>
                         <span className="font-bold text-amber-300">{item.qty_total}</span>
                       </div>
-                      <span className="text-neutral-600">|</span>
+                      {item.qty_out > 0 && !isMissing && (
+                        <>
+                          <span className="text-neutral-600">-</span>
+                          <div className="text-center px-1.5">
+                            <span className="block text-[10px] text-amber-400">ناقص</span>
+                            <span className="font-bold text-amber-400">-{item.qty_out}</span>
+                          </div>
+                          <span className="text-neutral-600">=</span>
+                        </>
+                      )}
+                      {(!item.qty_out || isMissing) && <span className="text-neutral-600">|</span>}
                       <div className="text-center px-1.5">
-                        <span className="block text-[10px] text-neutral-400">متبقي</span>
+                        <span className="block text-[10px] text-neutral-400">يبقى بالمخزون</span>
                         <span className={`font-bold ${isMissing ? 'text-red-400' : 'text-emerald-400'}`}>
                           {item.qty_remaining}
                         </span>
@@ -236,12 +256,30 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1.5 justify-end flex-wrap">
-                      <button onClick={() => onMarkItemStatus(item.part_number, item.status === 'مدقق' ? 'غير مدقق' : 'مدقق')} title="تغيير حالة تدقيق القطعة" className="px-2 py-1 rounded border border-amber-700 text-amber-200 text-xs">{item.status === 'مدقق' ? 'مدققة ✓' : 'غير مدققة'}</button>
+                      {!isMissing && (
+                        <button
+                          onClick={() =>
+                            onMarkItemStatus(
+                              item.part_number,
+                              isVerified ? 'غير مدقق' : 'مدقق'
+                            )
+                          }
+                          title="اضغط لتحويل القطعة إلى اللون الأخضر مدقق ✓"
+                          className={`px-3 py-1 rounded-lg text-xs font-black border flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 ${
+                            isVerified
+                              ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-md shadow-emerald-950/60'
+                              : 'bg-amber-950/80 hover:bg-emerald-800 text-amber-200 hover:text-white border-amber-600/80'
+                          }`}
+                        >
+                          <CheckCircle2 className={`w-3.5 h-3.5 ${isVerified ? 'text-white' : 'text-amber-400'}`} />
+                          <span>{isVerified ? 'مدقق ✓' : 'غير مدقق (اضغط للتدقيق)'}</span>
+                        </button>
+                      )}
                       <button
                         onClick={() =>
                           onMarkItemStatus(
                             item.part_number,
-                            isMissing ? 'مضاف' : 'غير موجودة'
+                            isMissing ? 'مدقق' : 'غير موجودة'
                           )
                         }
                         className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
@@ -251,7 +289,7 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                         }`}
                         title="تغيير حالة التوفر (موجودة ✓ / غير موجودة ×)"
                       >
-                        {isMissing ? 'تحويل لموجودة ✓' : 'علامة × غير موجودة'}
+                        {isMissing ? 'تغيير المشرف لموجودة ✓' : 'علامة × غير موجودة'}
                       </button>
 
                       {onOpenRelocate && (

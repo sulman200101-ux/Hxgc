@@ -13,8 +13,8 @@ interface HeaderProps {
   onSearchFieldChange?: (field: 'all' | 'part' | 'name' | 'location') => void;
   selectedStatus: string;
   onStatusChange: (status: string) => void;
-  activeTab: 'locations' | 'categories' | 'items' | 'flutter';
-  onTabChange: (tab: 'locations' | 'categories' | 'items' | 'flutter') => void;
+  activeTab: 'locations' | 'categories' | 'items' | 'similar' | 'flutter';
+  onTabChange: (tab: 'locations' | 'categories' | 'items' | 'similar' | 'flutter') => void;
   onOpenAddItem: () => void;
   onOpenWipeModal: () => void;
   onOpenRelocationReport?: () => void;
@@ -137,18 +137,15 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* أزرار الإجراءات العلوية */}
           <div className="flex items-center gap-1.5 w-full sm:w-auto justify-end flex-wrap">
-            {onGenerateBulk100k && (
-              <button
-                type="button"
-                onClick={onGenerateBulk100k}
-                disabled={isBulkLoading}
-                title="توسيع وفحص سعة البرنامج حتى 100,000 قطعة"
-                className="px-2.5 py-1.5 rounded-xl bg-[#3A271F] hover:bg-[#4D342A] text-amber-300 text-[11px] font-bold flex items-center gap-1 border border-amber-600/30 cursor-pointer disabled:opacity-50"
-              >
-                <Database className="w-3.5 h-3.5 text-amber-400" />
-                <span>{isBulkLoading ? 'جاري التوليد...' : '+دفعة سعة 100 ألف'}</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={onOpenWipeModal}
+              title="مسح شامل للبرنامج وتصفير كافة البيانات مع طلب الاعتماد"
+              className="px-3 py-1.5 rounded-xl bg-red-950/80 hover:bg-red-800 text-red-200 hover:text-white text-xs font-bold flex items-center gap-1.5 border border-red-600/50 transition-all cursor-pointer shadow-sm"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+              <span>مسح شامل</span>
+            </button>
 
             {onOpenRelocationReport && (
               <button
@@ -252,7 +249,7 @@ export const Header: React.FC<HeaderProps> = ({
                 </select>
               </div>
 
-              <div className="flex rounded-xl bg-[#1F1511] p-1 border border-[#4D3429]">
+              <div className="flex rounded-xl bg-[#1F1511] p-1 border border-[#4D3429] flex-wrap">
                 <button
                   onClick={() => onTabChange('locations')}
                   className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
@@ -262,6 +259,16 @@ export const Header: React.FC<HeaderProps> = ({
                   }`}
                 >
                   مواقعي
+                </button>
+                <button
+                  onClick={() => onTabChange('similar')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    activeTab === 'similar'
+                      ? 'bg-amber-600 text-white shadow-sm'
+                      : 'text-amber-300 hover:text-white'
+                  }`}
+                >
+                  المتشابهات والنقل
                 </button>
                 <button
                   onClick={() => onTabChange('categories')}

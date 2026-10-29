@@ -39,10 +39,18 @@ export async function preprocessImageWithOpenCV(
   const origWidth = img.naturalWidth || img.width;
   const origHeight = img.naturalHeight || img.height;
 
-  // 1. تدوير الورقة أوتوماتيكياً (Orientation Fix: 90° Counter-Clockwise)
+  // 1. تدوير الورقة أوتوماتيكياً عند الطلب مع تحجيم الأبعاد لمنع تعليق المتصفح في الصور عالية الدقة
   const shouldRotate = options?.rotateCounterClockwise90 ?? true;
-  const width = shouldRotate ? origHeight : origWidth;
-  const height = shouldRotate ? origWidth : origHeight;
+  let width = shouldRotate ? origHeight : origWidth;
+  let height = shouldRotate ? origWidth : origHeight;
+
+  const MAX_DIM = 1600;
+  let scale = 1;
+  if (width > MAX_DIM || height > MAX_DIM) {
+    scale = MAX_DIM / Math.max(width, height);
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -50,10 +58,10 @@ export async function preprocessImageWithOpenCV(
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
   if (shouldRotate) {
-    // تدوير 90 درجة عكس عقارب الساعة
-    ctx.translate(0, origWidth);
+    // تدوير 90 درجة عكس عقارب الساعة مع التحجيم
+    ctx.translate(0, height);
     ctx.rotate(-Math.PI / 2);
-    ctx.drawImage(img, 0, 0);
+    ctx.drawImage(img, 0, 0, height, width);
   } else {
     ctx.drawImage(img, 0, 0, width, height);
   }
@@ -248,15 +256,22 @@ function loadImageElement(source: string | File | Blob): Promise<HTMLImageElemen
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
+    let objectUrl: string | null = null;
 
-    img.onload = () => resolve(img);
-    img.onerror = (e) => reject(new Error('Failed to load image for OpenCV processing: ' + e));
+    img.onload = () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      resolve(img);
+    };
+    img.onerror = (e) => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      reject(new Error('Failed to load image for OpenCV processing: ' + e));
+    };
 
     if (typeof source === 'string') {
       img.src = source;
     } else {
-      const url = URL.createObjectURL(source);
-      img.src = url;
+      objectUrl = URL.createObjectURL(source);
+      img.src = objectUrl;
     }
   });
 }

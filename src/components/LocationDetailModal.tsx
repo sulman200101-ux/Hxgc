@@ -77,7 +77,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
       setTimeout(() => setShowExportSuccess(false), 4000);
     } catch (err) {
       console.error('PDF export error:', err);
-      window.alert('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
+      setShowExportSuccess(false);
     } finally {
       setIsExportingPdf(false);
     }
@@ -186,16 +186,19 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
             </div>
           ) : (
             <>
-              {visibleItems.map((item) => {
+              {visibleItems.map((item, idx) => {
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
+                const isVerified = !isMissing && item.status === 'مدقق';
                 const isMoved = item.is_moved === 1 || item.status === 'منقول' || item.status === 'تم النقل';
 
                 return (
                   <div
-                    key={item.part_number}
+                    key={`${item.part_number}-${idx}`}
                     className={`rounded-xl p-3.5 border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
                       isMissing
                         ? 'bg-red-950/25 border-red-700/60 hover:border-red-500'
+                        : isVerified
+                        ? 'bg-emerald-950/25 border-emerald-600/60 hover:border-emerald-400'
                         : 'bg-[#231713] border-[#432d24] hover:border-amber-500/40'
                     }`}
                   >
@@ -208,7 +211,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                         {isMissing && (
                           <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-red-950 text-red-200 border border-red-500 inline-flex items-center gap-1">
                             <XCircle className="w-3.5 h-3.5 text-red-400" />
-                            × غير موجودة
+                            × غير موجودة (بانتظار المشرف)
                           </span>
                         )}
                       </div>
@@ -219,23 +222,38 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                         </span>
                         <span className="text-neutral-500">|</span>
                         <span>
-                          المخزون: <strong className="text-amber-300 font-mono">{item.qty_total}</strong>
+                          العدد الأصلي: <strong className="text-amber-300 font-mono">{item.qty_total}</strong>
                         </span>
-                        <span className="text-neutral-500">|</span>
+                        {item.qty_out > 0 && !isMissing && (
+                          <>
+                            <span className="text-neutral-500">-</span>
+                            <span>
+                              ناقص: <strong className="text-amber-400 font-mono">-{item.qty_out}</strong>
+                            </span>
+                            <span className="text-neutral-500">=</span>
+                          </>
+                        )}
+                        {(!item.qty_out || isMissing) && <span className="text-neutral-500">|</span>}
                         <span>
-                          المتبقي: <strong className={`font-mono ${isMissing ? 'text-red-400' : 'text-emerald-400'}`}>{item.qty_remaining}</strong>
+                          يبقى بالمخزون: <strong className={`font-mono ${isMissing ? 'text-red-400' : 'text-emerald-400'}`}>{item.qty_remaining}</strong>
                         </span>
                         <span className="text-neutral-500">|</span>
                         {isMissing ? (
-                          <span className="text-red-300 font-bold">معلمة بـ (×) في ورقة الجرد</span>
-                        ) : isMoved ? (
+                          <span className="text-red-300 font-bold">معلمة بـ (×) تبقى ظاهرة حتى يغيرها المشرف</span>
+                        ) : isVerified ? (
+                          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-emerald-950 text-emerald-300 border border-emerald-500 inline-flex items-center gap-1">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                            مدقق ✓
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-950/80 text-amber-300 border border-amber-600/70 inline-flex items-center gap-1">
+                            غير مدقق
+                          </span>
+                        )}
+                        {isMoved && !isMissing && (
                           <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/60 inline-flex items-center gap-1 shadow-sm">
                             <CheckCircle2 className="w-3 h-3 text-emerald-400" />
                             تم النقل 🟢
-                          </span>
-                        ) : (
-                          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-950/60 text-emerald-300 border border-emerald-600/50 inline-flex items-center gap-1">
-                            ✓ موجودة بالموقع
                           </span>
                         )}
                       </div>
@@ -246,12 +264,30 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1.5 justify-end shrink-0 flex-wrap">
-                      <button onClick={() => onMarkItemStatus(item.part_number, item.status === 'مدقق' ? 'غير مدقق' : 'مدقق')} title="تغيير حالة تدقيق القطعة" className="px-2 py-1 rounded border border-amber-700 text-amber-200 text-xs">{item.status === 'مدقق' ? 'مدققة ✓' : 'غير مدققة'}</button>
+                      {!isMissing && (
+                        <button
+                          onClick={() =>
+                            onMarkItemStatus(
+                              item.part_number,
+                              isVerified ? 'غير مدقق' : 'مدقق'
+                            )
+                          }
+                          title="اضغط لتحويل القطعة إلى اللون الأخضر مدقق ✓"
+                          className={`px-3 py-1 rounded-lg text-xs font-black border flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 ${
+                            isVerified
+                              ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-md shadow-emerald-950/60'
+                              : 'bg-amber-950/80 hover:bg-emerald-800 text-amber-200 hover:text-white border-amber-600/80'
+                          }`}
+                        >
+                          <CheckCircle2 className={`w-3.5 h-3.5 ${isVerified ? 'text-white' : 'text-amber-400'}`} />
+                          <span>{isVerified ? 'مدقق ✓' : 'غير مدقق (اضغط للتدقيق)'}</span>
+                        </button>
+                      )}
                       <button
                         onClick={() =>
                           onMarkItemStatus(
                             item.part_number,
-                            isMissing ? 'مضاف' : 'غير موجودة'
+                            isMissing ? 'مدقق' : 'غير موجودة'
                           )
                         }
                         className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
@@ -260,7 +296,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                             : 'bg-red-950/60 text-red-200 border-red-700/60'
                         }`}
                       >
-                        {isMissing ? 'تحويل لموجودة ✓' : '× غير موجودة'}
+                        {isMissing ? 'تغيير المشرف لموجودة ✓' : '× غير موجودة'}
                       </button>
 
                       <button

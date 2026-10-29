@@ -150,10 +150,10 @@ class InventoryDatabase {
 
       if (item.is_missing === 1 || item.status === 'غير موجودة') {
         entry.missing_count += 1;
-      } else if (item.status === 'غير مدقق') {
-        entry.unverified_count += 1;
-      } else if (item.status === 'مضاف') {
+      } else if (item.status === 'مدقق') {
         entry.added_count += 1;
+      } else {
+        entry.unverified_count += 1;
       }
       if (item.status === 'منقول' || item.status === 'تم النقل' || item.is_moved === 1) {
         entry.moved_count += 1;
@@ -363,13 +363,13 @@ class InventoryDatabase {
     const { category, descAr } = categorizeAndTranslate(descEn);
     const finalDescAr = cachedAr || descAr;
 
-    let status: InventoryItem['status'] = forcedStatus || 'مضاف';
+    let status: InventoryItem['status'] = forcedStatus || 'غير مدقق';
     if (isMissing) {
       status = 'غير موجودة';
     } else if (isMoved && !forcedStatus) {
       status = 'تم النقل';
     } else if (!forcedStatus) {
-      status = existing ? existing.status : 'مضاف';
+      status = existing ? existing.status : 'غير مدقق';
     }
 
     const item: InventoryItem = {
@@ -435,11 +435,53 @@ class InventoryDatabase {
   public async relocateItem(partNumber: string, newLocation: string): Promise<InventoryItem | null> {
     const item = this.getItemByPartNumber(partNumber);
     if (!item) return null;
-    const id = 'MOVE-' + crypto.randomUUID();
-    await this.submitDocument({ id, kind: 'transfer', requester: 'local-operator', reason: 'طلب نقل من الواجهة',
-      lines: [{ old_location: item.location_code, part_number: partNumber, quantity: item.qty_remaining, location: newLocation, description_en: item.description_en,
-        description_ar: item.description_ar, check: '', remark: '', reviewed: true }], status: 'pending', createdAt: '' });
-    await this.approveDocument(id);
+    const cleanNewLoc = sanitizeLocationCode(newLocation) || newLocation.trim().toUpperCase();
+    if (!isValidSpecificLocation(cleanNewLoc)) {
+      throw new Error('يرجى إدخال اسم موقع جديد صالح ومحدد');
+    }
+    if (cleanNewLoc === item.location_code) {
+      return item;
+    }
+    if (item.qty_remaining > 0 && item.is_missing !== 1) {
+      const id = 'MOVE-' + crypto.randomUUID();
+      await this.submitDocument({
+        id,
+        kind: 'transfer',
+        requester: 'local-operator',
+        reason: `نقل القطعة من ${item.location_code} إلى ${cleanNewLoc}`,
+        lines: [
+          {
+            old_location: item.location_code,
+            part_number: partNumber,
+            quantity: item.qty_remaining,
+            location: cleanNewLoc,
+            description_en: item.description_en,
+            description_ar: item.description_ar,
+            check: '',
+            remark: '',
+            reviewed: true,
+          },
+        ],
+        status: 'pending',
+        createdAt: '',
+      });
+      await this.approveDocument(id);
+    } else {
+      await authorizeMutation('اعتماد نقل موقع قطعة بواسطة المشرف');
+      const now = new Date().toISOString();
+      const updated: InventoryItem = {
+        ...item,
+        old_location: item.location_code,
+        location_code: cleanNewLoc,
+        is_moved: 1,
+        status: 'تم النقل',
+        moved_at: now,
+        updated_at: now,
+      };
+      await this.putInStore(updated);
+      this.itemMap.set(partNumber, updated);
+      this.isCacheDirty = true;
+    }
     return this.getItemByPartNumber(partNumber) || null;
   }
 
@@ -456,10 +498,14 @@ class InventoryDatabase {
   }
 
   public async markStatus(partNumber: string, newStatus: InventoryItem['status']): Promise<void> {
-    await authorizeMutation('markStatus');
     const item = this.itemMap.get(partNumber);
     if (!item) return;
-    const isMissing = newStatus === 'غير موجودة' ? 1 : 0;
+    const wasMissing = item.is_missing === 1 || item.status === 'غير موجودة';
+    const willBeMissing = newStatus === 'غير موجودة';
+    if (wasMissing || willBeMissing) {
+      await authorizeMutation('تغيير حالة توفر القطعة بواسطة المشرف');
+    }
+    const isMissing = willBeMissing ? 1 : 0;
     const updated: InventoryItem = {
       ...item,
       status: newStatus,
@@ -616,13 +662,15 @@ class InventoryDatabase {
     const marks = interpretMark(line.check, line.remark);
     const { category, descAr } = categorizeAndTranslate(line.description_en);
     let after: InventoryItem;
-    if (doc.kind === 'inventory' && marks.excludedIncrease) return;
+    // If the item already exists in inventory, an F remark (Found extra) is excluded from replacing book stock.
+    // If the item does not exist yet (!before), create it with its printed sheet quantity and preserve the F remark.
+    if (doc.kind === 'inventory' && marks.excludedIncrease && before) return;
     if ((doc.kind === 'issue' || doc.kind === 'transfer') && !before) throw new Error('رقم غير موجود: ' + line.part_number);
     const fresh = (): InventoryItem => {
       if (!isValidSpecificLocation(line.location)) throw new Error('موقع غير صالح');
       return { part_number: line.part_number, location_code: line.location, description_en: line.description_en,
         description_ar: line.description_ar || descAr, category, qty_total: line.quantity, qty_out: 0,
-        qty_remaining: line.quantity, is_moved: 0, is_missing: 0, status: 'مضاف' };
+        qty_remaining: line.quantity, is_moved: 0, is_missing: 0, status: 'غير مدقق' };
     };
     if (doc.kind === 'receipt') {
       if (!isValidSpecificLocation(line.location)) throw new Error('موقع غير صالح');
@@ -643,9 +691,12 @@ class InventoryDatabase {
       }
       if (line.location !== base.location_code) throw new Error('تغيير الموقع يستلزم طلب نقل');
       if (marks.shortage > base.qty_remaining) throw new Error('النقص يتجاوز المتاح');
+      const isMissing = marks.status === 'غير موجودة' ? 1 : 0;
+      const nextOut = base.qty_out + marks.shortage;
+      const nextRemaining = isMissing ? 0 : base.qty_remaining - marks.shortage;
       // Existing book stock is never replaced by an inventory OCR quantity.
-      after = { ...base, status: marks.status, is_missing: marks.status === 'غير موجودة' ? 1 : 0, remark: line.remark,
-        qty_out: base.qty_out + marks.shortage, qty_remaining: base.qty_remaining - marks.shortage };
+      after = { ...base, status: marks.status, is_missing: isMissing, remark: line.remark,
+        qty_out: nextOut, qty_remaining: nextRemaining };
     }
     if (![after.qty_total, after.qty_out, after.qty_remaining].every(v => Number.isSafeInteger(v) && v >= 0)
       || after.qty_remaining > after.qty_total - after.qty_out) throw new Error('كمية غير صالحة');
@@ -713,8 +764,7 @@ class InventoryDatabase {
 
   public async resetAndSeedDatabase(): Promise<void> {
     if (!this.db) return;
-    await this.wipeAllData();
-    await this.seedInitialData();
+    await this.fullProgramWipe();
   }
 
   public async wipeAllData(): Promise<void> {
@@ -722,129 +772,29 @@ class InventoryDatabase {
     await this.commitChanges([], [], true);
   }
 
+  /**
+   * مسح شامل لكافة بيانات البرنامج (الأصناف، المواقع، أوراق الجرد، طلبات النقل، والسجلات)
+   * بعد طلب اعتماد المشرف، بحيث يعود البرنامج فارغاً بالكامل (0 قطعة و 0 مستند).
+   */
+  public async fullProgramWipe(): Promise<void> {
+    await authorizeMutation('اعتماد المسح الشامل لكافة بيانات البرنامج والمستندات');
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    await new Promise<void>((resolve, reject) => {
+      const tx = this.db!.transaction([STORE_NAME, 'documents', 'audit'], 'readwrite');
+      tx.objectStore(STORE_NAME).clear();
+      tx.objectStore('documents').clear();
+      tx.objectStore('audit').clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('أُلغيت عملية المسح الشامل'));
+    });
+    this.itemMap.clear();
+    this.cache = [];
+    this.isCacheDirty = false;
+  }
+
   private async putInStore(item: InventoryItem): Promise<void> {
     await this.commitChanges([item], []);
-  }
-
-  /**
-   * توليد حتى 100,000 قطعة لاختبار السعة القصوى بدون أي بطء أو انهيار
-   */
-  public async generateBulkItems(count: number = 10000): Promise<number> {
-    const templates = [
-      { en: 'GASKET SPIRAL WOUND 3 INCH 150# 316SS', qty: 45, binPrefix: 'N01' },
-      { en: 'HEXAGON HEAD BOLT M16 X 70 MM SS316', qty: 120, binPrefix: 'N01' },
-      { en: 'BALL VALVE, SIZE 1/2 INCH, MATERIAL STAINLESS STEEL', qty: 15, binPrefix: 'N01' },
-      { en: 'FLANGE WELD NECK 4 INCH CLASS 150', qty: 24, binPrefix: 'N06' },
-      { en: 'LOCKING BOLT, SIZE M10X40 MM', qty: 80, binPrefix: 'N06' },
-      { en: 'CONNECTOR FEMALE, FOR TUBE OD 10 MM X 3/8 IN', qty: 50, binPrefix: 'N06' },
-      { en: 'BALL BEARING DEEP GROOVE 6205-2RS SKF', qty: 60, binPrefix: 'N07' },
-      { en: 'PRESSURE GAUGE 0-10 BAR 1/2 INCH NPT SS', qty: 25, binPrefix: 'N07' },
-      { en: 'ADAPTER SLEEVE S 3028/H 3028', qty: 30, binPrefix: 'N11' },
-      { en: 'THREADED ROD, SIZE M8, LENGTH 1 M, MAT: SS', qty: 150, binPrefix: 'N12' },
-    ];
-
-    const subBins = ['A1', 'A2', 'B1', 'B2', 'BB1', 'BB2', 'C1', 'C2', 'D1', 'D2', 'FL1', 'FL2'];
-    const bulk: InventoryItem[] = [];
-    const nowIso = new Date().toISOString();
-    const basePart = 1002000000;
-
-    for (let i = 1; i <= count; i++) {
-      const t = templates[i % templates.length];
-      const partNum = String(basePart + i);
-      const aisle = String((i % 30) + 1).padStart(2, '0');
-      const shelf = subBins[i % subBins.length];
-      const locCode = `N${aisle}${shelf}`;
-
-      const { category, descAr } = categorizeAndTranslate(t.en);
-      const isMissing = i % 15 === 0 ? 1 : 0;
-      const total = t.qty + (i % 20);
-      const out = 0;
-
-      bulk.push({
-        part_number: partNum,
-        location_code: locCode,
-        description_en: `${t.en} #${i}`,
-        description_ar: `${descAr}`,
-        category,
-        qty_total: total,
-        qty_out: out,
-        qty_remaining: isMissing ? 0 : total,
-        is_moved: 0,
-        is_missing: isMissing,
-        status: isMissing ? 'غير موجودة' : 'مضاف',
-        updated_at: nowIso,
-      });
-    }
-
-    return await this.batchImport(bulk);
-  }
-
-  /**
-   * البيانات الكاملة للـ 37 صنفاً من ورقة جرد أسمو المعتمدة (SAP Inventory Controller: 09-09-2026)
-   * المواقع: N01B1, N01B2, N01BB1, N01BB2, N01C1, N01C2, N01D1, N01D2, N01FL1
-   */
-  private async seedInitialData(): Promise<void> {
-    const sap37SheetItems = [
-      // 1. N01B1 (1 صنف)
-      { part_number: '1001523111', location_code: 'N01B1', desc_en: 'GASKET PUMP CCR UNIT 1,2 &3 SEAL', qty: 2, missing: 0 },
-      // 2-11. N01B2 (10 أصناف — منها #654 معلمة بـ × غير موجودة)
-      { part_number: '1000029819', location_code: 'N01B2', desc_en: 'FUSE, LOW VOLTAGE: SLOW BLOW, 250 MA', qty: 50, missing: 0, remark: '+90' },
-      { part_number: '1000036377', location_code: 'N01B2', desc_en: 'NIPPLE: PIPE', qty: 4, missing: 0, remark: '+3' },
-      { part_number: '1000082689', location_code: 'N01B2', desc_en: 'INSULATOR: FOR COLLET BODY', qty: 100, missing: 1 },
-      { part_number: '1000137252', location_code: 'N01B2', desc_en: 'PACKING: 2 IN, TEFLON, PRIMARY', qty: 10, missing: 0 },
-      { part_number: '1000227176', location_code: 'N01B2', desc_en: 'O-RING: PERFLUORINATED', qty: 4, missing: 0 },
-      { part_number: '1000888233', location_code: 'N01B2', desc_en: 'NUT LOCK, A563, C3', qty: 5, missing: 0 },
-      { part_number: '1000972666', location_code: 'N01B2', desc_en: 'SLEEVE SHAFT, 316L, SUS316L / WC-NI, AST', qty: 2, missing: 0 },
-      { part_number: '1001043394', location_code: 'N01B2', desc_en: 'BEARING BALL, AISI 316 + LOW FRICTION CO', qty: 1, missing: 0 },
-      { part_number: '1001075769', location_code: 'N01B2', desc_en: 'SEAT VALVE, SS, AISI 316L', qty: 1, missing: 0 },
-      { part_number: '1001113425', location_code: 'N01B2', desc_en: 'SLEEVE, BEARING, VESCONITE HILUBE', qty: 5, missing: 0 },
-      // 12-15. N01BB1 (4 أصناف — منها #5633 و #6452 معلمة بـ × غير موجودة)
-      { part_number: '1000366195', location_code: 'N01BB1', desc_en: 'CONNECTOR: SERVICE OR LINE TAP', qty: 85, missing: 0 },
-      { part_number: '1000366198', location_code: 'N01BB1', desc_en: 'CONNECTOR: SERVICE OR LINE TAP', qty: 100, missing: 0 },
-      { part_number: '1000844521', location_code: 'N01BB1', desc_en: 'WASHER, 11 MM, 38 MM, 2 MM / 14 GAUGE', qty: 131, missing: 1 },
-      { part_number: '1000933836', location_code: 'N01BB1', desc_en: 'CIRCUIT BREAKER MOLDED CASE, 100 A, 3, 6', qty: 2, missing: 1 },
-      // 16-20. N01BB2 (5 أصناف)
-      { part_number: '1000082688', location_code: 'N01BB2', desc_en: 'INSULATOR: FOR COLLET BODY', qty: 52, missing: 0, remark: '+96' },
-      { part_number: '1000907560', location_code: 'N01BB2', desc_en: 'BEARING, THRUST, 85.5 X 71 X 1.27 MM, ST', qty: 2, missing: 0 },
-      { part_number: '1000988752', location_code: 'N01BB2', desc_en: 'RING, SEAT, SS AISI 316 HARD FACED', qty: 1, missing: 0 },
-      { part_number: '1001004493', location_code: 'N01BB2', desc_en: 'TRANSFORMER INSTRUMENT, 480/120 V, POTEN', qty: 2, missing: 0 },
-      { part_number: '1001147951', location_code: 'N01BB2', desc_en: 'COVER CM44X', qty: 5, missing: 0 },
-      // 21. N01C1 (1 صنف)
-      { part_number: '1000725091', location_code: 'N01C1', desc_en: 'STUD ASSEMBLY, CONTINUOUS, ALLOY STEEL', qty: 20, missing: 0 },
-      // 22-23. N01C2 (2 صنف)
-      { part_number: '1000986659', location_code: 'N01C2', desc_en: 'HEAD, SHOWER ROSE, 1-1/2 IN BSP, 304L SS', qty: 6, missing: 0 },
-      { part_number: '1001545736', location_code: 'N01C2', desc_en: 'BELLOWS INCONEL 625 LCF ASSEMBLY', qty: 1, missing: 0 },
-      // 24. N01D1 (1 صنف)
-      { part_number: '1001139712', location_code: 'N01D1', desc_en: 'TRANSMITTER PRESSURE, 0.2 TO 4 KPA', qty: 3, missing: 0 },
-      // 25-28. N01D2 (4 أصناف)
-      { part_number: '1000053343', location_code: 'N01D2', desc_en: 'TEE: CPVC; 2" NPS; SOC TYPE; SCH 80', qty: 7, missing: 0, remark: '+5' },
-      { part_number: '1000054518', location_code: 'N01D2', desc_en: 'VALVE, GATE, WEDGE: 3/4 IN, ANSI CL', qty: 4, missing: 0 },
-      { part_number: '1000986658', location_code: 'N01D2', desc_en: 'HEAD, SHOWER ROSE, 1-1/2 IN BSP, 304L SS', qty: 9, missing: 0, remark: '-7' },
-      { part_number: '1001529545', location_code: 'N01D2', desc_en: 'FILTER ELEMENT 76.2 MM DIA X 914 MM LG A', qty: 4, missing: 0 },
-      // 29-37. N01FL1 (9 أصناف)
-      { part_number: '1000269510', location_code: 'N01FL1', desc_en: 'CONNECTOR: ASSEMBLY, GOVERNOR SPINDLE', qty: 1, missing: 0 },
-      { part_number: '1000401991', location_code: 'N01FL1', desc_en: 'MOUNT: BLADE, 1.435 IN, SMALL MOUNT', qty: 27, missing: 0, remark: '+10' },
-      { part_number: '1000416546', location_code: 'N01FL1', desc_en: 'PLUG: PLUG', qty: 1, missing: 0 },
-      { part_number: '1000792698', location_code: 'N01FL1', desc_en: 'RING, RETAINING, N07750, NACE', qty: 1, missing: 0 },
-      { part_number: '1000910693', location_code: 'N01FL1', desc_en: 'RING, SEAL', qty: 1, missing: 0, remark: '+1' },
-      { part_number: '1001028284', location_code: 'N01FL1', desc_en: 'BELLOWS, ASSEMBLY / FACELESS', qty: 1, missing: 0 },
-      { part_number: '1001057369', location_code: 'N01FL1', desc_en: 'BEARING, BOWL, GRAPHALLOY GM 205.3', qty: 8, missing: 0, remark: '+1' },
-      { part_number: '1001099342', location_code: 'N01FL1', desc_en: 'SEAL, SHAFT', qty: 1, missing: 0 },
-      { part_number: '1001174987', location_code: 'N01FL1', desc_en: 'POWER SUPPLY ELECTRICAL 24 VDC AT 2.9 AM', qty: 2, missing: 0, remark: '+2' },
-    ];
-
-    await this.smartUpsertBatch(
-      sap37SheetItems.map((item) => ({
-        part_number: item.part_number,
-        location_code: item.location_code,
-        description_en: item.desc_en,
-        qty_total: item.qty,
-        qty_out: 0,
-        is_missing: item.missing,
-        remark: item.remark,
-        status: item.missing ? 'غير موجودة' : 'مضاف',
-      }))
-    );
   }
 }
 

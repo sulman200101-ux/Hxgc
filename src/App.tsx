@@ -1,4 +1,5 @@
 import { TransferSuggestionsPanel } from './components/TransferSuggestionsPanel';
+import { SimilarItemsPlannerView } from './components/SimilarItemsPlannerView';
 import { PdfExportProgress } from './components/PdfExportProgress';
 import { ReportsPanel } from './components/ReportsPanel';
 import { StockDocumentsPanel } from './components/StockDocumentsPanel';
@@ -20,13 +21,13 @@ import { WipeDatabaseModal } from './components/WipeDatabaseModal';
 import { RelocateModal } from './components/RelocateModal';
 import { RelocationReportModal } from './components/RelocationReportModal';
 import { ExtractedSparePart } from './services/localOcr';
-import { Camera, Plus, CheckCircle, RefreshCw, MapPin, Edit3, XCircle, CheckCircle2 } from 'lucide-react';
+import { Camera, Plus, CheckCircle, RefreshCw, MapPin, Edit3, XCircle, CheckCircle2, Layers } from 'lucide-react';
 
 export default function App() {
-  const [screen, setScreen] = useState<'inventory' | 'operations'>('inventory');
+  const [screen, setScreen] = useState<'inventory' | 'similar' | 'operations'>('inventory');
   const swipeStart = useRef<{ x: number; y: number } | null>(null);
-  const changeScreen = (next: 'inventory' | 'operations') => { setScreen(next); window.scrollTo({ top: 0, behavior: 'instant' }); };
-  const [availableOnly, setAvailableOnly] = useState(true);
+  const changeScreen = (next: 'inventory' | 'similar' | 'operations') => { setScreen(next); window.scrollTo({ top: 0, behavior: 'instant' }); };
+  const [availableOnly, setAvailableOnly] = useState(false);
   const [isDbReady, setIsDbReady] = useState(false);
   const [allItems, setAllItems] = useState<InventoryItem[]>([]);
   const [locationsSummary, setLocationsSummary] = useState<LocationSummary[]>([]);
@@ -34,7 +35,7 @@ export default function App() {
   const [searchField, setSearchField] = useState<'all' | 'part' | 'name' | 'location'>('all');
   const [selectedCategory, setSelectedCategory] = useState('الكل');
   const [selectedStatus, setSelectedStatus] = useState('الكل');
-  const [activeTab, setActiveTab] = useState<'locations' | 'categories' | 'items' | 'flutter'>('locations');
+  const [activeTab, setActiveTab] = useState<'locations' | 'categories' | 'items' | 'similar' | 'flutter'>('locations');
   const [visibleLocationsLimit, setVisibleLocationsLimit] = useState(25);
 
   // Modals state
@@ -46,6 +47,7 @@ export default function App() {
   const [isRelocateOpen, setIsRelocateOpen] = useState(false);
   const [relocatingItem, setRelocatingItem] = useState<InventoryItem | null>(null);
   const [isRelocationReportOpen, setIsRelocationReportOpen] = useState(false);
+  const [reportMovedOverride, setReportMovedOverride] = useState<InventoryItem[] | undefined>(undefined);
   const [selectedLocationCode, setSelectedLocationCode] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [renameLocationCode, setRenameLocationCode] = useState<string | null>(null);
@@ -81,6 +83,12 @@ export default function App() {
     return dbService.getMovedItems();
   }, [allItems]);
 
+  const handleOpenRelocationReportWithItems = (customItems?: InventoryItem[]) => {
+    refreshData();
+    setReportMovedOverride(customItems);
+    setIsRelocationReportOpen(true);
+  };
+
   const handleOpenRelocate = (item: InventoryItem) => {
     setRelocatingItem(item);
     setIsRelocateOpen(true);
@@ -90,7 +98,8 @@ export default function App() {
     const updated = await dbService.relocateItem(partNumber, newLocation);
     if (updated) {
       refreshData();
-      showNotification(`تم نقل القطعة (${partNumber}) بنجاح إلى الموقع الجديد (${newLocation}) 🟢`, 'success');
+      showNotification(`تم اعتماد ونقل القطعة (${partNumber}) بنجاح إلى الموقع الجديد (${newLocation}) 🟢`, 'success');
+      handleOpenRelocationReportWithItems([updated]);
     }
   };
 
@@ -178,9 +187,13 @@ export default function App() {
     qty_out: number;
     status: InventoryItem['status'];
   }) => {
+    const existing = dbService.getItemByPartNumber(data.part_number);
+    const targetLocation = data.location_code.trim().toUpperCase();
+    const initialLocation = existing ? existing.location_code : targetLocation;
+
     await dbService.insertOrUpdateItem(
       data.part_number,
-      data.location_code,
+      initialLocation,
       data.description_en,
       data.qty_total,
       data.qty_out,
@@ -188,8 +201,16 @@ export default function App() {
       data.description_ar,
       data.status === 'غير موجودة' ? 1 : 0
     );
+
+    if (existing && existing.location_code !== targetLocation) {
+      await dbService.relocateItem(data.part_number, targetLocation);
+      refreshData();
+      showNotification(`تم نقل القطعة ${data.part_number} إلى موقعها الجديد ${targetLocation} بنجاح 🟢`);
+      return;
+    }
+
     refreshData();
-    showNotification(`تم حفظ القطعة ${data.part_number} في موقع ${data.location_code} بنجاح`);
+    showNotification(`تم حفظ القطعة ${data.part_number} في موقع ${targetLocation} بنجاح`);
   };
 
   const handleDeleteItem = async (partNumber: string) => {
@@ -234,48 +255,36 @@ export default function App() {
     );
   };
 
-  const handleGenerateBulk100k = async () => {
-    if (isBulkLoading) return;
-    setIsBulkLoading(true);
-    const currentCount = allItems.length;
-    const batchToAdd = currentCount < 25000 ? 25000 : Math.min(25000, 100000 - currentCount);
-
-    if (batchToAdd <= 0) {
-      showNotification('وصلت قاعدة البيانات بالفعل إلى سعة 100,000+ قطعة وتعمل بكفاءة 100%!', 'info');
-      setIsBulkLoading(false);
-      return;
-    }
-
-    showNotification(`⚡ جاري توليد وفهرسة +${batchToAdd.toLocaleString()} قطعة بأرقام 10 خانات ومواقع فعلية...`, 'info');
-    setTimeout(async () => {
-      try {
-        const added = await dbService.generateBulkItems(batchToAdd);
-        refreshData();
-        showNotification(
-          `✅ تمت إضافة ${added.toLocaleString()} قطعة بنجاح! الإجمالي الآن: ${dbService.getTotalCount().toLocaleString()} قطعة بدون أي بطء.`
-        );
-      } catch (err) {
-        showNotification('حدث خطأ أثناء توليد الدفعة', 'error');
-      } finally {
-        setIsBulkLoading(false);
-      }
-    }, 50);
-  };
-
   const handleWipeDatabase = async () => {
-    await dbService.wipeAllData();
+    await dbService.fullProgramWipe();
+    setSearchQuery('');
+    setSelectedStatus('الكل');
+    setSelectedCategory('الكل');
+    setSelectedLocationCode(null);
+    setReportMovedOverride(undefined);
     refreshData();
-    showNotification('تم مسح وتصفير كافة بيانات البرنامج والمخزون بنجاح (0 صنف متبقي)!', 'success');
+    showNotification('تم المسح الشامل للبرنامج وتصفير كافة القطع والمواقع والمستندات بنجاح!', 'success');
   };
 
   return (
     <div className="min-h-screen bg-[#19110D] text-neutral-100 flex flex-col font-sans pb-28 selection:bg-amber-700 selection:text-white">
       <AuthorizationDialog />
-      {showSuggestions && <TransferSuggestionsPanel items={allItems} onClose={() => setShowSuggestions(false)} onRefresh={refreshData} />}
+      {showSuggestions && (
+        <TransferSuggestionsPanel
+          items={allItems}
+          onClose={() => setShowSuggestions(false)}
+          onRefresh={refreshData}
+          onOpenRelocationReport={handleOpenRelocationReportWithItems}
+        />
+      )}
       <PdfExportProgress />
       <nav aria-label="شاشات التطبيق" className="sticky top-0 z-40 bg-[#19110D] border-b border-amber-900 px-4 py-3 flex gap-2" dir="rtl">
-        <button type="button" aria-pressed={screen === 'inventory'} onClick={() => changeScreen('inventory')} className={`flex-1 rounded-xl py-3 font-bold ${screen === 'inventory' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>المخزون</button>
-        <button type="button" aria-pressed={screen === 'operations'} onClick={() => changeScreen('operations')} className={`flex-1 rounded-xl py-3 font-bold ${screen === 'operations' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>العمليات والتقارير</button>
+        <button type="button" aria-pressed={screen === 'inventory'} onClick={() => changeScreen('inventory')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer ${screen === 'inventory' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>المخزون</button>
+        <button type="button" aria-pressed={screen === 'similar'} onClick={() => changeScreen('similar')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer flex items-center justify-center gap-1.5 ${screen === 'similar' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-amber-200'}`}>
+          <Layers className="w-4 h-4" />
+          <span>المتشابهات وخطة النقل</span>
+        </button>
+        <button type="button" aria-pressed={screen === 'operations'} onClick={() => changeScreen('operations')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer ${screen === 'operations' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>العمليات والتقارير</button>
       </nav>
       <div onTouchStart={event => {
         const target = event.target as HTMLElement;
@@ -288,9 +297,25 @@ export default function App() {
         const dy = event.changedTouches[0].clientY - start.y;
         if (Math.abs(dx) >= 70 && Math.abs(dx) > Math.abs(dy) * 1.5) changeScreen(dx > 0 ? 'operations' : 'inventory');
       }}>
+      <section hidden={screen !== 'similar'} aria-label="شاشة المتشابهات وخطة النقل" className="max-w-7xl mx-auto w-full min-h-[75vh] p-4">
+        {isDbReady && (
+          <SimilarItemsPlannerView
+            items={allItems}
+            onRefresh={refreshData}
+            onOpenRelocationReport={handleOpenRelocationReportWithItems}
+            onOpenLocation={(locCode) => {
+              changeScreen('inventory');
+              showLocationDetails(locCode);
+            }}
+          />
+        )}
+      </section>
       <section hidden={screen !== 'operations'} aria-label="شاشة العمليات والتقارير" className="max-w-7xl mx-auto w-full min-h-[75vh]">
         <header className="p-4" dir="rtl"><h1 className="text-xl font-bold">العمليات والتقارير</h1><p className="text-sm text-neutral-400">اسحب لليسار للعودة إلى المخزون</p></header>
-        <button className="m-4 p-3 rounded-xl bg-amber-800 text-white font-bold" onClick={() => setShowSuggestions(true)}>اقتراح تجميع القطع في مواقع متجاورة</button>
+        <div className="flex flex-wrap gap-2 px-4">
+          <button className="p-3 rounded-xl bg-amber-800 hover:bg-amber-700 text-white font-bold cursor-pointer" onClick={() => setShowSuggestions(true)}>اقتراح تجميع القطع في مواقع متجاورة</button>
+          <button className="p-3 rounded-xl bg-emerald-800 hover:bg-emerald-700 text-white font-bold cursor-pointer" onClick={() => changeScreen('similar')}>فتح واجهة المتشابهات وخطة الإحلال الكاملة</button>
+        </div>
         <DataSafetyPanel onRefresh={refreshData} />
         {isDbReady && <ReportsPanel />}
         {isDbReady && <StockDocumentsPanel onRefresh={refreshData} onCapture={kind => { setCaptureKind(kind); setIsOcrOpen(true); }} />}
@@ -324,10 +349,7 @@ export default function App() {
         remainingTotal={overallTotals.totalRemaining}
         movedCount={movedItems.length}
         missingCount={overallTotals.totalMissing}
-        onOpenRelocationReport={() => {
-          refreshData();
-          setIsRelocationReportOpen(true);
-        }}
+        onOpenRelocationReport={() => handleOpenRelocationReportWithItems()}
         searchQuery={searchQuery}
         onSearchChange={(q) => {
           setSearchQuery(q);
@@ -347,8 +369,6 @@ export default function App() {
           setIsItemModalOpen(true);
         }}
         onOpenWipeModal={() => setIsWipeModalOpen(true)}
-        onGenerateBulk100k={handleGenerateBulk100k}
-        isBulkLoading={isBulkLoading}
       />
 
       {/* Main Container */}
@@ -408,14 +428,17 @@ export default function App() {
                       )}
                     </div>
 
-                    {filteredItems.slice(0, 20).map((item) => {
+                    {filteredItems.slice(0, 20).map((item, idx) => {
                       const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
+                      const isVerified = !isMissing && item.status === 'مدقق';
                       return (
                         <div
-                          key={item.part_number}
+                          key={`${item.part_number}-${idx}`}
                           className={`p-3 rounded-xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
                             isMissing
                               ? 'bg-red-950/25 border-red-700/60 hover:border-red-500'
+                              : isVerified
+                              ? 'bg-emerald-950/20 border-emerald-700/60 hover:border-emerald-500'
                               : 'bg-[#231713] border-[#432d24] hover:border-amber-500/50'
                           }`}
                         >
@@ -430,12 +453,16 @@ export default function App() {
                               {isMissing ? (
                                 <span className="px-2 py-0.5 rounded-md bg-red-950 text-red-200 border border-red-500 font-black text-[11px] inline-flex items-center gap-1">
                                   <XCircle className="w-3.5 h-3.5 text-red-400" />
-                                  × غير موجودة
+                                  × غير موجودة (بانتظار المشرف)
+                                </span>
+                              ) : isVerified ? (
+                                <span className="px-2 py-0.5 rounded-md bg-emerald-950 text-emerald-300 border border-emerald-500 font-black text-[11px] inline-flex items-center gap-1">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                  ✓ مدقق
                                 </span>
                               ) : (
-                                <span className="px-2 py-0.5 rounded-md bg-emerald-950/60 text-emerald-300 border border-emerald-700/50 font-bold text-[11px] inline-flex items-center gap-1">
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                                  ✓ موجودة
+                                <span className="px-2 py-0.5 rounded-md bg-orange-950/80 text-orange-300 border border-orange-600/70 font-bold text-[11px] inline-flex items-center gap-1">
+                                  غير مدقق
                                 </span>
                               )}
                             </div>
@@ -446,7 +473,9 @@ export default function App() {
                               </span>
                               <span>•</span>
                               <span className={`font-bold font-mono ${isMissing ? 'text-red-400' : 'text-emerald-400'}`}>
-                                المتبقي: {item.qty_remaining} (إجمالي: {item.qty_total})
+                                {item.qty_out > 0 && !isMissing
+                                  ? `العدد: ${item.qty_total} - ${item.qty_out} = يبقى في المخزون: ${item.qty_remaining}`
+                                  : `المتبقي في المخزون: ${item.qty_remaining} (إجمالي: ${item.qty_total})`}
                               </span>
                               <span>•</span>
                               <span className="text-neutral-400 font-sans" dir="ltr">
@@ -455,12 +484,29 @@ export default function App() {
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2 justify-end shrink-0">
+                          <div className="flex items-center gap-2 justify-end shrink-0 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMarkItemStatus(
+                                  item.part_number,
+                                  isVerified ? 'غير مدقق' : 'مدقق'
+                                )
+                              }
+                              className={`px-3 py-1.5 rounded-lg font-black border flex items-center gap-1.5 cursor-pointer transition-all ${
+                                isVerified
+                                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-sm'
+                                  : 'bg-orange-950/70 hover:bg-emerald-700 text-orange-200 hover:text-white border-orange-500/70'
+                              }`}
+                            >
+                              <CheckCircle2 className={`w-4 h-4 ${isVerified ? 'text-white' : 'text-orange-400'}`} />
+                              <span>{isVerified ? 'مدقق ✓' : 'غير مدقق (اضغط للتدقيق)'}</span>
+                            </button>
                             <button
                               onClick={() =>
                                 handleMarkItemStatus(
                                   item.part_number,
-                                  isMissing ? 'مضاف' : 'غير موجودة'
+                                  isMissing ? 'غير مدقق' : 'غير موجودة'
                                 )
                               }
                               className={`px-2.5 py-1.5 rounded-lg font-bold border cursor-pointer ${
@@ -469,7 +515,7 @@ export default function App() {
                                   : 'bg-red-950/60 text-red-200 border-red-700/60'
                               }`}
                             >
-                              {isMissing ? 'تحويل لموجودة ✓' : '× غير موجودة'}
+                              {isMissing ? 'اعتماد المشرف: تحويل لموجودة ✓' : 'علامة × غير موجودة'}
                             </button>
                             <button
                               onClick={() => showLocationDetails(item.location_code)}
@@ -496,21 +542,25 @@ export default function App() {
 
                 {/* بطاقات المواقع */}
                 {filteredLocations.length === 0 ? (
-                  <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] p-12 text-center">
-                    <p className="text-neutral-300 text-base font-bold mb-1">لا توجد مواقع مطابقة للبحث</p>
-                    <p className="text-neutral-500 text-xs mb-4">
-                      جرب البحث برقم قطعة (10 أرقام) أو اسم قطعة أو موقع آخر.
-                    </p>
-                    <button
-                      onClick={() => {
-                        setEditingItem(null);
-                        setIsItemModalOpen(true);
-                      }}
-                      className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Plus className="w-4 h-4" />
-                      <span>إضافة قطعة جديدة</span>
-                    </button>
+                  <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] p-10 text-center space-y-4">
+                    <div>
+                      <p className="text-neutral-200 text-base font-bold mb-1">لا توجد قطع أو مواقع محفوظة حالياً</p>
+                      <p className="text-neutral-400 text-xs">
+                        يمكنك قراءة أوراق الجرد بالكاميرا أو الألبوم، أو إضافة قطعة جديدة يدوياً.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-center gap-2.5">
+                      <button
+                        onClick={() => {
+                          setEditingItem(null);
+                          setIsItemModalOpen(true);
+                        }}
+                        className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-md"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>إضافة قطعة جديدة</span>
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div>
@@ -578,7 +628,17 @@ export default function App() {
               />
             )}
 
-            {/* View Mode 4: Flutter Code */}
+            {/* View Mode 4: واجهة المتشابهات وخطة الإحلال والتخزين المتقارب */}
+            {activeTab === 'similar' && (
+              <SimilarItemsPlannerView
+                items={allItems}
+                onRefresh={refreshData}
+                onOpenRelocationReport={handleOpenRelocationReportWithItems}
+                onOpenLocation={showLocationDetails}
+              />
+            )}
+
+            {/* View Mode 5: Flutter Code */}
             {activeTab === 'flutter' && <FlutterCodeViewer />}
           </>
         )}
@@ -627,7 +687,7 @@ export default function App() {
             qty_remaining: 10,
             is_moved: 0,
             is_missing: 0,
-            status: 'مضاف',
+            status: 'غير مدقق',
           });
           setIsItemModalOpen(true);
         }}
@@ -678,8 +738,11 @@ export default function App() {
       {/* Relocation Report Modal */}
       <RelocationReportModal
         isOpen={isRelocationReportOpen}
-        onClose={() => setIsRelocationReportOpen(false)}
-        movedItems={movedItems}
+        onClose={() => {
+          setIsRelocationReportOpen(false);
+          setReportMovedOverride(undefined);
+        }}
+        movedItems={reportMovedOverride && reportMovedOverride.length > 0 ? reportMovedOverride : movedItems}
       />
 
       {/* Wipe Database Modal */}

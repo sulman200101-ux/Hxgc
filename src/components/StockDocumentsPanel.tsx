@@ -3,14 +3,18 @@ import { suggestTechnicalTranslation, suggestModelTranslation } from '../service
 import { prepareAudio, playOperationSound } from '../utils/operationSounds';
 import React, { useEffect, useState } from 'react';
 import { dbService } from '../services/db';
-import type { DocumentLine, StockDocument } from '../services/documents';
+import {
+  auditSheetCompleteness,
+  type DocumentLine,
+  type StockDocument,
+} from '../services/documents';
 import { processOcrFromImage } from '../services/localOcr';
-import { ArrowDownToLine, ArrowUpFromLine, ClipboardList, MapPin, CheckCircle2 } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpFromLine, ClipboardList, MapPin, CheckCircle2, AlertTriangle } from 'lucide-react';
 const blank = (): DocumentLine => ({ part_number: '', quantity: 0, location: '', description_en: '', description_ar: '', check: '', remark: '', reviewed: false });
 function OriginalDocument({ image }: { image: Blob }) {
-  const [url, setUrl] = useState('');
+  const [url, setUrl] = useState<string | null>(null);
   useEffect(() => { const next = URL.createObjectURL(image); setUrl(next); return () => URL.revokeObjectURL(next); }, [image]);
-  return <details><summary>عرض أصل الورقة للمراجعة</summary><img src={url} alt="أصل ورقة المستند" className="max-h-96" /></details>;
+  return <details><summary>عرض أصل الورقة للمراجعة</summary>{url ? <img src={url} alt="أصل ورقة المستند" className="max-h-96" /> : null}</details>;
 }
 export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, onCapture }: { onRefresh: () => void; initialKind?: StockDocument['kind']; compact?: boolean; onCapture?: (kind: 'issue' | 'receipt' | 'inventory') => void }) {
   const [kind, setKind] = useState<StockDocument['kind'] | null>(initialKind || null);
@@ -20,14 +24,15 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, o
   const [reason, setReason] = useState('');
   const [lines, setLines] = useState<DocumentLine[]>([blank()]);
   const [original, setOriginal] = useState<File>();
-  const [preview, setPreview] = useState('');
+  const [preview, setPreview] = useState<string | null>(null);
   const [docs, setDocs] = useState<StockDocument[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const refresh = async () => setDocs(await dbService.getDocuments());
   useEffect(() => { refresh().catch(err => setMessage(String(err))); }, []);
-  useEffect(() => { if (!original) { setPreview(''); return; } const url = URL.createObjectURL(original); setPreview(url); return () => URL.revokeObjectURL(url); }, [original]);
+  useEffect(() => { if (!original) { setPreview(null); return; } const url = URL.createObjectURL(original); setPreview(url); return () => URL.revokeObjectURL(url); }, [original]);
   const update = (index: number, values: Partial<DocumentLine>) => setLines(current => current.map((line, i) => i === index ? { ...line, ...values } : line));
+  const sheetAudit = auditSheetCompleteness(lines);
   return <section className="m-4 border border-amber-800 p-4 rounded-xl space-y-3" dir="rtl">
     {!compact && <BatchDocumentsPanel onChanged={() => { refresh().catch(err => setMessage(String(err))); onRefresh(); }} />}
     <div className="flex flex-wrap gap-3">{([
@@ -56,10 +61,21 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, o
           const rows = await processOcrFromImage(original);
           if (!rows.length) throw new Error("لم تُقرأ أرقام قطع كاملة؛ راجع الصورة أو أدخل السطور يدويًا");
           playOperationSound('uncertain');
-          setLines(rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total > 0 ? row.qty_total : Number.NaN, location: row.location_code, description_en: row.description_en, description_ar: row.description_ar, check: '', remark: row.remark || '', reviewed: false })));
-          setMessage('راجع الرقم والكمية والعلامات والموقع مقابل الأصل؛ رقم المستند يُدخل يدويًا. لا توجد دقة مضمونة.');
+          const nextLines = rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total > 0 ? row.qty_total : Number.NaN, location: row.location_code, description_en: row.description_en, description_ar: row.description_ar, check: row.is_missing === 1 ? 'X' : '', remark: row.remark || '', reviewed: false }));
+          setLines(nextLines);
+          if (auditSheetCompleteness(nextLines).duplicateGroups.length > 0) setSumDuplicates(true);
+          setMessage('راجع الرقم والكمية والعلامات والموقع مقابل الأصل؛ جميع القطع تبدأ بحالة غير مدقق حتى تضغط على أيقونة التدقيق.');
         } catch (err) { playOperationSound('uncertain'); setMessage(String(err)); } finally { setBusy(false); }
       }}>اقتراح سطور بالقراءة المحلية</button>}
+      {lines.length > 0 && (sheetAudit.incompleteLines.length > 0 || sheetAudit.shortageLines.length > 0 || sheetAudit.missingMarkLines.length > 0 || sheetAudit.duplicateGroups.length > 0) && (
+        <div role="alert" className="p-3 rounded-xl bg-red-950/80 border border-red-500 text-xs space-y-1">
+          <p className="font-bold text-red-200 flex items-center gap-1.5"><AlertTriangle className="w-4 h-4 text-red-400" /> ⚠️ تحذير: هناك نقص أو تكرار في سطور المستند (إجمالي السطور: {sheetAudit.extractedRowCount} | صافي القطع الفريدة: {sheetAudit.netUniquePartsCount})</p>
+          {sheetAudit.incompleteLines.map(issue => <p key={issue.lineNumber} className="text-red-300 font-mono">• السطر #{issue.lineNumber}: {issue.issues.join('، ')}</p>)}
+          {sheetAudit.shortageLines.map(s => <p key={s.lineNumber} className="text-amber-300 font-mono">• السطر #{s.lineNumber} ({s.part_number}): العدد {s.qtyTotal} ناقص ({s.remark}) = يتبقى {s.qtyRemaining}</p>)}
+          {sheetAudit.missingMarkLines.map(m => <p key={m.lineNumber} className="text-red-300 font-mono">• السطر #{m.lineNumber} ({m.part_number}): غير موجودة × (المتبقي 0)</p>)}
+          {sheetAudit.duplicateGroups.map(g => <p key={g.part_number} className="text-amber-200 font-mono">• رقم مكرر {g.part_number} في السطور #{g.lineNumbers.join(' و #')} بكميات ({g.quantities.join(' + ')}) = إجمالي {g.totalQuantity}</p>)}
+        </div>
+      )}
       {lines.map((line, i) => <fieldset key={i} className="border border-stone-600 p-3 flex flex-wrap gap-2"><legend>السطر {i + 1}</legend>
         {line.part_number && lines.filter(candidate => candidate.part_number.trim() === line.part_number.trim()).length > 1 && <p role="alert" className="w-full text-red-300">رقم مكرر في الورقة: راجع السطرين واطلب اعتماد جمع الكميات أدناه؛ لن يتم الجمع تلقائيًا.</p>}
         <label>Material<input required className="bg-stone-800 w-36 p-1" value={line.part_number} onChange={e => {
@@ -91,10 +107,10 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, o
       {doc.duplicateResolution === 'sum' && <p className="text-amber-200">طلب جمع سطور مكررة: يضاف مجموع الكميات إلى الرصيد الموجود بعد الاعتماد. يتطلب اعتماد المشرف.</p>}
       {doc.original && <OriginalDocument image={doc.original} />}
       {doc.kind === 'issue' && <p className="text-amber-200">راجع رقم المستند وأرقام القطع والكميات مقابل الأصل. الاعتماد وحده ينقص المخزون.</p>}
-      {doc.lines.map(line => <div key={line.part_number} className="p-2 border-b border-stone-700"><p>{line.part_number} — {line.quantity} — {line.old_location || "—"} → {line.location} — {line.check || 'غير مدقق'} — {line.remark}</p><p className="font-bold">{line.description_ar}</p><p dir="ltr" className="text-sm text-neutral-400">{line.description_en}</p></div>)}
-      {doc.kind === 'issue' && doc.status === 'pending' && doc.lines.map(line => {
+      {doc.lines.map((line, lineIdx) => <div key={`${line.part_number}-${lineIdx}`} className="p-2 border-b border-stone-700"><p>{line.part_number} — {line.quantity} — {line.old_location || "—"} → {line.location} — {line.check || 'غير مدقق'} — {line.remark}</p><p className="font-bold">{line.description_ar}</p><p dir="ltr" className="text-sm text-neutral-400">{line.description_en}</p></div>)}
+      {doc.kind === 'issue' && doc.status === 'pending' && doc.lines.map((line, lineIdx) => {
         const available = dbService.getItemByPartNumber(line.part_number)?.qty_remaining;
-        return <p key={line.part_number} className={available === undefined || line.quantity > available ? 'text-red-300' : 'text-amber-200'}>{line.part_number} — قبل الصرف: {available ?? 'غير موجود'} — المطلوب: {line.quantity} — بعد الصرف: {available === undefined ? 'غير متاح' : available - line.quantity}</p>;
+        return <p key={`${line.part_number}-issue-${lineIdx}`} className={available === undefined || line.quantity > available ? 'text-red-300' : 'text-amber-200'}>{line.part_number} — قبل الصرف: {available ?? 'غير موجود'} — المطلوب: {line.quantity} — بعد الصرف: {available === undefined ? 'غير متاح' : available - line.quantity}</p>;
       })}
       {doc.kind === 'issue' && doc.status === 'approved' && <p className="text-emerald-300 flex gap-2"><CheckCircle2 aria-hidden="true" />تم اعتماد الصرف وإنقاص المخزون — {doc.executedAt}</p>}
       {doc.status === 'pending' && <button disabled={busy} className="p-2 bg-amber-900" onClick={async () => { prepareAudio(); setBusy(true); try { await dbService.approveDocument(doc.id); if (doc.kind === 'issue') playOperationSound('issued'); await refresh(); onRefresh(); setMessage(doc.kind === 'issue' ? 'تم الصرف بنجاح' : 'تم الاعتماد والتنفيذ'); } catch (err) { setMessage((err as Error).message); } finally { setBusy(false); } }}>{doc.kind === 'issue' ? 'اعتماد الصرف وإنقاص المخزون' : 'اعتماد المشرف وتنفيذ الطلب'}</button>}

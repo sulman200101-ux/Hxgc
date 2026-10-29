@@ -42,7 +42,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
   const [category, setCategory] = useState('مسامير وروابط');
   const [qtyTotal, setQtyTotal] = useState(1);
   const [qtyOut, setQtyOut] = useState(0);
-  const [status, setStatus] = useState<InventoryItem['status']>('مضاف');
+  const [status, setStatus] = useState<InventoryItem['status']>('غير مدقق');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
@@ -66,7 +66,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       setCategory('مسامير وروابط');
       setQtyTotal(10);
       setQtyOut(0);
-      setStatus('مضاف');
+      setStatus('غير مدقق');
     }
   }, [item, isOpen]);
 
@@ -102,18 +102,23 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     const cleanQtyTotal = sanitizeQuantity(qtyTotal, 1);
     const cleanQtyOut = sanitizeQuantity(qtyOut, 0);
 
-    await onSave({
-      part_number: cleanPart,
-      location_code: cleanLoc,
-      description_en: cleanDescEn,
-      description_ar: descAr.trim() || cleanDescEn,
-      category,
-      qty_total: cleanQtyTotal,
-      qty_out: cleanQtyOut,
-      status,
-    });
-    setIsSubmitting(false);
-    onClose();
+    try {
+      await onSave({
+        part_number: cleanPart,
+        location_code: cleanLoc,
+        description_en: cleanDescEn,
+        description_ar: descAr.trim() || cleanDescEn,
+        category,
+        qty_total: cleanQtyTotal,
+        qty_out: cleanQtyOut,
+        status,
+      });
+      onClose();
+    } catch (err) {
+      setValidationError((err as Error).message || 'تعذر حفظ التعديلات');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (

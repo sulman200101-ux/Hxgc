@@ -36,24 +36,29 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
   movedItems: propMovedItems,
 }) => {
   const reportRef = useRef<HTMLDivElement>(null);
-  const [actionFeedback, setActionFeedback] = useState<{ message: string; downloadUrl?: string; filename?: string } | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<{
+    message: string;
+    downloadUrl?: string;
+    filename?: string;
+    whatsappUrl?: string;
+  } | null>(null);
   const [isExporting, setIsExporting] = useState(false);
-  
+
   // خيار نطاق التقرير: القطع المنقولة أو كافة قطع الجرد
   const [reportScope, setReportScope] = useState<'moved' | 'all'>('moved');
   const [reportItems, setReportItems] = useState<InventoryItem[]>([]);
 
-  // استعلام مباشر من قاعدة البيانات المحلية عند فتح الواجهة
+  // استعلام مباشر من قاعدة البيانات المحلية عند فتح الواجهة (مع إعطاء الأولوية لخطة النقل المعتمدة للتو إن وجدت)
   useEffect(() => {
     if (isOpen) {
       const movedFromDb = dbService.getMovedItems();
       const allFromDb = dbService.getAllItems();
 
       if (reportScope === 'moved') {
-        if (movedFromDb.length > 0) {
-          setReportItems(movedFromDb);
-        } else if (propMovedItems && propMovedItems.length > 0) {
+        if (propMovedItems && propMovedItems.length > 0) {
           setReportItems(propMovedItems);
+        } else if (movedFromDb.length > 0) {
+          setReportItems(movedFromDb);
         } else {
           setReportItems(allFromDb);
         }
@@ -103,41 +108,53 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
     setIsExporting(true);
     setActionFeedback({ message: 'جاري توليد ملف PDF وتجهيز المشاركة عبر واتساب... 📲' });
     try {
-      const intro = `📋 *مرفق تقرير نقل القطع الميداني رقم [${reportId}] للاعتماد في النظام الشامل*\n\n` +
-        `🏢 *ASMO - إدارة المستودعات*\n` +
+      const intro =
+        `📋 *مرفق تقرير اعتماد خطة نقل وتجميع المتشابهات رقم [${reportId}]*\n\n` +
+        `🏢 *ASMO - إدارة المستودعات (SAP Inventory Controller)*\n` +
         `📅 التاريخ: ${currentDate} • ${currentTime}\n` +
-        `📦 عدد الأصناف المدرجة: ${reportItems.length} صنف\n` +
-        `🔢 إجمالي الكمية: ${totalQty} وحدة\n\n` +
-        `*بيان حركة النقل الميداني للمواقع الجديدة:*\n`;
+        `📦 عدد الأصناف المعتمدة في النقل: ${reportItems.length} صنف\n` +
+        `🔢 إجمالي الكمية المنقولة: ${totalQty} وحدة\n\n` +
+        `*بيان حركة إخراج غير المتشابهات وتجميع المتشابهات في المواقع الجديدة:*\n`;
 
-      const rows = reportItems.slice(0, 12).map((item, idx) => {
-        return `${idx + 1}) القطعة: *${item.part_number}*\n` +
-               `   الوصف: ${item.description_ar || item.description_en}\n` +
-               `   الكمية: ${item.qty_total} | من: [${item.old_location || 'الموقع السابق'}] ⬅ إلى: [${item.location_code}]\n` +
-               `   الحالة: تم النقل (${item.moved_at || 'الآن'})`;
-      }).join('\n\n');
+      const rows = reportItems
+        .slice(0, 18)
+        .map((item, idx) => {
+          return (
+            `${idx + 1}) القطعة: *${item.part_number}*\n` +
+            `   الوصف: ${item.description_ar || item.description_en}\n` +
+            `   الكمية: ${item.qty_total} | من الموقع: [${item.old_location || 'السابق'}] ⬅ إلى الموقع الجديد: *[${item.location_code}]*\n` +
+            `   الحالة: تم الاعتماد والنقل ✓`
+          );
+        })
+        .join('\n\n');
 
-      const extra = reportItems.length > 12 ? `\n\n... بالإضافة إلى ${reportItems.length - 12} أصناف أخرى مدرجة في ملف الـ PDF المرفق.` : '';
+      const extra =
+        reportItems.length > 18
+          ? `\n\n... بالإضافة إلى ${reportItems.length - 18} أصناف أخرى مدرجة في ملف الـ PDF المرفق.`
+          : '';
 
-      const outro = `\n\n✅ يرجى التكرم بالاعتماد ورصد المواقع الجديدة في النظام الشامل.\n` +
-                    `رابط المنظومة: ${window.location.origin}`;
+      const outro =
+        `\n\n✅ تم اعتماد خطة النقل وتحديث المواقع الفعلية في النظام.`;
+
+      const fullWhatsAppText = intro + rows + extra + outro;
+      const directWaUrl = `https://wa.me/?text=${encodeURIComponent(fullWhatsAppText)}`;
 
       const res = await sharePdfFile({
         reportElementId: 'relocation-printable-report',
-        title: `تقرير نقل القطع الميداني - ASMO [${reportId}]`,
-        text: intro + rows + extra + outro,
+        title: `تقرير نقل وتجميع القطع الميداني - ASMO [${reportId}]`,
+        text: fullWhatsAppText,
         targetApp: 'whatsapp',
       });
 
       setActionFeedback({
-        message: `تم تصدير وحفظ ملف PDF (${res.filename}) بنجاح وجاري فتح واتساب! 📲`,
+        message: `تم تنزيل ملف PDF (${res.filename}) وتجهيز الإرسال عبر واتساب! 📲`,
         downloadUrl: res.downloadUrl,
         filename: res.filename,
+        whatsappUrl: res.whatsappUrl || directWaUrl,
       });
-      setTimeout(() => setActionFeedback(null), 8000);
     } catch (e: any) {
       console.error(e);
-      setActionFeedback({ message: 'تم فتح تطبيق واتساب بنص التقرير 📲' });
+      setActionFeedback({ message: 'تم تجهيز نص التقرير لإرساله عبر واتساب 📲' });
     } finally {
       setIsExporting(false);
     }
@@ -332,23 +349,36 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
           </div>
         </div>
 
-        {/* Action feedback banner with direct PDF download link */}
+        {/* Action feedback banner with direct PDF download link & WhatsApp link */}
         {actionFeedback && (
           <div className="bg-[#1C2826] border-b border-emerald-600/40 px-4 py-2.5 text-xs font-bold text-emerald-200 flex flex-wrap items-center justify-between gap-2 no-print print:hidden animate-in fade-in">
             <div className="flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>{actionFeedback.message}</span>
             </div>
-            {actionFeedback.downloadUrl && (
-              <a
-                href={actionFeedback.downloadUrl}
-                download={actionFeedback.filename || 'تقرير-الاعتماد-ASMO.pdf'}
-                className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center gap-1 transition-colors shadow-sm"
-              >
-                <FileDown className="w-3.5 h-3.5" />
-                <span>تحميل / حفظ ملف PDF مرة أخرى</span>
-              </a>
-            )}
+            <div className="flex flex-wrap items-center gap-2">
+              {actionFeedback.whatsappUrl && (
+                <a
+                  href={actionFeedback.whatsappUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1 rounded-lg bg-[#25D366] hover:bg-[#1da851] text-white font-black text-[11px] flex items-center gap-1 transition-colors shadow-sm"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  <span>فتح واتساب وإرسال التقرير الآن 📲</span>
+                </a>
+              )}
+              {actionFeedback.downloadUrl && (
+                <a
+                  href={actionFeedback.downloadUrl}
+                  download={actionFeedback.filename || 'تقرير-الاعتماد-ASMO.pdf'}
+                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center gap-1 transition-colors shadow-sm"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span>تحميل / حفظ ملف PDF</span>
+                </a>
+              )}
+            </div>
           </div>
         )}
 
@@ -539,7 +569,7 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
                     const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
 
                     return (
-                      <tr key={item.part_number} style={{ backgroundColor: rowBg }}>
+                      <tr key={`${item.part_number}-${idx}`} style={{ backgroundColor: rowBg }}>
                         <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 'bold', color: '#64748b', border: '1px solid #cbd5e1', fontSize: '11px' }}>
                           {idx + 1}
                         </td>

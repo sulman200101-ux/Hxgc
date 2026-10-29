@@ -7,12 +7,12 @@ async function derive(pin: string, salt: string): Promise<string> {
   return hex(new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(salt), iterations: ITERATIONS }, key, 256)));
 }
 async function storePin(pin: string) {
-    if (!/^\d{4}$/.test(pin)) throw new Error('أدخل أربعة أرقام');
-    const salt = hex(crypto.getRandomValues(new Uint8Array(32)));
-    const hash = await derive(pin, salt);
-    localStorage.setItem(KEY, JSON.stringify({ salt, hash, failures: 0, blockedUntil: 0 }));
-    localStorage.removeItem(LEGACY);
-  }
+  if (!/^\d{4}$/.test(pin)) throw new Error('أدخل أربعة أرقام');
+  const salt = hex(crypto.getRandomValues(new Uint8Array(32)));
+  const hash = await derive(pin, salt);
+  localStorage.setItem(KEY, JSON.stringify({ salt, hash, failures: 0, blockedUntil: 0 }));
+  localStorage.removeItem(LEGACY);
+}
 export const pinSecurity = {
   configured: () => !!localStorage.getItem(KEY) || !!localStorage.getItem(LEGACY),
   async setup(pin: string) {
@@ -45,14 +45,26 @@ export const pinSecurity = {
 
 // Reject concurrent requests so one approval cannot authorize multiple mutations.
 let pending = false;
+let activeHandler: ((event: Event) => void) | null = null;
+
+export function resetPendingAuthorization(): void {
+  if (activeHandler && typeof window !== 'undefined') {
+    window.removeEventListener('asmo-authorize-result', activeHandler);
+  }
+  activeHandler = null;
+  pending = false;
+}
+
 export async function authorizeMutation(action: string): Promise<void> {
   if (typeof window === 'undefined' || pending) throw new Error('يلزم اعتماد المستخدم؛ توجد عملية معلقة');
   pending = true;
   return new Promise((resolve, reject) => {
     const handler = (event: Event) => {
       pending = false;
+      activeHandler = null;
       (event as CustomEvent).detail === true ? resolve() : reject(new Error('أُلغيت العملية'));
     };
+    activeHandler = handler;
     window.addEventListener('asmo-authorize-result', handler, { once: true });
     window.dispatchEvent(new CustomEvent('asmo-authorize-request', { detail: { action } }));
   });

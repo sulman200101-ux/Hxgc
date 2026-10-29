@@ -88,7 +88,8 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
       setTimeout(() => setExportNotice(null), 4000);
     } catch (err) {
       console.error('PDF export error:', err);
-      window.alert('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
+      setExportNotice('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
+      setTimeout(() => setExportNotice(null), 5000);
     } finally {
       setIsExportingPdf(false);
     }
@@ -265,13 +266,13 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
             </div>
 
             <div className="p-4 overflow-y-auto flex-1 space-y-3">
-              {visibleCategoryItems.map((item) => {
+              {visibleCategoryItems.map((item, idx) => {
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
                 const isMoved = item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول';
 
                 return (
                   <div
-                    key={item.part_number}
+                    key={`${item.part_number}-${idx}`}
                     className={`rounded-xl p-3.5 border transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs ${
                       isMissing
                         ? 'bg-red-950/25 border-red-700/60 hover:border-red-500'
