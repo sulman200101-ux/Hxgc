@@ -694,8 +694,9 @@ class InventoryDatabase {
       const isMissing = marks.status === 'غير موجودة' ? 1 : 0;
       const nextOut = base.qty_out + marks.shortage;
       const nextRemaining = isMissing ? 0 : base.qty_remaining - marks.shortage;
-      // Existing book stock is never replaced by an inventory OCR quantity.
-      after = { ...base, status: marks.status, is_missing: isMissing, remark: line.remark,
+      const cleanRemark = marks.shortage > 0 ? `-${marks.shortage}` : marks.excludedIncrease ? '' : line.remark;
+      // Existing book stock is never replaced by an inventory OCR quantity; increases (F / +) are permanently excluded.
+      after = { ...base, status: marks.status, is_missing: isMissing, remark: cleanRemark,
         qty_out: nextOut, qty_remaining: nextRemaining };
     }
     if (![after.qty_total, after.qty_out, after.qty_remaining].every(v => Number.isSafeInteger(v) && v >= 0)

@@ -108,10 +108,12 @@ export function interpretMark(check: string, remark: string) {
   const shortage = parseShortageValue(note) || parseShortageValue(mark);
   const isCross = /^[X×✗✘]$/.test(mark);
   const isVerified = /^(✓|✔|CHECK)$/.test(mark) || (!isCross && parseShortageValue(mark) > 0);
+  const excludedIncrease =
+    /^(?:F\s*\d+|\+\s*\d+)$/.test(note) || /^(?:F\s*\d+|\+\s*\d+)$/.test(mark);
   return {
     status: isCross ? 'غير موجودة' : isVerified ? 'مدقق' : 'غير مدقق',
-    shortage,
-    excludedIncrease: /^F\d+$/.test(note),
+    shortage: excludedIncrease ? 0 : shortage,
+    excludedIncrease,
   } as const;
 }
 

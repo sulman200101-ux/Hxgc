@@ -201,16 +201,19 @@ export function BatchDocumentsPanel({
             patch(result.key, { state: 'error', message: result.message });
             return;
           }
-          const mappedLines: DocumentLine[] = result.rows.map((row) => ({
-            part_number: row.part_number,
-            quantity: row.qty_total > 0 ? row.qty_total : Number.NaN,
-            location: row.location_code,
-            description_en: row.description_en,
-            description_ar: row.description_ar,
-            check: row.is_missing === 1 ? 'X' : '',
-            remark: row.remark || '',
-            reviewed: true,
-          }));
+          const mappedLines: DocumentLine[] = result.rows.map((row) => {
+            const marks = interpretMark('', row.remark || '');
+            return {
+              part_number: row.part_number,
+              quantity: row.qty_total > 0 ? row.qty_total : Number.NaN,
+              location: row.location_code,
+              description_en: row.description_en,
+              description_ar: row.description_ar,
+              check: row.is_missing === 1 ? 'X' : '',
+              remark: marks.shortage > 0 ? `-${marks.shortage}` : '',
+              reviewed: true,
+            };
+          });
           patch(result.key, {
             state: 'review',
             id:
@@ -545,8 +548,8 @@ export function BatchDocumentsPanel({
                         <strong className="text-emerald-400 font-mono">{completeness.netUniquePartsCount}</strong> | غير مدقق:{' '}
                         <strong className="text-amber-300 font-mono">{unverifiedCount}</strong> | مدقق ✓:{' '}
                         <strong className="text-emerald-300 font-mono">{verifiedCount}</strong> | غير موجود ×:{' '}
-                        <strong className="text-red-300 font-mono">{missingCount}</strong> | ملاحظات (F / -):{' '}
-                        <strong className="text-amber-300 font-mono">{remarksCount}</strong>
+                        <strong className="text-red-300 font-mono">{missingCount}</strong> | إنقاص بالناقص (-):{' '}
+                        <strong className="text-amber-300 font-mono">{completeness.shortageLines.length}</strong> (الزيادة مستبعدة نهائياً)
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -747,10 +750,10 @@ export function BatchDocumentsPanel({
                       </select>
                     </label>
                     <label>
-                      الملاحظة / الناقص (-){' '}
+                      الناقص فقط (-) — الزيادة مستبعدة{' '}
                       <input
                         placeholder="مثل -3 أو -4"
-                        className="bg-stone-800 p-1 w-24 rounded font-mono"
+                        className="bg-stone-800 p-1 w-28 rounded font-mono text-amber-300"
                         value={line.remark}
                         onChange={(e) =>
                           patchLine(sheet.key, index, {
@@ -762,7 +765,7 @@ export function BatchDocumentsPanel({
                     </label>
                   </div>
 
-                  {/* ملخص فوري لتدقيق علامة السطر: صح ✓ | خطأ × | ناقص -N */}
+                  {/* ملخص فوري لتدقيق علامة السطر: صح ✓ | خطأ × | ناقص -N (مع استبعاد أي زيادة نهائياً) */}
                   {(() => {
                     const marks = interpretMark(line.check, line.remark);
                     const qty = Number.isFinite(line.quantity) ? line.quantity : 0;
@@ -776,12 +779,24 @@ export function BatchDocumentsPanel({
                         </div>
                       );
                     }
+                    if (marks.excludedIncrease) {
+                      return (
+                        <div className="p-2 rounded-lg bg-stone-800 border border-stone-600 text-neutral-300 font-bold flex items-center justify-between gap-2">
+                          <span>
+                            🚫 تم استبعاد الزيادة ({line.remark}) نهائياً — يُعتمد فقط إنقاص العدد بعلامة الناقص (-N)
+                          </span>
+                          <span className="font-mono text-amber-300">
+                            يبقى العدد الأصلي دون زيادة: {qty}
+                          </span>
+                        </div>
+                      );
+                    }
                     if (marks.shortage > 0) {
                       const rem = Math.max(0, qty - marks.shortage);
                       return (
                         <div className="p-2 rounded-lg bg-amber-950/80 border border-amber-500/70 text-amber-200 font-bold flex items-center justify-between gap-2">
                           <span>
-                            ➖ علامة ناقص (-{marks.shortage}): إنقاص العدد ({qty} - {marks.shortage})
+                            ➖ اعتماد علامة ناقص (-{marks.shortage}): إنقاص العدد ({qty} - {marks.shortage})
                           </span>
                           <span className="font-mono text-emerald-300">
                             يبقى في المخزون: {rem}

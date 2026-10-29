@@ -211,18 +211,23 @@ export function extractStrictQuantity(line: string, _partNumber: string, storage
 export function extractCheckAndRemark(
   line: string,
   storageBin: string
-): { isMissing: number; remark: string } {
+): { isMissing: number; remark: string; shortage: number } {
   const tail = textAfterStorageBin(line, storageBin) || '';
   const qtyMatch = tail.match(QTY_FIELD);
   const afterQty = qtyMatch ? tail.slice(qtyMatch[0].length).trim() : tail;
 
   const isMissing = /(?:^|\s|\|)([Xx×✗✘])(?=\s|\||$)/.test(afterQty) ? 1 : 0;
   let remark = '';
-  const remarkMatch = afterQty.match(/\b(F\d{1,3}|-\s*\d{1,3}|\+\s*\d{1,3})\b/i);
-  if (remarkMatch) {
-    remark = remarkMatch[1].replace(/\s+/g, '').toUpperCase();
+  let shortage = 0;
+  // اعتماد علامة الناقص فقط (-N أو M - N) واستبعاد أي زيادة (F أو +) نهائياً
+  const minusMatch = afterQty.match(/(?:^|\s|\|)(?:\d{1,4}\s*-\s*(\d{1,4})|-\s*(\d{1,4}))(?=\s|\||$)/);
+  if (minusMatch) {
+    shortage = Number(minusMatch[1] || minusMatch[2] || 0);
+    if (shortage > 0) {
+      remark = `-${shortage}`;
+    }
   }
-  return { isMissing, remark };
+  return { isMissing, remark, shortage };
 }
 
 export function extractStrictDescription(
@@ -255,9 +260,10 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     }
 
     const storageBin = extractStrictStorageBin(line, partNumber);
-    const { total, out } = extractStrictQuantity(line, partNumber, storageBin);
-    const { isMissing, remark } = extractCheckAndRemark(line, storageBin);
+    const { total } = extractStrictQuantity(line, partNumber, storageBin);
+    const { isMissing, remark, shortage } = extractCheckAndRemark(line, storageBin);
     const { descEn, descAr, category } = extractStrictDescription(line, partNumber, storageBin);
+    const out = isMissing ? 0 : Math.min(total, shortage);
 
     rawResults.push({
       part_number: partNumber,

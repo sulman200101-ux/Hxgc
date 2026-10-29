@@ -33,7 +33,7 @@ export const SAP_PAGE_27_ROWS: RawVerifiedSheetRow[] = [
   { seq: 8428, part_number: '1000995878', location_code: 'N11FL2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'SLEEVE SHAFT, ASTM A743 CA40' },
   { seq: 8429, part_number: '1000995878', location_code: 'N11FL2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'SLEEVE SHAFT, ASTM A743 CA40' },
   { seq: 8650, part_number: '1000998169', location_code: 'N11FL2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'RING WEAR, CASING, ASTM A743 CF10SMNN' },
-  { seq: 8651, part_number: '1000998169', location_code: 'N11FL2', uom: 'EA', qty_total: 1, is_missing: 0, remark: 'F1', description_en: 'RING WEAR, CASING, ASTM A743 CF10SMNN' },
+  { seq: 8651, part_number: '1000998169', location_code: 'N11FL2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'RING WEAR, CASING, ASTM A743 CF10SMNN' },
   { seq: 8804, part_number: '1000999462', location_code: 'N11FL2', uom: 'EA', qty_total: 3, is_missing: 0, remark: '', description_en: 'WASHER, ASTM A105N' },
   { seq: 9303, part_number: '1001004202', location_code: 'N11FL2', uom: 'EA', qty_total: 4, is_missing: 0, remark: '', description_en: 'BUSHING PUMP, THROAT, NITRONIC 60, HF TU' },
   { seq: 10997, part_number: '1001019178', location_code: 'N11FL2', uom: 'EA', qty_total: 3, is_missing: 0, remark: '', description_en: 'SPACER, UNS S30400 / S30403' },
@@ -54,7 +54,7 @@ export const SAP_PAGE_27_ROWS: RawVerifiedSheetRow[] = [
   { seq: 3201, part_number: '1000510400', location_code: 'N12A2', uom: 'EA', qty_total: 12, is_missing: 0, remark: '', description_en: 'FUSE, LOW VOLTAGE: HRC,' },
   { seq: 4697, part_number: '1000756590', location_code: 'N12A2', uom: 'EA', qty_total: 2, is_missing: 0, remark: '', description_en: 'RING, BALL, CARBOGRAPHITE, UPPER' },
   { seq: 5897, part_number: '1000903263', location_code: 'N12A2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'POWER SUPPLY ELECTRICAL, AC/DC, INPUT 10' },
-  { seq: 6592, part_number: '1000944075', location_code: 'N12A2', uom: 'EA', qty_total: 1, is_missing: 0, remark: 'F1', description_en: 'GASKET, ROD' },
+  { seq: 6592, part_number: '1000944075', location_code: 'N12A2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'GASKET, ROD' },
 ];
 
 /**
@@ -63,17 +63,17 @@ export const SAP_PAGE_27_ROWS: RawVerifiedSheetRow[] = [
  * N16D1, N16D2, N17A1, N17A2, N17B1
  */
 export const SAP_PAGE_41_ROWS: RawVerifiedSheetRow[] = [
-  { seq: 9910, part_number: '1001011116', location_code: 'N16D1', uom: 'EA', qty_total: 2, is_missing: 0, remark: 'SET', description_en: 'BEARING BALL, 2X7315 BDB, M/CED BRASS' },
+  { seq: 9910, part_number: '1001011116', location_code: 'N16D1', uom: 'EA', qty_total: 2, is_missing: 0, remark: '', description_en: 'BEARING BALL, 2X7315 BDB, M/CED BRASS' },
   { seq: 17572, part_number: '1001133476', location_code: 'N16D1', uom: 'EA', qty_total: 2, is_missing: 0, remark: '', description_en: 'BEARING, JOURNAL (MAIN BEARING), ASTM A1' },
-  { seq: 14310, part_number: '1001064248', location_code: 'N16D2', uom: 'ZYD', qty_total: 7, is_missing: 0, remark: 'F2', description_en: 'GASKET, NITRILE / ARAMID FIBER / 316-GRA' },
+  { seq: 14310, part_number: '1001064248', location_code: 'N16D2', uom: 'ZYD', qty_total: 7, is_missing: 0, remark: '', description_en: 'GASKET, NITRILE / ARAMID FIBER / 316-GRA' },
   { seq: 496, part_number: '1000053343', location_code: 'N17A1', uom: 'EA', qty_total: 5, is_missing: 0, remark: '', description_en: 'TEE:CPVC;2"NPS;SOC TYPE;SCH 80' },
-  { seq: 1162, part_number: '1000129631', location_code: 'N17A1', uom: 'PAA', qty_total: 5, is_missing: 0, remark: 'F5', description_en: 'GLOVES: SIZE 9-1/2 - 10, 406.4 MM (16' },
+  { seq: 1162, part_number: '1000129631', location_code: 'N17A1', uom: 'PAA', qty_total: 5, is_missing: 0, remark: '', description_en: 'GLOVES: SIZE 9-1/2 - 10, 406.4 MM (16' },
   { seq: 3299, part_number: '1000531636', location_code: 'N17A1', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'ADAPTER: PACKING, FEMALE' },
   { seq: 4627, part_number: '1000752642', location_code: 'N17A1', uom: 'EA', qty_total: 2, is_missing: 0, remark: '', description_en: 'BEARING, BALL, METRIC, 100 MM, 215 MM' },
   { seq: 5014, part_number: '1000785416', location_code: 'N17A1', uom: 'EA', qty_total: 1, is_missing: 1, remark: '', description_en: 'REGULATOR, FILTER, RELIEVING, 5 MICRONS' },
   { seq: 7616, part_number: '1000984302', location_code: 'N17A1', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'RING, THROTTLE, CARBON GRAPHITE, RESIN I' },
   { seq: 7837, part_number: '1000986661', location_code: 'N17A1', uom: 'EA', qty_total: 2, is_missing: 0, remark: '', description_en: 'VALVE BALL, 316 SS' },
-  { seq: 8234, part_number: '1000993872', location_code: 'N17A1', uom: 'EA', qty_total: 3, is_missing: 0, remark: 'F3', description_en: 'VALVE, SCALD PROTECTION, 1/2 IN, 300 SER' },
+  { seq: 8234, part_number: '1000993872', location_code: 'N17A1', uom: 'EA', qty_total: 3, is_missing: 0, remark: '', description_en: 'VALVE, SCALD PROTECTION, 1/2 IN, 300 SER' },
   { seq: 11995, part_number: '1001030993', location_code: 'N17A1', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'PACKING, GRAPHITE' },
   { seq: 12104, part_number: '1001033193', location_code: 'N17A1', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'RETAINER, BALANCE SEAL, SS AISI 410' },
   { seq: 12407, part_number: '1001036523', location_code: 'N17A1', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'RETAINER, STEM GUIDE, SS AISI 410 A479' },
@@ -88,7 +88,7 @@ export const SAP_PAGE_41_ROWS: RawVerifiedSheetRow[] = [
   { seq: 5664, part_number: '1000859058', location_code: 'N17A2', uom: 'EA', qty_total: 3, is_missing: 0, remark: '', description_en: 'SENSOR, TORQUE' },
   { seq: 5891, part_number: '1000903042', location_code: 'N17A2', uom: 'EA', qty_total: 1, is_missing: 1, remark: '', description_en: 'METER ELECTRICAL, AMMETER, 0 TO 60 A, AN' },
   { seq: 6673, part_number: '1000954953', location_code: 'N17A2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'CAP, BEARING' },
-  { seq: 7445, part_number: '1000979573', location_code: 'N17A2', uom: 'SET', qty_total: 20, is_missing: 0, remark: 'F20', description_en: 'STUD ASSEMBLY CONTINUOUS THREAD, 3/4 IN' },
+  { seq: 7445, part_number: '1000979573', location_code: 'N17A2', uom: 'SET', qty_total: 20, is_missing: 0, remark: '', description_en: 'STUD ASSEMBLY CONTINUOUS THREAD, 3/4 IN' },
   { seq: 10972, part_number: '1001018936', location_code: 'N17A2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'BEARING ROLLER METRIC, NON-DRIVE END' },
   { seq: 12578, part_number: '1001037467', location_code: 'N17A2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'SEAL LABYRINTH, NDE, ASTM B26 514, AC7 A-' },
   { seq: 12841, part_number: '1001038728', location_code: 'N17A2', uom: 'EA', qty_total: 1, is_missing: 0, remark: '', description_en: 'LABYRINTH, INTERSTAGE (2ND), ASTM B26 51' },
@@ -105,8 +105,9 @@ export const SAP_PAGE_41_ROWS: RawVerifiedSheetRow[] = [
 export function toExtractedSpareParts(rows: RawVerifiedSheetRow[]): ExtractedSparePart[] {
   return rows.map((row) => {
     const { category, descAr } = categorizeAndTranslate(row.description_en);
-    const minusMatch = (row.remark || '').trim().match(/^-\s*(\d+)$/);
-    const out = minusMatch ? Number(minusMatch[1]) : 0;
+    const minusMatch = (row.remark || '').trim().match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
+    const out = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : 0;
+    const cleanRemark = out > 0 ? `-${out}` : undefined;
     const rem = row.is_missing === 1 ? 0 : Math.max(0, row.qty_total - out);
     return {
       part_number: row.part_number,
@@ -118,7 +119,7 @@ export function toExtractedSpareParts(rows: RawVerifiedSheetRow[]): ExtractedSpa
       qty_out: out,
       qty_remaining: rem,
       is_missing: row.is_missing,
-      remark: row.remark || undefined,
+      remark: cleanRemark,
       status: row.is_missing === 1 ? 'غير موجودة' : 'غير مدقق',
       confidence: 'قراءة كاملة مطابقة 100%',
     };

@@ -178,11 +178,13 @@ export async function parseTableWithGeminiVision(
 
       const isMissing = detectMissingFromCheckMark(item);
       const total = Math.max(0, charToDigitMapper(item.qty_total ?? item.quantity ?? 1, 1));
-      const out = 0;
+      const rawRemark = item.remark ? String(item.remark).trim() : '';
+      const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
+      const out = isMissing ? 0 : minusMatch ? Math.min(total, Number(minusMatch[1] || minusMatch[2] || 0)) : 0;
+      const remark = out > 0 ? `-${out}` : undefined;
       const descEn = String(
         item.description_en || item.description || 'SPARE PART ASMO'
       ).trim();
-      const remark = item.remark ? String(item.remark).trim() : undefined;
 
       if (valid10DigitPart && isLocValid) {
         const { category, descAr } = categorizeAndTranslate(descEn);

@@ -73,7 +73,7 @@ function CaptureFlow({
                   : 'قارئ أوراق الجرد المبسط (قراءة كاملة بدقة 100%)'}
               </h2>
               <p className="text-xs text-neutral-300">
-                يستخرج جميع سطور الورقة بالكامل مع أرقام الـ 10 خانات والمواقع والكميات وعلامات اليد (✓ / × / F) دون ضياع أي قطعة
+                يستخرج جميع سطور الورقة بالكامل مع اعتماد علامة الناقص (-N) لإنقاص العدد واستبعاد الزيادة نهائياً
               </p>
             </div>
           </div>
@@ -131,7 +131,7 @@ function CaptureFlow({
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> قراءة جميع السطور في ورقة الجرد بالكامل
               </span>
               <span className="flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> كشف علامات الصح ✓ والخطأ × والملاحظات F1/F2/-4
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> اعتماد علامة الناقص (-N) لإنقاص العدد واستبعاد الزيادة نهائياً
               </span>
             </div>
           </div>
