@@ -12,7 +12,7 @@ function OriginalDocument({ image }: { image: Blob }) {
   useEffect(() => { const next = URL.createObjectURL(image); setUrl(next); return () => URL.revokeObjectURL(next); }, [image]);
   return <details><summary>عرض أصل الورقة للمراجعة</summary><img src={url} alt="أصل ورقة المستند" className="max-h-96" /></details>;
 }
-export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }: { onRefresh: () => void; initialKind?: StockDocument['kind']; compact?: boolean }) {
+export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, onCapture }: { onRefresh: () => void; initialKind?: StockDocument['kind']; compact?: boolean; onCapture?: (kind: 'issue' | 'receipt' | 'inventory') => void }) {
   const [kind, setKind] = useState<StockDocument['kind'] | null>(initialKind || null);
   const [sumDuplicates, setSumDuplicates] = useState(false);
   const [id, setId] = useState('');
@@ -31,9 +31,9 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }:
   return <section className="m-4 border border-amber-800 p-4 rounded-xl space-y-3" dir="rtl">
     {!compact && <BatchDocumentsPanel onChanged={() => { refresh().catch(err => setMessage(String(err))); onRefresh(); }} />}
     <div className="flex flex-wrap gap-3">{([
-      ['issue', 'ورقة صرف', ArrowUpFromLine], ['receipt', 'إدخال مخزون', ArrowDownToLine], ['inventory', 'مراجعة جرد', ClipboardList], ['transfer', 'طلب نقل', MapPin],
-    ] as const).map(([value, title, Icon]) => <button key={value} className="p-2 bg-stone-800 rounded-lg flex gap-2" onClick={() => { setKind(value); setSumDuplicates(false); setLines([blank()]); setId(''); setOriginal(undefined); }}><Icon size={18} />{title}</button>)}</div>
-    <p>كل قراءة اقتراح يحتاج مراجعة. الموظف يحفظ الطلب؛ اعتماد المشرف خطوة مستقلة. النقل الجزئي وتعدد الحسابات غير مدعومين بعد.</p>
+      ['issue', 'صرف', ArrowUpFromLine], ['receipt', 'إدخال مخزون', ArrowDownToLine], ['inventory', 'مراجعة جرد', ClipboardList],
+    ] as const).map(([value, title, Icon]) => <button key={value} className="p-2 bg-stone-800 rounded-lg flex gap-2" onClick={() => { if (onCapture) { onCapture(value); return; } setKind(value); setSumDuplicates(false); setLines([blank()]); setId(''); setOriginal(undefined); }}><Icon size={18} />{title}</button>)}</div>
+
     {kind && <form className="space-y-3" onSubmit={async e => {
       e.preventDefault(); prepareAudio(); setBusy(true);
       try {

@@ -22,7 +22,7 @@ try {
  await page.getByRole('button',{name:'العمليات والتقارير',exact:true}).click();
  assert.equal(await panel.getByLabel('اسم مقدم الدفعة').inputValue(),'tester');
  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jCuoAAAAASUVORK5CYII=','base64');
- await panel.getByLabel('اختيار صور الأوراق').setInputFiles([{name:'sheet-1.png',mimeType:'image/png',buffer:png},{name:'sheet-2.png',mimeType:'image/png',buffer:png}]);
+ await panel.getByLabel('صور الألبوم').setInputFiles([{name:'sheet-1.png',mimeType:'image/png',buffer:png},{name:'sheet-2.png',mimeType:'image/png',buffer:png}]);
  for(let i=0;i<2;i++) {
   const sheet=panel.locator(`[data-sheet-index="${i}"]`);
   await sheet.getByLabel('رقم مستند الورقة').fill(`PAPER-${i+1}`);
@@ -56,7 +56,7 @@ try {
  const after={stock:committed.items.length,qty:committed.items[0].qty_remaining,approved:committed.docs.filter(doc=>doc.status==='approved').length,locations:new Set(committed.items.map(item=>item.location_code)).size};
  assert.deepEqual(after,{stock:1,qty:8,approved:2,locations:1});
  await panel.getByLabel('نوع الدفعة').selectOption('receipt');
- await panel.getByLabel('اختيار صور الأوراق').setInputFiles({name:'duplicate.png',mimeType:'image/png',buffer:png});
+ await panel.getByLabel('صور الألبوم').setInputFiles({name:'duplicate.png',mimeType:'image/png',buffer:png});
  const duplicateSheet=panel.locator('[data-sheet-index="0"]');
  await duplicateSheet.getByLabel('رقم مستند الورقة').fill('BOTH-UI');
  for(let i=0;i<2;i++) {
@@ -79,6 +79,18 @@ try {
  assert.equal(combined.items.filter(item=>item.part_number==='1000428938').length,1);
  assert.equal(combined.items.find(item=>item.part_number==='1000428938').qty_remaining,9);
  assert.equal(combined.docs.find(doc=>doc.id==='BOTH-UI').lines.length,2);
+ await page.getByRole('button',{name:'المخزون',exact:true}).click();
+ await page.getByRole('button',{name:'جدول القطع',exact:true}).click();
+ const stockRow=page.getByRole('row').filter({hasText:'1000000777'});
+ await stockRow.getByTitle('تغيير حالة تدقيق القطعة').click();
+ await page.getByRole('textbox',{name:'الرمز',exact:true}).fill('2468');
+ await page.getByRole('button',{name:'اعتماد',exact:true}).click();
+ await stockRow.getByRole('button',{name:'مدققة ✓',exact:true}).waitFor();
+ assert.equal((await readState()).items.find(item=>item.part_number==='1000000777').status,'مدقق');
+ assert.equal(await stockRow.getByTitle('نقل موقع القطعة 🟢').count(),1);
+ await stockRow.getByTitle('تغيير حالة تدقيق القطعة').click();
+ await page.getByRole('button',{name:'إلغاء',exact:true}).click();
+ assert.equal((await readState()).items.find(item=>item.part_number==='1000000777').status,'مدقق');
  assert.deepEqual(errors,[]);
  console.log('PASS multiple image selection, two reviewed drafts, one supervisor approval, preserved originals, no duplicate inventory or locations, no premature stock change');
 } finally {await browser.close();}

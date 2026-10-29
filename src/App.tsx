@@ -36,6 +36,7 @@ export default function App() {
   const [visibleLocationsLimit, setVisibleLocationsLimit] = useState(25);
 
   // Modals state
+  const [captureKind, setCaptureKind] = useState<'inventory' | 'issue' | 'receipt'>('inventory');
   const [isOcrOpen, setIsOcrOpen] = useState(false);
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
   const [isWipeModalOpen, setIsWipeModalOpen] = useState(false);
@@ -210,6 +211,7 @@ export default function App() {
     partNumber: string,
     newStatus: InventoryItem['status']
   ) => {
+    try {
     await dbService.markStatus(partNumber, newStatus);
     refreshData();
     if (newStatus === 'غير موجودة') {
@@ -217,6 +219,7 @@ export default function App() {
     } else {
       showNotification(`تم تحديث حالة القطعة ${partNumber} إلى (${newStatus})`, 'success');
     }
+    } catch (error) { showNotification((error as Error).message, 'info'); }
   };
 
   const handleOcrSaveItems = async (extracted: ExtractedSparePart[]) => {
@@ -284,7 +287,7 @@ export default function App() {
         <header className="p-4" dir="rtl"><h1 className="text-xl font-bold">العمليات والتقارير</h1><p className="text-sm text-neutral-400">اسحب لليسار للعودة إلى المخزون</p></header>
         <DataSafetyPanel onRefresh={refreshData} />
         {isDbReady && <ReportsPanel />}
-        {isDbReady && <StockDocumentsPanel onRefresh={refreshData} />}
+        {isDbReady && <StockDocumentsPanel onRefresh={refreshData} onCapture={kind => { setCaptureKind(kind); setIsOcrOpen(true); }} />}
       </section>
       <section hidden={screen !== 'inventory'} aria-label="شاشة المخزون" className="min-h-[75vh]">
 
@@ -578,14 +581,14 @@ export default function App() {
       {/* الزر البرتقالي المزخرف العائم أسفل الشاشة لفتح نافذة الكاميرا والألبوم (Gemini Vision) */}
       <div className="fixed bottom-6 inset-x-0 flex justify-center z-40 pointer-events-none">
         <button
-          onClick={() => setIsOcrOpen(true)}
+          onClick={() => { setCaptureKind('inventory'); setIsOcrOpen(true); }}
           className="pointer-events-auto px-6 py-3.5 rounded-full bg-gradient-to-r from-[#FF6D00] via-[#FF8F00] to-[#E65100] hover:from-[#FF8500] hover:to-[#FF6D00] text-white font-black text-sm sm:text-base flex items-center gap-3 shadow-2xl shadow-orange-950/90 border-2 border-[#FFD54F] active:scale-95 transition-all cursor-pointer group relative overflow-hidden"
         >
           <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#3E1C0A] to-[#1F0D05] border border-[#FFB74D] text-[#FFB74D] flex items-center justify-center group-hover:scale-110 transition-transform relative">
             <Camera className="w-4 h-4 text-[#FFD54F]" />
           </div>
           <span className="tracking-wide text-white drop-shadow">
-            التعرف الفائق على النصوص (قراءة كامل الورقة)
+            قراءة ورقة أو عدة أوراق
           </span>
         </button>
       </div>
@@ -628,6 +631,7 @@ export default function App() {
 
       {/* OCR Modal (Gemini Vision Camera & Album) */}
       <OcrModal
+        kind={captureKind}
         isOpen={isOcrOpen}
         onClose={() => setIsOcrOpen(false)}
         onRefresh={refreshData}

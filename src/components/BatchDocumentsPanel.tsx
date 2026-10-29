@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import { ImageSourcePicker } from './ImageSourcePicker';
+import React, { useEffect, useState, useRef } from 'react';
 import { dbService } from '../services/db';
 import type { DocumentLine, StockDocument } from '../services/documents';
 import { processOcrFromImage } from '../services/localOcr';
@@ -14,10 +15,10 @@ function SheetImage({ image }: { image: Blob }) {
   useEffect(() => { const next = URL.createObjectURL(image); setUrl(next); return () => URL.revokeObjectURL(next); }, [image]);
   return <details><summary>مراجعة الصورة الأصلية</summary><img src={url} alt="أصل ورقة الدفعة" className="max-h-96" /></details>;
 }
-export function BatchDocumentsPanel({ onChanged }: { onChanged: () => void }) {
-  const [sheets, setSheets] = useState<Sheet[]>([]);
-  const [requester, setRequester] = useState('');
-  const [kind, setKind] = useState<'inventory' | 'receipt' | 'issue'>('inventory');
+export function BatchDocumentsPanel({ onChanged, initialImages = [], defaultOpen = false, autoRead = false, initialKind = 'inventory', compact = false }: { onChanged: () => void; initialImages?: File[]; defaultOpen?: boolean; autoRead?: boolean; initialKind?: 'inventory' | 'issue' | 'receipt'; compact?: boolean }) {
+  const [sheets, setSheets] = useState<Sheet[]>(() => initialImages.map(original => ({ key: crypto.randomUUID(), id: '', original, lines: [], state: 'waiting', message: '' })));
+  const [requester, setRequester] = useState(compact ? 'المستخدم المحلي' : '');
+  const [kind, setKind] = useState<'inventory' | 'receipt' | 'issue'>(initialKind);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [documents, setDocuments] = useState<StockDocument[]>([]);
@@ -27,9 +28,25 @@ export function BatchDocumentsPanel({ onChanged }: { onChanged: () => void }) {
   const patchLine = (key: string, index: number, update: Partial<DocumentLine>) => setSheets(current => current.map(sheet => sheet.key !== key ? sheet : {
     ...sheet, lines: sheet.lines.map((line, i) => i === index ? { ...line, ...update } : line),
   }));
+  const readPending = async () => {
+        prepareAudio(); setBusy(true);
+        try {
+          await readImageBatch(sheets.filter(sheet => sheet.state === 'waiting' || sheet.state === 'error'), processOcrFromImage,
+            (key, index, total) => { patch(key, { state: 'reading', message: '' }); setMessage(`قراءة الورقة ${index} من ${total}`); },
+            result => {
+              if (result.state === 'error') { patch(result.key, { state: 'error', message: result.message }); return; }
+              patch(result.key, { state: 'review', lines: result.rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total > 0 ? row.qty_total : Number.NaN, location: row.location_code,
+                description_en: row.description_en, description_ar: row.description_ar, check: row.is_missing === 1 ? 'X' : '', remark: row.remark || '', reviewed: false })) });
+            });
+          playOperationSound('uncertain'); setMessage('انتهت القراءة الأولية؛ راجع كل ورقة وكمية ورقم قطعة مقابل أصلها، وصحح الأوراق غير الواضحة.');
+        } catch (err) { setMessage(String(err)); playOperationSound('uncertain'); }
+        finally { setBusy(false); }
+        };
+  const autoStarted = useRef(false);
+  useEffect(() => { if (autoRead && initialImages.length && !autoStarted.current) { autoStarted.current = true; void readPending(); } }, []);
   const batches = new Map<string, StockDocument[]>();
   for (const doc of documents) if (doc.batchId) batches.set(doc.batchId, [...(batches.get(doc.batchId) || []), doc]);
-  return <details className="border border-amber-600 rounded-xl p-3" dir="rtl">
+  return <details open={defaultOpen || undefined} className="border border-amber-600 rounded-xl p-3" dir="rtl">
     <summary className="font-bold cursor-pointer">قراءة وحفظ عدة أوراق دفعة واحدة</summary>
     <p>اختر صور الأوراق معًا. تُقرأ بالتتابع، ثم تراجع جميع السطور وأرقام المستندات. الحفظ لا يعدّل المخزون؛ الاعتماد خطوة مستقلة.</p>
     <p>في الجرد: تُضاف القطع الجديدة بعد الاعتماد، والقطع الموجودة لا تتكرر ولا يُستبدل رصيدها بالكمية المقروءة. النقص -N يحتاج اعتمادًا. استخدم «توريد» لإضافة كميات واردة.</p>
@@ -45,30 +62,13 @@ export function BatchDocumentsPanel({ onChanged }: { onChanged: () => void }) {
         if ((err as Error).message.includes('تم حفظها مسبقًا')) playOperationSound('duplicate');
       } finally { setBusy(false); }
     }}>
-      <label className="block">نوع الدفعة <select disabled={busy} className="bg-stone-800 p-2" value={kind} onChange={e => setKind(e.target.value as typeof kind)}>
+      <label hidden={compact} className={compact ? "hidden" : "block"}>نوع الدفعة <select disabled={busy} className="bg-stone-800 p-2" value={kind} onChange={e => setKind(e.target.value as typeof kind)}>
         <option value="inventory">أوراق جرد</option><option value="receipt">أوراق توريد مخزون</option><option value="issue">أوراق صرف</option>
       </select></label>
-      <label className="block">اسم مقدم الدفعة <input disabled={busy} required className="bg-stone-800 p-2" value={requester} onChange={e => setRequester(e.target.value)} /></label>
-      <label className="block">اختيار صور الأوراق <input disabled={busy} type="file" accept="image/*" multiple onChange={e => {
-        const files = Array.from(e.target.files || []);
-        setSheets(current => [...current, ...files.map(original => ({ key: crypto.randomUUID(), id: '', original, lines: [], state: 'waiting' as const, message: '' }))]);
-        e.target.value = '';
-      }} /></label>
+      <label hidden={compact} className={compact ? "hidden" : "block"}>اسم مقدم الدفعة <input disabled={busy} required className="bg-stone-800 p-2" value={requester} onChange={e => setRequester(e.target.value)} /></label>
+      <ImageSourcePicker disabled={busy} onError={setMessage} onImages={files => setSheets(current => [...current, ...files.map(original => ({ key: crypto.randomUUID(), id: '', original, lines: [], state: 'waiting' as const, message: '' }))])} />
       <p>عدد الأوراق: {sheets.length} — جاهزة للمراجعة: {sheets.filter(sheet => sheet.state === 'review').length} — أخطاء: {sheets.filter(sheet => sheet.state === 'error').length}</p>
-      <button type="button" className="p-2 bg-stone-700 rounded" disabled={busy || !sheets.some(sheet => sheet.state === 'waiting' || sheet.state === 'error')} onClick={async () => {
-        prepareAudio(); setBusy(true);
-        try {
-          await readImageBatch(sheets.filter(sheet => sheet.state === 'waiting' || sheet.state === 'error'), processOcrFromImage,
-            (key, index, total) => { patch(key, { state: 'reading', message: '' }); setMessage(`قراءة الورقة ${index} من ${total}`); },
-            result => {
-              if (result.state === 'error') { patch(result.key, { state: 'error', message: result.message }); return; }
-              patch(result.key, { state: 'review', lines: result.rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total > 0 ? row.qty_total : Number.NaN, location: row.location_code,
-                description_en: row.description_en, description_ar: row.description_ar, check: row.is_missing === 1 ? 'X' : '', remark: row.remark || '', reviewed: false })) });
-            });
-          playOperationSound('uncertain'); setMessage('انتهت القراءة الأولية؛ راجع كل ورقة وكمية ورقم قطعة مقابل أصلها، وصحح الأوراق غير الواضحة.');
-        } catch (err) { setMessage(String(err)); playOperationSound('uncertain'); }
-        finally { setBusy(false); }
-      }}>قراءة جميع الأوراق المنتظرة</button>
+      <button type="button" className="p-2 bg-stone-700 rounded" disabled={busy || !sheets.some(sheet => sheet.state === 'waiting' || sheet.state === 'error')} onClick={readPending}>قراءة جميع الأوراق المنتظرة</button>
       {sheets.map((sheet, sheetIndex) => <fieldset key={sheet.key} disabled={busy} className="border border-stone-600 rounded p-3 my-3" data-sheet-index={sheetIndex}>
         <legend>الورقة {sheetIndex + 1}: {sheet.original.name} — {{ waiting: 'بانتظار القراءة', reading: 'جارٍ القراءة', review: 'تحتاج مراجعتك', error: 'تعذرت القراءة' }[sheet.state]}</legend>
         <SheetImage image={sheet.original} />
