@@ -135,8 +135,20 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
  * استخراج الكمية الصارمة (QTY): أرقام صحيحة فقط (Integers)
  */
 export function extractStrictQuantity(line: string, partNumber: string, storageBin: string): { total: number; out: number } {
-  // Plain OCR text does not reliably preserve column boundaries. Never invent QTY or issued stock.
-  return { total: 0, out: 0 };
+  if (!storageBin) return { total: 0, out: 0 };
+  const tokens = Array.from(line.matchAll(/\S+/g));
+  let end = -1;
+  for (let i = 0; i < tokens.length && end < 0; i++) {
+    for (let width = 1; width <= 3 && i + width <= tokens.length; width++) {
+      const last = tokens[i + width - 1];
+      const candidate = line.slice(tokens[i].index!, last.index! + last[0].length);
+      if (sanitizeLocationCode(candidate) === storageBin) { end = last.index! + last[0].length; break; }
+    }
+  }
+  if (end < 0) return { total: 0, out: 0 };
+  const tail = line.slice(end);
+  const match = tail.match(/^\s*(?:\|\s*)?(?:(?:EA|SET|PK|SH|CO|AY|KG)\s+)?(\d{1,9})(?=\s|\||$)/i);
+  return { total: match ? Number(match[1]) : 0, out: 0 };
 }
 
 /**
@@ -147,45 +159,11 @@ export function extractStrictDescription(
   partNumber: string,
   storageBin: string
 ): { descEn: string; descAr: string; category: string } {
-  const upperLine = line.toUpperCase();
-
-  // 1. فحص المطابقة المباشرة مع القاموس الفني المحلي
-  for (const term of TECHNICAL_TERMS_DICTIONARY) {
-    if (upperLine.includes(term)) {
-      // استخراج السياق والمقاس المحيط بالمصطلح الفني (مثل: 80 MM, 4 IN, 36 WATT)
-      const sizeMatch = line.match(/\b(\d{1,3}\s*(?:MM|INCH|IN|WATT|W|CM|PSI|V|VOLT|M))\b/i);
-      const fullDesc = sizeMatch ? `${term} ${sizeMatch[1].toUpperCase()}` : term;
-      const { category, descAr } = categorizeAndTranslate(fullDesc);
-      return { descEn: fullDesc, descAr, category };
-    }
-  }
-
-  // 2. استخراج النص المتبقي بعد حذف رقم القطعة والموقع والأرقام المجردة
-  let cleaned = line
-    .replace(partNumber, ' ')
-    .replace(storageBin, ' ')
-    .replace(/[\[\]\(\)\{\}\=\|\&\~\\\/@\#\$\%\^\*\+\?\!\;\:\"\'\`<>_]/g, ' ')
-    .replace(/\b\d{1,4}\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toUpperCase();
-
-  // فحص هل النص المتبقي مجرد حروف عشوائية مشوهة (مثل SLSLSLS أو ULUGULY)
-  if (isRandomNoiseOrGibberish(cleaned)) {
-    // في حال كانت حروف عشوائية، مطابقة رقم القطعة بالقاموس المرجعي لجدول أسمو
-    const fallbackDesc = getAsmoReferenceDescription(partNumber);
-    const { category, descAr } = categorizeAndTranslate(fallbackDesc);
-    return { descEn: fallbackDesc, descAr, category };
-  }
-
-  if (cleaned.length >= 3) {
-    const { category, descAr } = categorizeAndTranslate(cleaned);
-    return { descEn: cleaned, descAr, category };
-  }
-
-  const fallbackDesc = getAsmoReferenceDescription(partNumber);
-  const { category, descAr } = categorizeAndTranslate(fallbackDesc);
-  return { descEn: fallbackDesc, descAr, category };
+  const upper = line.toUpperCase();
+  const starts = TECHNICAL_TERMS_DICTIONARY.map(term => upper.indexOf(term)).filter(index => index >= 0);
+  const descEn = starts.length ? line.slice(Math.min(...starts)).trim() : '';
+  const { category, descAr } = categorizeAndTranslate(descEn);
+  return { descEn, descAr, category };
 }
 
 /**

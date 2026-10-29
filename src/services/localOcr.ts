@@ -44,29 +44,24 @@ export async function processOcrFromImage(
   let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
 
   try {
-    if (onProgress) onProgress(15, 'تنظيف الصورة برمجياً وإزالة الظلال...');
-    const preprocessed = await preprocessImageWithOpenCV(imageSource);
-    cleanedSource = preprocessed.cleanedDataUrl;
-
-    if (onProgress) onProgress(40, 'تهيئة محرك القراءة المحلي...');
-    worker = await createWorker('eng');
-
-    if (onProgress) onProgress(65, 'جاري قراءة واستخراج نصوص الجدول...');
-    const ret = await worker.recognize(cleanedSource);
-    const rawText = ret.data.text;
-
-    if (onProgress) onProgress(90, 'تطبيق فلتر أسمو الصارم (10 أرقام + موقع محدد)...');
-
-    let extracted = parseStrictAsmoTable(rawText);
-    if (extracted.length === 0) {
-      extracted = parseRawTextOcr(rawText);
+    if (onProgress) onProgress(20, 'تهيئة محرك القراءة المحلي...');
+    worker = await createWorker('eng', 1, { workerPath: '/ocr/worker.min.js', corePath: '/ocr/tesseract-core-lstm.wasm.js', langPath: '/ocr/lang' });
+    if (onProgress) onProgress(50, 'قراءة الصورة الأصلية...');
+    const raw = await worker.recognize(imageSource);
+    let extracted = parseRawTextOcr(raw.data.text);
+    if (!extracted.length) {
+      if (onProgress) onProgress(75, 'محاولة تحسين الصورة دون تغيير اتجاهها...');
+      const preprocessed = await preprocessImageWithOpenCV(imageSource, { rotateCounterClockwise90: false });
+      cleanedSource = preprocessed.cleanedDataUrl;
+      const enhanced = await worker.recognize(cleanedSource);
+      extracted = parseRawTextOcr(enhanced.data.text);
     }
 
     if (onProgress) onProgress(100, 'اكتملت المعالجة بنجاح!');
     return extracted;
   } catch (err) {
     console.warn('Local OCR notice:', err);
-    return [];
+    throw new Error('تعذر تشغيل القراءة المحلية. جرّب صورة أخرى وأعد المحاولة؛ لم يتغير المخزون.');
   } finally {
     // Release OCR resources after success and failure before starting another sheet.
     await worker?.terminate().catch(() => {});

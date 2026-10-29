@@ -62,3 +62,11 @@ Real-device OCR/handwriting accuracy, distortion/rotation/shadow cases, authenti
 ## Main files
 
 `src/services/db.ts`, `documents.ts`, `batchOcr.ts`, `security.ts`, `partTranslation.ts`; `src/components/BatchDocumentsPanel.tsx`, `StockDocumentsPanel.tsx`, `AuthorizationDialog.tsx`, `DataSafetyPanel.tsx`, `ReportsPanel.tsx`, `WipeDatabaseModal.tsx`, `ItemModal.tsx`, `ItemsTableView.tsx`, `FlutterCodeViewer.tsx`; `src/App.tsx`, `src/types.ts`, OCR services and parser utilities; `tests/inventory-safety.mjs`; `android/app/build.gradle`, Capacitor config, generated Android web assets, package manifests/lockfile and README.
+
+## 1.6.1: separate screens and local OCR repair
+
+Inventory and operations/reports now occupy separate screens, with right/left swipes and navigation buttons. Hidden screens retain draft state; vertical scrolling and form/table gestures do not switch screens. Browser tests cover navigation, horizontal/vertical gestures and draft retention.
+
+Replaced the legacy Gemini-only scanner with the reviewed local document workflow. Build/dev scripts package Tesseract's worker, scalar WASM core and English language data into the app, so runtime downloads and Gemini credentials are unnecessary for local OCR. The original image is read first; enhancement is a fallback and does not rotate the image automatically. Numeric quantity is proposed only from the bounded field after the storage bin/unit; unknown values require manual entry. Technical descriptions retain original suffixes such as M16 rather than being reduced to a dictionary term.
+
+`npm run test:ocr` reads a real generated image through the production OCR function with all external requests blocked, checking exact part number, bin, quantity and M16 specification. This validates the engine path on a clear synthetic sheet, not recognition accuracy on the user's actual sheets or handwriting. A physical-device test is still required. Debug versionCode is 8 / versionName 1.6.1; its certificate matches the uploaded 1.6.0 test APK. It does not match the old 1.5.0 certificate.

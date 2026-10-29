@@ -12,8 +12,8 @@ function OriginalDocument({ image }: { image: Blob }) {
   useEffect(() => { const next = URL.createObjectURL(image); setUrl(next); return () => URL.revokeObjectURL(next); }, [image]);
   return <details><summary>عرض أصل الورقة للمراجعة</summary><img src={url} alt="أصل ورقة المستند" className="max-h-96" /></details>;
 }
-export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
-  const [kind, setKind] = useState<StockDocument['kind'] | null>(null);
+export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }: { onRefresh: () => void; initialKind?: StockDocument['kind']; compact?: boolean }) {
+  const [kind, setKind] = useState<StockDocument['kind'] | null>(initialKind || null);
   const [id, setId] = useState('');
   const [requester, setRequester] = useState('');
   const [reason, setReason] = useState('');
@@ -28,7 +28,7 @@ export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
   useEffect(() => { if (!original) { setPreview(''); return; } const url = URL.createObjectURL(original); setPreview(url); return () => URL.revokeObjectURL(url); }, [original]);
   const update = (index: number, values: Partial<DocumentLine>) => setLines(current => current.map((line, i) => i === index ? { ...line, ...values } : line));
   return <section className="m-4 border border-amber-800 p-4 rounded-xl space-y-3" dir="rtl">
-    <BatchDocumentsPanel onChanged={() => { refresh().catch(err => setMessage(String(err))); onRefresh(); }} />
+    {!compact && <BatchDocumentsPanel onChanged={() => { refresh().catch(err => setMessage(String(err))); onRefresh(); }} />}
     <div className="flex flex-wrap gap-3">{([
       ['issue', 'ورقة صرف', ArrowUpFromLine], ['receipt', 'إدخال مخزون', ArrowDownToLine], ['inventory', 'مراجعة جرد', ClipboardList], ['transfer', 'طلب نقل', MapPin],
     ] as const).map(([value, title, Icon]) => <button key={value} className="p-2 bg-stone-800 rounded-lg flex gap-2" onClick={() => { setKind(value); setLines([blank()]); setId(''); setOriginal(undefined); }}><Icon size={18} />{title}</button>)}</div>
@@ -53,8 +53,9 @@ export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
         prepareAudio(); setBusy(true);
         try {
           const rows = await processOcrFromImage(original);
+          if (!rows.length) throw new Error("لم تُقرأ أرقام قطع كاملة؛ راجع الصورة أو أدخل السطور يدويًا");
           playOperationSound('uncertain');
-          setLines(rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total, location: row.location_code, description_en: row.description_en, description_ar: row.description_ar, check: '', remark: row.remark || '', reviewed: false })));
+          setLines(rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total > 0 ? row.qty_total : Number.NaN, location: row.location_code, description_en: row.description_en, description_ar: row.description_ar, check: '', remark: row.remark || '', reviewed: false })));
           setMessage('راجع الرقم والكمية والعلامات والموقع مقابل الأصل؛ رقم المستند يُدخل يدويًا. لا توجد دقة مضمونة.');
         } catch (err) { playOperationSound('uncertain'); setMessage(String(err)); } finally { setBusy(false); }
       }}>اقتراح سطور بالقراءة المحلية</button>}
@@ -64,7 +65,7 @@ export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
           update(i, { part_number, reviewed: false, ...(match ? { location: match.location_code, description_en: match.description_en, description_ar: match.description_ar } : {}) });
         }} /></label>
         {dbService.getItemByPartNumber(line.part_number) && <p className="text-amber-300">موجود؛ المتاح: {dbService.getItemByPartNumber(line.part_number)!.qty_remaining}</p>}
-        <label>QTY<input type="number" min="0" step="1" required className="bg-stone-800 w-20 p-1" value={line.quantity} onChange={e => update(i, { quantity: Number(e.target.value), reviewed: false })} /></label>
+        <label>QTY<input type="number" min="0" step="1" required className="bg-stone-800 w-20 p-1" value={Number.isFinite(line.quantity) ? line.quantity : ''} onChange={e => update(i, { quantity: Number(e.target.value), reviewed: false })} /></label>
         <label>{kind === 'transfer' ? 'الموقع المقترح' : 'Storage Bin'}<input required className="bg-stone-800 w-28 p-1" value={line.location} onChange={e => update(i, { location: e.target.value, reviewed: false })} /></label>
 <div className="flex flex-col gap-2 border border-stone-700 rounded p-2 w-full">        <label>الوصف العربي<input className="bg-stone-800 p-1" value={line.description_ar} onChange={e => update(i, { description_ar: e.target.value, reviewed: false })} /></label>        <label>الوصف الإنجليزي<input required dir="ltr" className="bg-stone-800 p-1" value={line.description_en} onChange={e => update(i, { description_en: e.target.value, reviewed: false })} /></label></div>
         <button type="button" onClick={() => { update(i, { description_ar: suggestTechnicalTranslation(line.description_en).arabic, reviewed: false }); setMessage('اقتراح من القاموس الصناعي؛ الاسم الإنجليزي محفوظ. راجع الترجمة.'); }}>ترجمة بالقاموس الصناعي</button>

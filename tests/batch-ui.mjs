@@ -5,9 +5,22 @@ const browser=await chromium.launch({executablePath:'/usr/bin/chromium',args:['-
 try {
  const page=await browser.newPage(); const errors=[];page.on('pageerror',error=>errors.push(error.message));
  await page.goto(process.env.ASMO_TEST_BASE_URL || 'http://127.0.0.1:3000/');
+ await page.getByRole('button',{name:'العمليات والتقارير',exact:true}).click();
+ await page.getByRole('region',{name:'شاشة العمليات والتقارير',exact:true}).waitFor();
+ await page.getByRole('button',{name:'المخزون',exact:true}).click();
+ const hint=page.getByText('اسحب لليمين لفتح العمليات والتقارير',{exact:true});
+ await hint.dispatchEvent('touchstart',{touches:[{identifier:1,clientX:80,clientY:300}]});
+ await hint.dispatchEvent('touchend',{changedTouches:[{identifier:1,clientX:90,clientY:500}]});
+ assert.equal(await page.getByRole('button',{name:'المخزون',exact:true}).getAttribute('aria-pressed'),'true');
+ await hint.dispatchEvent('touchstart',{touches:[{identifier:1,clientX:80,clientY:300}]});
+ await hint.dispatchEvent('touchend',{changedTouches:[{identifier:1,clientX:240,clientY:310}]});
+ assert.equal(await page.getByRole('button',{name:'العمليات والتقارير',exact:true}).getAttribute('aria-pressed'),'true');
  const panel=page.getByText('قراءة وحفظ عدة أوراق دفعة واحدة',{exact:true}).locator('..');
  await panel.locator('summary').first().click();
  await panel.getByLabel('اسم مقدم الدفعة').fill('tester');
+ await page.getByRole('button',{name:'المخزون',exact:true}).click();
+ await page.getByRole('button',{name:'العمليات والتقارير',exact:true}).click();
+ assert.equal(await panel.getByLabel('اسم مقدم الدفعة').inputValue(),'tester');
  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jCuoAAAAASUVORK5CYII=','base64');
  await panel.getByLabel('اختيار صور الأوراق').setInputFiles([{name:'sheet-1.png',mimeType:'image/png',buffer:png},{name:'sheet-2.png',mimeType:'image/png',buffer:png}]);
  for(let i=0;i<2;i++) {
