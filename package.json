@@ -11,7 +11,8 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "node tests/inventory-safety.mjs"
+    "test": "node tests/inventory-safety.mjs",
+    "test:ui": "node tests/batch-ui.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.2",

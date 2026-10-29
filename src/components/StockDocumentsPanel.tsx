@@ -1,3 +1,4 @@
+import { BatchDocumentsPanel } from './BatchDocumentsPanel';
 import { suggestTechnicalTranslation, suggestModelTranslation } from '../services/partTranslation';
 import { prepareAudio, playOperationSound } from '../utils/operationSounds';
 import React, { useEffect, useState } from 'react';
@@ -27,6 +28,7 @@ export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
   useEffect(() => { if (!original) { setPreview(''); return; } const url = URL.createObjectURL(original); setPreview(url); return () => URL.revokeObjectURL(url); }, [original]);
   const update = (index: number, values: Partial<DocumentLine>) => setLines(current => current.map((line, i) => i === index ? { ...line, ...values } : line));
   return <section className="m-4 border border-amber-800 p-4 rounded-xl space-y-3" dir="rtl">
+    <BatchDocumentsPanel onChanged={() => { refresh().catch(err => setMessage(String(err))); onRefresh(); }} />
     <div className="flex flex-wrap gap-3">{([
       ['issue', 'ورقة صرف', ArrowUpFromLine], ['receipt', 'إدخال مخزون', ArrowDownToLine], ['inventory', 'مراجعة جرد', ClipboardList], ['transfer', 'طلب نقل', MapPin],
     ] as const).map(([value, title, Icon]) => <button key={value} className="p-2 bg-stone-800 rounded-lg flex gap-2" onClick={() => { setKind(value); setLines([blank()]); setId(''); setOriginal(undefined); }}><Icon size={18} />{title}</button>)}</div>

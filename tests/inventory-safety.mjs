@@ -134,6 +134,41 @@ try {
     await db.restoreBackup(JSON.stringify(portable));
     rejected = false; try { await db.approveDocument(doc.id); } catch { rejected = true; }
     check(rejected, 'restoration preserves document replay protection');
+    const batchPart = '1000000888';
+    const batchLine = { ...line, part_number: batchPart, quantity: 4, location: 'N01B1' };
+    const sheet = (id, extra = {}) => ({ ...doc, kind: 'receipt', id, batchId: 'BATCH-TEST', lines: [batchLine], original, ...extra });
+    const countBeforeBatch = (await db.getDocuments()).length;
+    rejected = false;
+    try { await db.submitDocuments([sheet('NEW-DRAFT'), sheet(doc.id)]); } catch { rejected = true; }
+    check(rejected && (await db.getDocuments()).length === countBeforeBatch, 'duplicate document rejects entire batch save without partial drafts');
+    await db.submitDocuments([sheet('BATCH-1'), sheet('BATCH-2', { lines: [{ ...batchLine, quantity: 6 }] })]);
+    check(!db.getItemByPartNumber(batchPart), 'saving a batch retains originals but does not change stock');
+    await db.approveDocuments(['BATCH-1', 'BATCH-2']);
+    check(db.getItemByPartNumber(batchPart).qty_remaining === 10 && db.getAllItems().filter(item => item.part_number === batchPart).length === 1, 'shared part across batch sheets accumulates approved receipts without lost updates or duplicate records');
+    check((await db.getDocuments()).filter(document => document.batchId === 'BATCH-TEST').every(document => document.status === 'approved' && document.original.size === original.size), 'batch preserves every original and approval');
+    rejected = false; try { await db.approveDocuments(['BATCH-1', 'BATCH-2']); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(batchPart).qty_remaining === 10, 'batch replay cannot repeat stock changes');
+    await db.submitDocuments([sheet('BATCH-ISSUE-1', { kind: 'issue', lines: [{ ...batchLine, quantity: 7 }] }), sheet('BATCH-ISSUE-2', { kind: 'issue', lines: [{ ...batchLine, quantity: 7 }] })]);
+    const auditBeforeFailedBatch = JSON.parse(await db.exportBackup()).audit.length;
+    rejected = false;
+    try { await db.approveDocuments(['BATCH-ISSUE-1', 'BATCH-ISSUE-2']); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(batchPart).qty_remaining === 10 && (await db.getDocuments()).filter(document => document.id.startsWith('BATCH-ISSUE')).every(document => document.status === 'pending'), 'cumulative batch overdraw rolls back every stock change and approval');
+    check(JSON.parse(await db.exportBackup()).audit.length === auditBeforeFailedBatch, 'failed batch leaves no misleading audit events');
+    await db.submitDocument(sheet('COUNT-NEW', { kind: 'inventory', lines: [{ ...batchLine, part_number: '1000000889', quantity: 11, check: '' }] }));
+    await db.approveDocument('COUNT-NEW');
+    check(db.getItemByPartNumber('1000000889').qty_remaining === 11 && db.getItemByPartNumber('1000000889').status === 'غير مدقق', 'reviewed initial inventory creates new part without pretending a blank check was verified');
+    await db.submitDocument(sheet('COUNT-EXISTING', { kind: 'inventory', lines: [{ ...batchLine, quantity: 999, check: '✓' }] }));
+    await db.approveDocument('COUNT-EXISTING');
+    check(db.getItemByPartNumber(batchPart).qty_remaining === 10 && db.getAllItems().filter(item => item.part_number === batchPart).length === 1, 'inventory rescan does not duplicate existing part or replace book quantity');
+    const { readImageBatch } = await import('/src/services/batchOcr');
+    const queueResults = []; const started = []; let active = 0; let peakActive = 0;
+    await readImageBatch([{ key: '1', original: new Blob(['ok']) }, { key: '2', original: new Blob(['bad']) }, { key: '3', original: new Blob(['ok']) }], async image => {
+      active++; peakActive = Math.max(peakActive, active);
+      try { if (await image.text() === 'bad') throw new Error('blurred sheet'); return [{ part_number: batchPart }]; }
+      finally { active--; }
+    }, key => started.push(key), result => queueResults.push(result));
+    check(started.join(',') === '1,2,3' && peakActive === 1, 'batch reader handles all images sequentially');
+    check(queueResults.map(result => result.state).join(',') === 'review,error,review', 'failed OCR sheet does not discard or stop the rest of the batch');
     const { canonicalDocumentId } = await import('/src/services/documents');
     check(canonicalDocumentId(' doc ١ ') === 'DOC1', 'document ID normalization prevents case, spacing and Arabic digit variants');
     const { SOUND_PATTERNS } = await import('/src/utils/operationSounds');
@@ -152,6 +187,41 @@ try {
     check(rejected, 'repeated PIN failures trigger temporary lockout');
     return passed;
   });
+  // Isolated v7-to-v8 upgrade: enrich legacy names without modifying operational fields.
+  const upgradeContext = await browser.newContext();
+  const upgradePage = await upgradeContext.newPage();
+  await upgradePage.goto(`http://127.0.0.1:${server.address().port}`);
+  const upgradeResults = await upgradePage.evaluate(async () => {
+    const passed = [];
+    const check = (ok, label) => { if (!ok) throw new Error(label); passed.push(label); };
+    const old = { part_number: '1000000456', location_code: 'N03A1', description_en: 'BOLT M16 SS316', description_ar: '', category: '', qty_total: 21, qty_out: 3, qty_remaining: 18, is_moved: 1, status: 'تم النقل', remark: '-1', old_location: 'N01A1', updated_at: '2025-01-01T00:00:00.000Z' };
+    const custom = { ...old, part_number: '1000000457', description_ar: 'اسم عربي اختاره المستخدم', category: 'تصنيف خاص' };
+    await new Promise((resolve, reject) => {
+      const req = indexedDB.open('ASMO_Inventory_DB', 7);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore('items', { keyPath: 'part_number' }).put(old);
+        req.transaction.objectStore('items').put(custom);
+        req.result.createObjectStore('audit', { keyPath: 'id', autoIncrement: true });
+        req.result.createObjectStore('documents', { keyPath: 'id' }).put({ id: 'OLD-APPROVED', status: 'approved', kind: 'issue', lines: [], requester: 'legacy', reason: '', createdAt: '2025-01-01' });
+      };
+      req.onsuccess = () => { req.result.close(); resolve(); }; req.onerror = () => reject(req.error);
+    });
+    const { dbService: db } = await import('/src/services/db');
+    await db.init();
+    const after = db.getItemByPartNumber(old.part_number);
+    check(db.getTotalCount() === 2, 'v8 migration retains every existing part');
+    check(after.description_ar.includes('مسمار') && after.description_ar.includes('M16') && after.description_ar.includes('SS316') && after.translation_review_required, 'existing untranslated stock receives technical Arabic suggestions with specifications');
+    check(['part_number','location_code','description_en','qty_total','qty_out','qty_remaining','is_moved','status','remark','old_location','updated_at'].every(field => after[field] === old[field]), 'enrichment preserves stock balances, locations, status, remarks and original name');
+    check(db.getItemByPartNumber(custom.part_number).description_ar === custom.description_ar && db.getItemByPartNumber(custom.part_number).category === custom.category, 'custom existing translations and categories are retained');
+    check((await db.getDocuments()).find(doc => doc.id === 'OLD-APPROVED').status === 'approved', 'upgrade retains approval history and document replay protection');
+    const backup = JSON.parse(await db.exportBackup());
+    check(backup.audit.length === 1 && backup.audit[0].action === 'enrich-descriptions' && backup.audit[0].before.description_ar === '', 'legacy enrichment is audited with recoverable original values');
+    await db.init();
+    check(JSON.parse(await db.exportBackup()).audit.length === 1, 'reinitialization does not reapply migration or alter balances');
+    return passed;
+  });
+  results.push(...upgradeResults);
+  await upgradeContext.close();
   assert.ok(results.length >= 16);
   results.forEach(label => console.log('PASS', label));
   console.log(`${results.length} browser checks passed`);

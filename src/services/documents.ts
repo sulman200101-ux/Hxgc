@@ -11,6 +11,7 @@ export interface DocumentLine {
 }
 export interface StockDocument {
   id: string;
+  batchId?: string;
   kind: 'issue' | 'receipt' | 'inventory' | 'transfer';
   requester: string;
   reason: string;

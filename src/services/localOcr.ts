@@ -41,6 +41,7 @@ export async function processOcrFromImage(
   onProgress?: (progress: number, status: string) => void
 ): Promise<ExtractedSparePart[]> {
   let cleanedSource: string | File | Blob = imageSource;
+  let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
 
   try {
     if (onProgress) onProgress(15, 'تنظيف الصورة برمجياً وإزالة الظلال...');
@@ -48,14 +49,13 @@ export async function processOcrFromImage(
     cleanedSource = preprocessed.cleanedDataUrl;
 
     if (onProgress) onProgress(40, 'تهيئة محرك القراءة المحلي...');
-    const worker = await createWorker('eng');
+    worker = await createWorker('eng');
 
     if (onProgress) onProgress(65, 'جاري قراءة واستخراج نصوص الجدول...');
     const ret = await worker.recognize(cleanedSource);
     const rawText = ret.data.text;
 
     if (onProgress) onProgress(90, 'تطبيق فلتر أسمو الصارم (10 أرقام + موقع محدد)...');
-    await worker.terminate();
 
     let extracted = parseStrictAsmoTable(rawText);
     if (extracted.length === 0) {
@@ -67,6 +67,9 @@ export async function processOcrFromImage(
   } catch (err) {
     console.warn('Local OCR notice:', err);
     return [];
+  } finally {
+    // Release OCR resources after success and failure before starting another sheet.
+    await worker?.terminate().catch(() => {});
   }
 }
 
