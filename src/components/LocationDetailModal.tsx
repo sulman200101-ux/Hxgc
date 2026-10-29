@@ -77,7 +77,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
       setTimeout(() => setShowExportSuccess(false), 4000);
     } catch (err) {
       console.error('PDF export error:', err);
-      window.print();
+      window.alert('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
     } finally {
       setIsExportingPdf(false);
     }

@@ -71,14 +71,14 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
     setIsExportingPdf(true);
     try {
       if (targetCategory) {
-        const itemsToExport = dbService.getItemsByCategory(targetCategory).slice(0, 1500);
+        const itemsToExport = dbService.getItemsByCategory(targetCategory);
         await exportCategoryToPdfFile({
           categoryName: targetCategory,
           items: itemsToExport,
         });
         setExportNotice(`تم تصدير ملف PDF لصنف (${targetCategory}) بنجاح! 📥`);
       } else {
-        const itemsToExport = dbService.getAllItems().slice(0, 1500);
+        const itemsToExport = dbService.getAllItems();
         await exportInventoryListToPdfFile({
           items: itemsToExport,
           title: 'تقرير شامل لحركة ونقل أصناف أسمو (ASMO)',
@@ -88,7 +88,7 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
       setTimeout(() => setExportNotice(null), 4000);
     } catch (err) {
       console.error('PDF export error:', err);
-      window.print();
+      window.alert('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
     } finally {
       setIsExportingPdf(false);
     }

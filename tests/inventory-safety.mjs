@@ -188,6 +188,19 @@ try {
     rejected = false;
     try { await db.submitDocument({ ...doc, id: 'MIXED-LOCATIONS', kind: 'inventory', duplicateResolution: 'sum', lines: [repeatedRows[0], { ...repeatedRows[1], location: 'N12A3' }] }); } catch { rejected = true; }
     check(rejected, 'combining duplicate rows across conflicting locations requires review');
+    const { suggestTransfers } = await import('/src/services/transferSuggestions');
+    const candidate = { ...legacy, part_number: '1000000901', description_en: 'BOLT M16', location_code: 'N01B1', qty_remaining: 8 };
+    const neighbors = [{ ...candidate, part_number: '1000000902', location_code: 'N01B2' }, { ...candidate, part_number: '1000000903', location_code: 'N01B2' }];
+    const proposed = suggestTransfers([candidate, ...neighbors, { ...candidate, part_number: '1000000904', location_code: 'N02B1' }, { ...candidate, part_number: '1000000905', description_en: 'NUT M16', location_code: 'N01B3' }]);
+    check(proposed.length === 1 && proposed[0].partNumber === candidate.part_number && proposed[0].to === 'N01B2', 'suggestions group a technical family inside the same coded zone without merging distinct parts');
+    check(suggestTransfers([candidate,...neighbors], new Set([candidate.part_number])).length === 0, 'pending transfer requests suppress repeated suggestions');
+    check(suggestTransfers([{...candidate,qty_remaining:0},...neighbors]).length === 0 && suggestTransfers([{...candidate,is_missing:1},...neighbors]).length === 0, 'missing and exhausted stock are excluded from transfer proposals');
+    check(candidate.location_code === 'N01B1', 'generating suggestions never changes stored or source locations');
+    await db.submitDocument({ ...doc, id: 'STALE-MOVE-1', kind: 'transfer', reason:'grouping', lines:[{...batchLine,quantity:10,location:'N01B2'}] });
+    await db.submitDocument({ ...doc, id: 'STALE-MOVE-2', kind: 'transfer', reason:'grouping', lines:[{...batchLine,quantity:10,location:'N01B3'}] });
+    await db.approveDocument('STALE-MOVE-1');
+    rejected = false; try { await db.approveDocument('STALE-MOVE-2'); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(batchPart).location_code === 'N01B2', 'a stale proposal cannot move stock again after its original location changes');
     const { canonicalDocumentId } = await import('/src/services/documents');
     check(canonicalDocumentId(' doc ١ ') === 'DOC1', 'document ID normalization prevents case, spacing and Arabic digit variants');
     const { SOUND_PATTERNS } = await import('/src/utils/operationSounds');

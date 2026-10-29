@@ -632,6 +632,7 @@ class InventoryDatabase {
       if (line.quantity > before!.qty_remaining || before!.is_missing === 1) throw new Error('الكمية تتجاوز الرصيد المتاح');
       after = { ...before!, qty_out: before!.qty_out + line.quantity, qty_remaining: before!.qty_remaining - line.quantity };
     } else if (doc.kind === 'transfer') {
+      if (line.old_location && line.old_location !== before!.location_code) throw new Error('تغير الموقع منذ إنشاء الطلب؛ أنشئ طلب نقل محدثًا');
       if (line.quantity !== before!.qty_remaining || !isValidSpecificLocation(line.location)) throw new Error('هذا الإصدار يدعم نقل كامل الرصيد المتاح فقط إلى موقع صالح');
       after = { ...before!, old_location: before!.location_code, location_code: line.location, is_moved: 1, status: 'تم النقل', moved_at: now };
     } else {

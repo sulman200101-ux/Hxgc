@@ -91,6 +91,23 @@ try {
  await stockRow.getByTitle('تغيير حالة تدقيق القطعة').click();
  await page.getByRole('button',{name:'إلغاء',exact:true}).click();
  assert.equal((await readState()).items.find(item=>item.part_number==='1000000777').status,'مدقق');
+ await page.evaluate(() => new Promise((resolve,reject)=>{
+  const req=indexedDB.open('ASMO_Inventory_DB');req.onerror=()=>reject(req.error);req.onsuccess=()=>{const db=req.result;const tx=db.transaction('items','readwrite');
+   for(let i=0;i<2;i++)tx.objectStore('items').put({part_number:String(1000000990+i),location_code:'N01B2',description_en:'BOLT M16',description_ar:'مسمار',category:'مسامير وروابط',qty_total:5,qty_out:0,qty_remaining:5,is_moved:0,status:'مدقق'});
+   tx.oncomplete=()=>{db.close();resolve();};tx.onabort=()=>reject(tx.error);};
+ }));
+ await page.reload();
+ await page.getByRole('button',{name:'العمليات والتقارير',exact:true}).click();
+ await page.getByRole('button',{name:'اقتراح تجميع القطع في مواقع متجاورة'}).click();
+ const suggestions=page.getByRole('dialog',{name:'اقتراحات تجميع القطع'});
+ await suggestions.getByRole('button',{name:'طلب اعتماد الاقتراح'}).click();
+ await suggestions.getByText('حُفظ طلب النقل للمراجعة؛ الموقع الحالي لم يتغير',{exact:true}).waitFor();
+ assert.equal((await readState()).items.find(item=>item.part_number==='1000000777').location_code,'N01B1');
+ await suggestions.getByRole('button',{name:'اعتماد المشرف وتنفيذ النقل'}).click();
+ await page.getByRole('textbox',{name:'الرمز',exact:true}).fill('2468');
+ await page.getByRole('button',{name:'اعتماد',exact:true}).click();
+ await suggestions.getByText('تم اعتماد النقل وتحديث الموقع وتسجيل العملية',{exact:true}).waitFor();
+ assert.equal((await readState()).items.find(item=>item.part_number==='1000000777').location_code,'N01B2');
  assert.deepEqual(errors,[]);
  console.log('PASS multiple image selection, two reviewed drafts, one supervisor approval, preserved originals, no duplicate inventory or locations, no premature stock change');
 } finally {await browser.close();}

@@ -16,7 +16,8 @@
     "predev": "node scripts/prepare-ocr.mjs",
     "prebuild": "node scripts/prepare-ocr.mjs",
     "test:ocr": "node tests/ocr-offline.mjs",
-    "test:capture": "node tests/capture-ui.mjs"
+    "test:capture": "node tests/capture-ui.mjs",
+    "test:pdf": "node tests/pdf-large.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.2",
@@ -34,6 +35,7 @@
     "express": "^4.21.2",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.9",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.1",

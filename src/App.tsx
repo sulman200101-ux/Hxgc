@@ -1,3 +1,5 @@
+import { TransferSuggestionsPanel } from './components/TransferSuggestionsPanel';
+import { PdfExportProgress } from './components/PdfExportProgress';
 import { ReportsPanel } from './components/ReportsPanel';
 import { StockDocumentsPanel } from './components/StockDocumentsPanel';
 import { DataSafetyPanel } from './components/DataSafetyPanel';
@@ -36,6 +38,7 @@ export default function App() {
   const [visibleLocationsLimit, setVisibleLocationsLimit] = useState(25);
 
   // Modals state
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [captureKind, setCaptureKind] = useState<'inventory' | 'issue' | 'receipt'>('inventory');
   const [isOcrOpen, setIsOcrOpen] = useState(false);
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
@@ -268,6 +271,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#19110D] text-neutral-100 flex flex-col font-sans pb-28 selection:bg-amber-700 selection:text-white">
       <AuthorizationDialog />
+      {showSuggestions && <TransferSuggestionsPanel items={allItems} onClose={() => setShowSuggestions(false)} onRefresh={refreshData} />}
+      <PdfExportProgress />
       <nav aria-label="شاشات التطبيق" className="sticky top-0 z-40 bg-[#19110D] border-b border-amber-900 px-4 py-3 flex gap-2" dir="rtl">
         <button type="button" aria-pressed={screen === 'inventory'} onClick={() => changeScreen('inventory')} className={`flex-1 rounded-xl py-3 font-bold ${screen === 'inventory' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>المخزون</button>
         <button type="button" aria-pressed={screen === 'operations'} onClick={() => changeScreen('operations')} className={`flex-1 rounded-xl py-3 font-bold ${screen === 'operations' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>العمليات والتقارير</button>
@@ -285,6 +290,7 @@ export default function App() {
       }}>
       <section hidden={screen !== 'operations'} aria-label="شاشة العمليات والتقارير" className="max-w-7xl mx-auto w-full min-h-[75vh]">
         <header className="p-4" dir="rtl"><h1 className="text-xl font-bold">العمليات والتقارير</h1><p className="text-sm text-neutral-400">اسحب لليسار للعودة إلى المخزون</p></header>
+        <button className="m-4 p-3 rounded-xl bg-amber-800 text-white font-bold" onClick={() => setShowSuggestions(true)}>اقتراح تجميع القطع في مواقع متجاورة</button>
         <DataSafetyPanel onRefresh={refreshData} />
         {isDbReady && <ReportsPanel />}
         {isDbReady && <StockDocumentsPanel onRefresh={refreshData} onCapture={kind => { setCaptureKind(kind); setIsOcrOpen(true); }} />}

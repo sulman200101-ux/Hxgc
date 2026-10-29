@@ -51,14 +51,14 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
     setIsExporting(true);
     try {
       await exportInventoryListToPdfFile({
-        items: items.slice(0, 1500),
+        items: items,
         title: `تقرير جرد الأصناف المعروضة (${items.length.toLocaleString()} صنف)`,
       });
       setExportNotice('تم تصدير وحفظ ملف PDF بنجاح! 📥');
       setTimeout(() => setExportNotice(null), 4000);
     } catch (err) {
       console.error('PDF export error:', err);
-      window.print();
+      window.alert('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
     } finally {
       setIsExporting(false);
     }

@@ -75,7 +75,7 @@ export const CategoryGroupScreen: React.FC<CategoryGroupScreenProps> = ({
       setTimeout(() => setExportNotice(null), 4000);
     } catch (err) {
       console.error('PDF export error:', err);
-      window.print();
+      window.alert('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
     } finally {
       setIsExporting(false);
     }
