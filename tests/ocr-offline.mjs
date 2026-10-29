@@ -19,7 +19,7 @@ try {
   return {upright,sideways,duplicates:parseStrictAsmoTable('2861 1000428938 M016 002 N12A2 PK 3 TIE CABLE 1.6 MM\n2809 1000428938 M016 002 N12A2 PK 6 TIE CABLE 1.6 MM'),paa:extractStrictQuantity('1000129631 M016 002 N17A1 PAA 5 GLOVES','1000129631','N17A1'),zyd:extractStrictQuantity('1001064248 M016 002 N16D2 ZYD 7 F2 GASKET','1001064248','N16D2')};
  });
  console.log(JSON.stringify(result));
- assert.equal(result.duplicates.length,2);assert.deepEqual(result.duplicates.map(row=>row.qty_total),[3,6]);
+ assert.equal(result.duplicates.length,2);assert.deepEqual(result.duplicates.map(row=>row.qty_total),[3,6]);assert.ok(result.duplicates.every(row=>row.description_en==='TIE CABLE 1.6 MM'));
  assert.equal(result.paa.total,5);assert.equal(result.zyd.total,7);
  for(const rows of [result.upright,result.sideways]) assert.ok(rows.some(row=>row.part_number==='1001523111' && row.location_code==='N01B1' && row.qty_total===12 && row.description_en.includes('M16')));
  console.log('PASS upright/sideways OCR and SAP PAA/ZYD quantity columns with external network blocked');

@@ -134,20 +134,21 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
 /**
  * استخراج الكمية الصارمة (QTY): أرقام صحيحة فقط (Integers)
  */
-export function extractStrictQuantity(line: string, partNumber: string, storageBin: string): { total: number; out: number } {
-  if (!storageBin) return { total: 0, out: 0 };
+function textAfterStorageBin(line: string, storageBin: string): string | null {
+  if (!storageBin) return null;
   const tokens = Array.from(line.matchAll(/\S+/g));
-  let end = -1;
-  for (let i = 0; i < tokens.length && end < 0; i++) {
+  for (let i = 0; i < tokens.length; i++) {
     for (let width = 1; width <= 3 && i + width <= tokens.length; width++) {
       const last = tokens[i + width - 1];
       const candidate = line.slice(tokens[i].index!, last.index! + last[0].length);
-      if (sanitizeLocationCode(candidate) === storageBin) { end = last.index! + last[0].length; break; }
+      if (sanitizeLocationCode(candidate) === storageBin) return line.slice(last.index! + last[0].length);
     }
   }
-  if (end < 0) return { total: 0, out: 0 };
-  const tail = line.slice(end);
-  const match = tail.match(/^\s*(?:\|\s*)?(?:(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD)\s+)?(\d{1,9})(?=\s|\||$)/i);
+  return null;
+}
+const QTY_FIELD = /^\s*(?:\|\s*)?(?:(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD)\s+)?(\d{1,9})(?=\s|\||$)/i;
+export function extractStrictQuantity(line: string, partNumber: string, storageBin: string): { total: number; out: number } {
+  const match = textAfterStorageBin(line, storageBin)?.match(QTY_FIELD);
   return { total: match ? Number(match[1]) : 0, out: 0 };
 }
 
@@ -161,7 +162,10 @@ export function extractStrictDescription(
 ): { descEn: string; descAr: string; category: string } {
   const upper = line.toUpperCase();
   const starts = TECHNICAL_TERMS_DICTIONARY.map(term => upper.indexOf(term)).filter(index => index >= 0);
-  const descEn = starts.length ? line.slice(Math.min(...starts)).trim() : '';
+  const tail = textAfterStorageBin(line, storageBin);
+  const quantity = tail?.match(QTY_FIELD);
+  const remaining = quantity && tail ? tail.slice(quantity[0].length).replace(/^\s*[|✓✔×]\s*/, '').trim() : '';
+  const descEn = starts.length ? line.slice(Math.min(...starts)).trim() : remaining;
   const { category, descAr } = categorizeAndTranslate(descEn);
   return { descEn, descAr, category };
 }

@@ -55,6 +55,30 @@ try {
  const committed=await readState();
  const after={stock:committed.items.length,qty:committed.items[0].qty_remaining,approved:committed.docs.filter(doc=>doc.status==='approved').length,locations:new Set(committed.items.map(item=>item.location_code)).size};
  assert.deepEqual(after,{stock:1,qty:8,approved:2,locations:1});
+ await panel.getByLabel('نوع الدفعة').selectOption('receipt');
+ await panel.getByLabel('اختيار صور الأوراق').setInputFiles({name:'duplicate.png',mimeType:'image/png',buffer:png});
+ const duplicateSheet=panel.locator('[data-sheet-index="0"]');
+ await duplicateSheet.getByLabel('رقم مستند الورقة').fill('BOTH-UI');
+ for(let i=0;i<2;i++) {
+  await duplicateSheet.getByRole('button',{name:'إضافة سطر يدوي لهذه الورقة'}).click();
+  await duplicateSheet.getByLabel('رقم القطعة',{exact:true}).nth(i).fill('1000428938');
+  await duplicateSheet.getByLabel('الكمية',{exact:true}).nth(i).fill(String([3,6][i]));
+  await duplicateSheet.getByLabel('الموقع',{exact:true}).nth(i).fill('N12A2');
+  await duplicateSheet.getByLabel('الاسم الأصلي').nth(i).fill('TIE CABLE');
+  await duplicateSheet.getByLabel('راجعت هذا السطر مقابل الصورة').nth(i).check();
+ }
+ await duplicateSheet.getByLabel(/طلب اعتماد جمع السطور المكررة/).check();
+ await panel.getByRole('button',{name:'حفظ جميع أوراق الدفعة للمراجعة'}).click();
+ await panel.getByText('حُفظت 1 أوراق للمراجعة؛ المخزون لم يتغير',{exact:true}).waitFor();
+ assert.ok(!(await readState()).items.some(item=>item.part_number==='1000428938'));
+ await panel.getByRole('button',{name:'اعتماد جميع الأوراق المتبقية وتنفيذها'}).click();
+ await page.getByRole('textbox',{name:'الرمز',exact:true}).fill('2468');
+ await page.getByRole('button',{name:'اعتماد',exact:true}).click();
+ await panel.getByText('تم اعتماد الدفعة وتنفيذها بالكامل',{exact:true}).waitFor();
+ const combined=await readState();
+ assert.equal(combined.items.filter(item=>item.part_number==='1000428938').length,1);
+ assert.equal(combined.items.find(item=>item.part_number==='1000428938').qty_remaining,9);
+ assert.equal(combined.docs.find(doc=>doc.id==='BOTH-UI').lines.length,2);
  assert.deepEqual(errors,[]);
  console.log('PASS multiple image selection, two reviewed drafts, one supervisor approval, preserved originals, no duplicate inventory or locations, no premature stock change');
 } finally {await browser.close();}

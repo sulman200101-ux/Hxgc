@@ -14,6 +14,7 @@ function OriginalDocument({ image }: { image: Blob }) {
 }
 export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }: { onRefresh: () => void; initialKind?: StockDocument['kind']; compact?: boolean }) {
   const [kind, setKind] = useState<StockDocument['kind'] | null>(initialKind || null);
+  const [sumDuplicates, setSumDuplicates] = useState(false);
   const [id, setId] = useState('');
   const [requester, setRequester] = useState('');
   const [reason, setReason] = useState('');
@@ -31,12 +32,12 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }:
     {!compact && <BatchDocumentsPanel onChanged={() => { refresh().catch(err => setMessage(String(err))); onRefresh(); }} />}
     <div className="flex flex-wrap gap-3">{([
       ['issue', 'ورقة صرف', ArrowUpFromLine], ['receipt', 'إدخال مخزون', ArrowDownToLine], ['inventory', 'مراجعة جرد', ClipboardList], ['transfer', 'طلب نقل', MapPin],
-    ] as const).map(([value, title, Icon]) => <button key={value} className="p-2 bg-stone-800 rounded-lg flex gap-2" onClick={() => { setKind(value); setLines([blank()]); setId(''); setOriginal(undefined); }}><Icon size={18} />{title}</button>)}</div>
+    ] as const).map(([value, title, Icon]) => <button key={value} className="p-2 bg-stone-800 rounded-lg flex gap-2" onClick={() => { setKind(value); setSumDuplicates(false); setLines([blank()]); setId(''); setOriginal(undefined); }}><Icon size={18} />{title}</button>)}</div>
     <p>كل قراءة اقتراح يحتاج مراجعة. الموظف يحفظ الطلب؛ اعتماد المشرف خطوة مستقلة. النقل الجزئي وتعدد الحسابات غير مدعومين بعد.</p>
     {kind && <form className="space-y-3" onSubmit={async e => {
       e.preventDefault(); prepareAudio(); setBusy(true);
       try {
-        await dbService.submitDocument({ id: id.trim(), kind, requester, reason, lines, original, status: 'pending', createdAt: '' });
+        await dbService.submitDocument({ id: id.trim(), duplicateResolution: sumDuplicates ? 'sum' : undefined, kind, requester, reason, lines, original, status: 'pending', createdAt: '' });
         await refresh(); setMessage('حُفظ الطلب للمراجعة؛ المخزون لم يتغير'); setKind(null);
       } catch (err) { setMessage((err as Error).message); if ((err as Error).message.includes('تم حفظها مسبقًا')) playOperationSound('duplicate'); } finally { setBusy(false); }
     }}>
@@ -46,7 +47,7 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }:
       <label className="block">تصوير / اختيار الأصل <input type="file" accept="image/*" capture="environment" onChange={async e => {
         prepareAudio();
         const image = e.target.files?.[0]; if (!image) return;
-        setOriginal(image);
+        setSumDuplicates(false); setOriginal(image);
       }} /></label>
       {preview && <img src={preview} className="max-h-72" alt="أصل المستند للمراجعة" />}
       {original && <button type="button" disabled={busy} onClick={async () => {
@@ -60,7 +61,7 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }:
         } catch (err) { playOperationSound('uncertain'); setMessage(String(err)); } finally { setBusy(false); }
       }}>اقتراح سطور بالقراءة المحلية</button>}
       {lines.map((line, i) => <fieldset key={i} className="border border-stone-600 p-3 flex flex-wrap gap-2"><legend>السطر {i + 1}</legend>
-        {line.part_number && lines.filter(candidate => candidate.part_number.trim() === line.part_number.trim()).length > 1 && <p role="alert" className="w-full text-red-300">رقم مكرر في الورقة: قارن السطور وحدد الكمية الصحيحة قبل الحفظ؛ لا جمع أو حذف تلقائيًا.</p>}
+        {line.part_number && lines.filter(candidate => candidate.part_number.trim() === line.part_number.trim()).length > 1 && <p role="alert" className="w-full text-red-300">رقم مكرر في الورقة: راجع السطرين واطلب اعتماد جمع الكميات أدناه؛ لن يتم الجمع تلقائيًا.</p>}
         <label>Material<input required className="bg-stone-800 w-36 p-1" value={line.part_number} onChange={e => {
           const part_number = e.target.value; const match = dbService.getItemByPartNumber(part_number);
           update(i, { part_number, reviewed: false, ...(match ? { location: match.location_code, description_en: match.description_en, description_ar: match.description_ar } : {}) });
@@ -80,12 +81,14 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false }:
         <label><input type="checkbox" checked={line.reviewed} onChange={e => update(i, { reviewed: e.target.checked })} />راجعت السطر مقابل الأصل</label>
         <button type="button" onClick={() => setLines(current => current.filter((_, index) => i !== index))}>إزالة من المسودة</button>
       </fieldset>)}
+      {lines.some((line, index) => line.part_number && lines.findIndex(candidate => candidate.part_number === line.part_number) !== index) && <label className="block text-amber-200"><input type="checkbox" checked={sumDuplicates} onChange={e => setSumDuplicates(e.target.checked)} />طلب اعتماد جمع سطور القطعة: تضاف الكميات المعتمدة إلى الرصيد الموجود بعد اعتماد المشرف. يبقى السطران محفوظين.</label>}
       <button type="button" className="p-2" onClick={() => setLines(current => [...current, blank()])}>سطر جديد</button>
       <button disabled={busy} className="p-2 bg-amber-800">حفظ للمراجعة (دون تعديل المخزون)</button>
     </form>}
     <p role="status">{message}</p>
     <details><summary>المستندات وطلبات النقل</summary>{docs.map(doc => <article key={doc.id} className="border-b border-stone-700 p-2">
       <p>{doc.id} — {doc.kind} — {doc.requester} — {doc.status} — {doc.createdAt} — {doc.reason}</p>
+      {doc.duplicateResolution === 'sum' && <p className="text-amber-200">طلب جمع سطور مكررة: يضاف مجموع الكميات إلى الرصيد الموجود بعد الاعتماد. يتطلب اعتماد المشرف.</p>}
       {doc.original && <OriginalDocument image={doc.original} />}
       {doc.kind === 'issue' && <p className="text-amber-200">راجع رقم المستند وأرقام القطع والكميات مقابل الأصل. الاعتماد وحده ينقص المخزون.</p>}
       {doc.lines.map(line => <div key={line.part_number} className="p-2 border-b border-stone-700"><p>{line.part_number} — {line.quantity} — {line.old_location || "—"} → {line.location} — {line.check || 'غير مدقق'} — {line.remark}</p><p className="font-bold">{line.description_ar}</p><p dir="ltr" className="text-sm text-neutral-400">{line.description_en}</p></div>)}

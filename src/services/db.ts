@@ -1,4 +1,4 @@
-import { canonicalDocumentId, interpretMark, validateDocument, type StockDocument } from './documents';
+import { approvalLines, canonicalDocumentId, interpretMark, validateDocument, type StockDocument } from './documents';
 import { authorizeMutation } from './security';
 import type { InventoryItem, LocationSummary } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
@@ -577,15 +577,16 @@ class InventoryDatabase {
             const doc: StockDocument | undefined = req.result;
             if (!doc || doc.status !== 'pending') throw new Error('المستند غير متاح أو سبق اعتماده: ' + id);
             validateDocument(doc);
+            const plannedLines = approvalLines(doc);
             const processLine = (lineIndex: number) => {
-              if (lineIndex >= doc.lines.length) {
+              if (lineIndex >= plannedLines.length) {
                 const approved = { ...doc, status: 'approved', executedAt: new Date().toISOString(), approvedBy: 'local-supervisor' };
                 docs.put(approved);
                 audit.add({ at: approved.executedAt, actor: approved.approvedBy, action: 'approve-document', documentId: id, batchId: doc.batchId });
                 processDocument(documentIndex + 1);
                 return;
               }
-              const line = doc.lines[lineIndex];
+              const line = plannedLines[lineIndex];
               const read = store.get(line.part_number);
               read.onsuccess = () => {
                 try {
@@ -634,7 +635,11 @@ class InventoryDatabase {
       if (line.quantity !== before!.qty_remaining || !isValidSpecificLocation(line.location)) throw new Error('هذا الإصدار يدعم نقل كامل الرصيد المتاح فقط إلى موقع صالح');
       after = { ...before!, old_location: before!.location_code, location_code: line.location, is_moved: 1, status: 'تم النقل', moved_at: now };
     } else {
-      const base = before || fresh();
+      let base = before || fresh();
+      if (before && doc.duplicateResolution === 'sum' && doc.lines.filter(row => row.part_number === line.part_number).length > 1) {
+        // Explicit supervisor-approved additional stock; retain issued history and source rows.
+        base = { ...before, qty_total: before.qty_total + line.quantity, qty_remaining: before.qty_remaining + line.quantity };
+      }
       if (line.location !== base.location_code) throw new Error('تغيير الموقع يستلزم طلب نقل');
       if (marks.shortage > base.qty_remaining) throw new Error('النقص يتجاوز المتاح');
       // Existing book stock is never replaced by an inventory OCR quantity.

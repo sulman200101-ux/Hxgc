@@ -169,6 +169,25 @@ try {
     }, key => started.push(key), result => queueResults.push(result));
     check(started.join(',') === '1,2,3' && peakActive === 1, 'batch reader handles all images sequentially');
     check(queueResults.map(result => result.state).join(',') === 'review,error,review', 'failed OCR sheet does not discard or stop the rest of the batch');
+    const repeatedPart = '1000428938';
+    const repeatedRows = [3,6].map(quantity => ({ ...line, part_number: repeatedPart, location: 'N12A2', quantity }));
+    await db.submitDocument({ ...doc, id: 'APPROVE-BOTH', kind: 'receipt', duplicateResolution: 'sum', lines: repeatedRows });
+    check(!db.getItemByPartNumber(repeatedPart), 'duplicate quantity request does not alter stock before supervisor approval');
+    approve = false;
+    rejected = false; try { await db.approveDocument('APPROVE-BOTH'); } catch { rejected = true; }
+    check(rejected && !db.getItemByPartNumber(repeatedPart), 'supervisor rejection prevents combining duplicate quantities');
+    approve = true;
+    await db.approveDocument('APPROVE-BOTH');
+    check(db.getItemByPartNumber(repeatedPart).qty_remaining === 9 && db.getAllItems().filter(item => item.part_number === repeatedPart).length === 1, 'approved repeated rows sum 3 plus 6 into one inventory record');
+    check((await db.getDocuments()).find(document => document.id === 'APPROVE-BOTH').lines.length === 2, 'both original rows remain stored after quantity approval');
+    rejected = false; try { await db.approveDocument('APPROVE-BOTH'); } catch { rejected = true; }
+    check(rejected && db.getItemByPartNumber(repeatedPart).qty_remaining === 9, 'approved duplicate receipt cannot be applied twice');
+    await db.submitDocument({ ...doc, id: 'COUNT-BOTH', kind: 'inventory', duplicateResolution: 'sum', lines: repeatedRows });
+    await db.approveDocument('COUNT-BOTH');
+    check(db.getItemByPartNumber(repeatedPart).qty_remaining === 18 && db.getAllItems().filter(item => item.part_number === repeatedPart).length === 1, 'approved additional duplicate rows add to existing stock while retaining one part record');
+    rejected = false;
+    try { await db.submitDocument({ ...doc, id: 'MIXED-LOCATIONS', kind: 'inventory', duplicateResolution: 'sum', lines: [repeatedRows[0], { ...repeatedRows[1], location: 'N12A3' }] }); } catch { rejected = true; }
+    check(rejected, 'combining duplicate rows across conflicting locations requires review');
     const { canonicalDocumentId } = await import('/src/services/documents');
     check(canonicalDocumentId(' doc ١ ') === 'DOC1', 'document ID normalization prevents case, spacing and Arabic digit variants');
     const { SOUND_PATTERNS } = await import('/src/utils/operationSounds');

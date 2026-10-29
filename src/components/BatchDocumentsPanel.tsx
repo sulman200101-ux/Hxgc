@@ -5,7 +5,7 @@ import { processOcrFromImage } from '../services/localOcr';
 import { readImageBatch } from '../services/batchOcr';
 import { prepareAudio, playOperationSound } from '../utils/operationSounds';
 interface Sheet {
-  key: string; id: string; original: File; lines: DocumentLine[];
+  key: string; id: string; sumDuplicates?: boolean; original: File; lines: DocumentLine[];
   state: 'waiting' | 'reading' | 'review' | 'error'; message: string;
 }
 const blank = (): DocumentLine => ({ part_number: '', quantity: Number.NaN, location: '', description_en: '', description_ar: '', check: '', remark: '', reviewed: false });
@@ -38,7 +38,7 @@ export function BatchDocumentsPanel({ onChanged }: { onChanged: () => void }) {
       try {
         if (!sheets.length || sheets.some(sheet => sheet.state !== 'review')) throw new Error('راجع كل الأوراق، بما فيها الأوراق التي تعذرت قراءتها');
         const batchId = 'BATCH-' + crypto.randomUUID();
-        await dbService.submitDocuments(sheets.map(sheet => ({ id: sheet.id, batchId, kind, requester, reason: 'دفعة صور مراجعة', lines: sheet.lines, original: sheet.original, status: 'pending', createdAt: '' })));
+        await dbService.submitDocuments(sheets.map(sheet => ({ id: sheet.id, duplicateResolution: sheet.sumDuplicates ? 'sum' : undefined, batchId, kind, requester, reason: 'دفعة صور مراجعة', lines: sheet.lines, original: sheet.original, status: 'pending', createdAt: '' })));
         await refresh(); onChanged(); setMessage(`حُفظت ${sheets.length} أوراق للمراجعة؛ المخزون لم يتغير`); setSheets([]);
       } catch (err) {
         setMessage((err as Error).message);
@@ -75,7 +75,7 @@ export function BatchDocumentsPanel({ onChanged }: { onChanged: () => void }) {
         <label>رقم مستند الورقة <input required className="bg-stone-800 p-1" value={sheet.id} placeholder="أدخل رقم الورقة الصحيح لمنع تكرار اعتمادها" onChange={e => patch(sheet.key, { id: e.target.value })} /></label>
         {sheet.message && <p className="text-red-300">{sheet.message}</p>}
         {sheet.lines.map((line, index) => <div key={index} className="border-b border-stone-700 py-3 space-y-2">
-          {line.part_number && sheet.lines.filter(candidate => candidate.part_number.trim() === line.part_number.trim()).length > 1 && <p role="alert" className="text-red-300">رقم مكرر داخل الورقة: راجع الكميات وحدد السطر الصحيح؛ لا يتم جمعها أو حذفها تلقائيًا.</p>}
+          {line.part_number && sheet.lines.filter(candidate => candidate.part_number.trim() === line.part_number.trim()).length > 1 && <p role="alert" className="text-red-300">رقم مكرر داخل الورقة: راجع الكميات واطلب اعتماد جمعها أدناه؛ لا يتم الجمع تلقائيًا.</p>}
           <label>رقم القطعة <input required pattern="[0-9]{10}" className="bg-stone-800 p-1" value={line.part_number} onChange={e => patchLine(sheet.key, index, { part_number: e.target.value, reviewed: false })} /></label>
           <label>الكمية <input required type="number" min="0" step="1" className="bg-stone-800 p-1 w-24" value={Number.isFinite(line.quantity) ? line.quantity : ''} onChange={e => patchLine(sheet.key, index, { quantity: e.target.value === '' ? Number.NaN : Number(e.target.value), reviewed: false })} /></label>
           <label>الموقع <input required className="bg-stone-800 p-1 w-28" value={line.location} onChange={e => patchLine(sheet.key, index, { location: e.target.value, reviewed: false })} /></label>
@@ -87,6 +87,7 @@ export function BatchDocumentsPanel({ onChanged }: { onChanged: () => void }) {
           <label><input type="checkbox" checked={line.reviewed} onChange={e => patchLine(sheet.key, index, { reviewed: e.target.checked })} />راجعت هذا السطر مقابل الصورة</label>
           <button type="button" className="p-2" onClick={() => patch(sheet.key, { lines: sheet.lines.filter((_, i) => i !== index) })}>إزالة سطر من المسودة</button>
         </div>)}
+        {sheet.lines.some((line, index) => line.part_number && sheet.lines.findIndex(candidate => candidate.part_number === line.part_number) !== index) && <label className="block text-amber-200"><input type="checkbox" checked={!!sheet.sumDuplicates} onChange={e => patch(sheet.key, { sumDuplicates: e.target.checked })} />طلب اعتماد جمع السطور المكررة؛ يضاف المجموع إلى الرصيد الموجود بعد اعتماد المشرف. تبقى السطور الأصلية.</label>}
         <button type="button" className="p-2" onClick={() => patch(sheet.key, { state: 'review', lines: [...sheet.lines, blank()] })}>إضافة سطر يدوي لهذه الورقة</button>
         <button type="button" className="p-2" onClick={() => setSheets(current => current.filter(candidate => candidate.key !== sheet.key))}>إزالة الورقة من المسودة</button>
       </fieldset>)}

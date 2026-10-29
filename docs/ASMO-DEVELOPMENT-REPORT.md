@@ -78,3 +78,7 @@ A sideways SAP Inventory Controller sheet was received in chat. It visibly inclu
 ## Second visual SAP sample
 
 A second chat image shows repeated Material 1000428938 in bin N12A2 with PK quantities 3 and 6. The parser now preserves repeated source rows instead of silently keeping the first. Both single-sheet and batch review display a duplicate warning; existing document validation blocks saving until the operator reconciles the rows. Quantities are not automatically summed and inventory identity remains unique. Regression checks use a transcription of those printed columns; they do not establish handwriting recognition or whole-image OCR accuracy for the attachment. This source change needs inclusion in the next test APK after sample review.
+
+## Explicit approval of both repeated rows
+
+At the user's direction, repeated rows can now be retained and approved together through an explicit sum request. The UI warns, shows both rows, and requires selecting the sum option before saving; stock still changes only with supervisor PIN approval. Explicit duplicate sum requests add the approved sum to existing stock for both receipts and inventory additional-stock approvals, retaining issued history. Ordinary inventory rows without this request still do not replace or add to book balances. Both rows and the chosen resolution stay in the document. Conflicting locations, conflicting check marks and ambiguous remarks require correction before combining. Replay protection remains in place.
