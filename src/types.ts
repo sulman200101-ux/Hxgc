@@ -16,6 +16,7 @@ export interface InventoryItem {
   moved_at?: string;
   description_en: string;
   description_ar: string;
+  translation_review_required?: boolean;
   category: string;
   qty_total: number;
   qty_out: number;

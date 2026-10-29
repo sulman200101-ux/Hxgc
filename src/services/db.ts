@@ -1,4 +1,4 @@
-import { canonicalDocumentId, documentImageHash, interpretMark, validateDocument, type StockDocument } from './documents';
+import { approvalLines, canonicalDocumentId, interpretMark, validateDocument, type StockDocument } from './documents';
 import { authorizeMutation } from './security';
 import type { InventoryItem, LocationSummary } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
@@ -10,7 +10,7 @@ import {
 } from '../utils/regexSanitizer';
 
 const DB_NAME = 'ASMO_Inventory_DB';
-const DB_VERSION = 6;
+const DB_VERSION = 8;
 const STORE_NAME = 'items';
 
 class InventoryDatabase {
@@ -38,8 +38,33 @@ class InventoryDatabase {
           if (!store.indexNames.contains(name)) store.createIndex(name, key, { unique });
         }
         const documents = db.objectStoreNames.contains('documents') ? request.transaction!.objectStore('documents') : db.createObjectStore('documents', { keyPath: 'id' });
-        if (!documents.indexNames.contains('originalHash')) documents.createIndex('originalHash', 'originalHash', { unique: true });
+        // Images are evidence, not record identity. Changed part numbers must remain saveable.
+        if (documents.indexNames.contains('originalHash')) documents.deleteIndex('originalHash');
         if (!db.objectStoreNames.contains('audit')) db.createObjectStore('audit', { keyPath: 'id', autoIncrement: true });
+
+        // Enrich existing records in the upgrade transaction without changing stock or originals.
+        const audit = request.transaction!.objectStore('audit');
+        const cursorRequest = store.openCursor();
+        cursorRequest.onsuccess = () => {
+          const cursor = cursorRequest.result;
+          if (!cursor) return;
+          const before = cursor.value as InventoryItem;
+          const after = { ...before };
+          if (typeof before.description_en === 'string' && before.description_en.trim()) {
+            const suggestion = categorizeAndTranslate(before.description_en);
+            if ((!before.description_ar?.trim() || before.description_ar === before.description_en)
+              && suggestion.descAr !== before.description_en) {
+              after.description_ar = suggestion.descAr;
+              after.translation_review_required = true;
+            }
+            if (!before.category?.trim() || before.category === 'عام') after.category = suggestion.category;
+          }
+          if (JSON.stringify(after) !== JSON.stringify(before)) {
+            cursor.update(after);
+            audit.add({ at: new Date().toISOString(), actor: 'system-migration-v8', action: 'enrich-descriptions', before, after });
+          }
+          cursor.continue();
+        };
 
       };
 
@@ -99,7 +124,7 @@ class InventoryDatabase {
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const loc = item.location_code;
+      const loc = sanitizeLocationCode(item.location_code) || item.location_code.trim().toUpperCase();
       if (!loc || loc === 'عام') continue;
 
       let entry = summaryMap.get(loc);
@@ -149,7 +174,7 @@ class InventoryDatabase {
     const items = this.getAllItems();
     const res: InventoryItem[] = [];
     for (let i = 0; i < items.length; i++) {
-      if (items[i].location_code === locationCode) {
+      if ((sanitizeLocationCode(items[i].location_code) || items[i].location_code.trim().toUpperCase()) === (sanitizeLocationCode(locationCode) || locationCode.trim().toUpperCase())) {
         res.push(items[i]);
       }
     }
@@ -501,31 +526,39 @@ class InventoryDatabase {
     });
   }
 
-  public async findDocumentByImage(image: Blob): Promise<StockDocument | undefined> {
-    const hash = await documentImageHash(image);
-    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction('documents', 'readonly');
-      const req = tx.objectStore('documents').index('originalHash').get(hash);
-      tx.oncomplete = () => resolve(req.result);
-      tx.onabort = () => reject(tx.error);
-    });
+  public async submitDocument(doc: StockDocument): Promise<void> {
+    await this.submitDocuments([doc]);
   }
 
-  public async submitDocument(doc: StockDocument): Promise<void> {
-    validateDocument(doc);
+  public async submitDocuments(input: StockDocument[]): Promise<void> {
+    if (!input.length) throw new Error('لا توجد أوراق للحفظ');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
-    const originalHash = doc.original ? await documentImageHash(doc.original) : undefined;
-    const safe = structuredClone({ ...doc, id: canonicalDocumentId(doc.id), originalHash, lines: doc.lines.map(line => ({ ...line, old_location: this.itemMap.get(line.part_number)?.location_code })), status: 'pending' as const, createdAt: new Date().toISOString(), executedAt: undefined, approvedBy: undefined });
+    const ids = new Set<string>();
+    const documents = input.map(doc => {
+      const normalized = { ...doc, id: canonicalDocumentId(doc.id), lines: doc.lines.map(line => ({ ...line,
+        part_number: line.part_number.trim(), location: sanitizeLocationCode(line.location),
+        old_location: this.itemMap.get(line.part_number.trim())?.location_code,
+      })) };
+      validateDocument(normalized);
+      if (ids.has(normalized.id)) throw new Error('رقم مستند مكرر داخل الدفعة؛ لم تُحفظ أي ورقة');
+      ids.add(normalized.id);
+      return structuredClone({ ...normalized, status: 'pending' as const, createdAt: new Date().toISOString(), executedAt: undefined, approvedBy: undefined });
+    });
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction('documents', 'readwrite');
-      tx.objectStore('documents').add(safe);
-      tx.oncomplete = () => resolve(); tx.onabort = () => reject(new Error(tx.error?.name === 'ConstraintError' ? 'تم حفظها مسبقًا؛ لم يتغير المخزون' : 'تعذر حفظ المستند؛ لم يتغير المخزون'));
+      for (const doc of documents) tx.objectStore('documents').add(doc);
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(new Error(tx.error?.name === 'ConstraintError' ? 'تم حفظها مسبقًا؛ لم تُحفظ الدفعة ولم يتغير المخزون' : 'تعذر حفظ الدفعة؛ لم يتغير المخزون'));
     });
   }
 
   public async approveDocument(id: string): Promise<void> {
-    await authorizeMutation('اعتماد مستند بواسطة المشرف');
+    await this.approveDocuments([id]);
+  }
+
+  public async approveDocuments(ids: string[]): Promise<void> {
+    if (!ids.length || new Set(ids).size !== ids.length) throw new Error('قائمة المستندات فارغة أو مكررة');
+    await authorizeMutation(ids.length > 1 ? 'اعتماد دفعة أوراق كاملة بواسطة المشرف' : 'اعتماد مستند بواسطة المشرف');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction(['documents', STORE_NAME, 'audit'], 'readwrite');
@@ -533,56 +566,91 @@ class InventoryDatabase {
       const store = tx.objectStore(STORE_NAME);
       const audit = tx.objectStore('audit');
       let failure: Error | undefined;
-      const fail = (message: string) => { failure = new Error(message); tx.abort(); };
-      const req = docs.get(id);
-      req.onsuccess = () => {
-        const doc: StockDocument | undefined = req.result;
-        if (!doc || doc.status !== 'pending') { fail('المستند غير متاح أو سبق اعتماده'); return; }
-        try { validateDocument(doc); } catch (error) { fail((error as Error).message); return; }
-        for (const line of doc.lines) {
-          const read = store.get(line.part_number);
-          read.onsuccess = () => {
-            const before: InventoryItem | undefined = read.result;
-            const now = new Date().toISOString();
-            const marks = interpretMark(line.check, line.remark);
-            const { category, descAr } = categorizeAndTranslate(line.description_en);
-            let after: InventoryItem;
-            if (doc.kind !== 'receipt' && !before) { fail('رقم غير موجود: ' + line.part_number); return; }
-            if (doc.kind === 'receipt') {
-              if (!isValidSpecificLocation(line.location)) { fail('موقع غير صالح'); return; }
-              if (before && before.location_code !== line.location) { fail('إضافة لموقع مختلف تستلزم طلب نقل مستقل'); return; }
-              after = before ? { ...before, qty_total: before.qty_total + line.quantity, qty_remaining: before.qty_remaining + line.quantity } : {
-                part_number: line.part_number, location_code: line.location, description_en: line.description_en,
-                description_ar: line.description_ar || descAr, category, qty_total: line.quantity, qty_out: 0,
-                qty_remaining: line.quantity, is_moved: 0, is_missing: 0, status: 'مضاف',
+      const fail = (error: unknown) => { failure = error instanceof Error ? error : new Error(String(error)); tx.abort(); };
+      // Read each line after the preceding write, including shared parts across different sheets.
+      const processDocument = (documentIndex: number) => {
+        if (documentIndex >= ids.length) return;
+        const id = ids[documentIndex];
+        const req = docs.get(id);
+        req.onsuccess = () => {
+          try {
+            const doc: StockDocument | undefined = req.result;
+            if (!doc || doc.status !== 'pending') throw new Error('المستند غير متاح أو سبق اعتماده: ' + id);
+            validateDocument(doc);
+            const plannedLines = approvalLines(doc);
+            const processLine = (lineIndex: number) => {
+              if (lineIndex >= plannedLines.length) {
+                const approved = { ...doc, status: 'approved', executedAt: new Date().toISOString(), approvedBy: 'local-supervisor' };
+                docs.put(approved);
+                audit.add({ at: approved.executedAt, actor: approved.approvedBy, action: 'approve-document', documentId: id, batchId: doc.batchId });
+                processDocument(documentIndex + 1);
+                return;
+              }
+              const line = plannedLines[lineIndex];
+              const read = store.get(line.part_number);
+              read.onsuccess = () => {
+                try {
+                  const before: InventoryItem | undefined = read.result;
+                  const after = this.applyDocumentLine(doc, line, before);
+                  if (after) {
+                    store.put(after);
+                    audit.add({ at: after.updated_at, actor: 'local-supervisor', action: doc.kind, documentId: id, batchId: doc.batchId, before, after });
+                  }
+                  processLine(lineIndex + 1);
+                } catch (error) { fail(error); }
               };
-            } else if (doc.kind === 'issue') {
-              if (line.quantity > before!.qty_remaining || before!.is_missing === 1) { fail('الكمية تتجاوز الرصيد المتاح'); return; }
-              after = { ...before!, qty_out: before!.qty_out + line.quantity, qty_remaining: before!.qty_remaining - line.quantity };
-            } else if (doc.kind === 'transfer') {
-              if (line.quantity !== before!.qty_remaining || !isValidSpecificLocation(line.location)) { fail('هذا الإصدار يدعم نقل كامل الرصيد المتاح فقط إلى موقع صالح'); return; }
-              after = { ...before!, old_location: before!.location_code, location_code: line.location, is_moved: 1, status: 'تم النقل', moved_at: now };
-            } else {
-              if (marks.excludedIncrease) return; // F1/F2/etc are retained in the document, excluded from stock changes.
-              if (line.location !== before!.location_code) { fail('تغيير الموقع يستلزم طلب نقل'); return; }
-              if (marks.shortage > before!.qty_remaining) { fail('النقص يتجاوز المتاح'); return; }
-              // Approved -N shortages decrement available stock once through document replay protection.
-              after = { ...before!, status: marks.status, is_missing: marks.status === 'غير موجودة' ? 1 : 0, remark: line.remark, qty_out: before!.qty_out + marks.shortage, qty_remaining: before!.qty_remaining - marks.shortage };
-            }
-            if (![after.qty_total, after.qty_out, after.qty_remaining].every(v => Number.isSafeInteger(v) && v >= 0)) { fail('كمية غير صالحة'); return; }
-            after.updated_at = now;
-            store.put(after);
-            audit.add({ at: now, actor: 'local-supervisor', action: doc.kind, documentId: id, before, after });
-          };
-        }
-        const approved = { ...doc, status: 'approved', executedAt: new Date().toISOString(), approvedBy: 'local-supervisor' };
-        docs.put(approved);
-        audit.add({ at: approved.executedAt, actor: approved.approvedBy, action: 'approve-document', documentId: id });
+            };
+            processLine(0);
+          } catch (error) { fail(error); }
+        };
       };
+      processDocument(0);
       tx.oncomplete = () => resolve();
-      tx.onabort = () => reject(failure || tx.error || new Error('تعذر اعتماد المستند'));
+      tx.onabort = () => reject(failure || tx.error || new Error('تعذر الاعتماد؛ لم تتغير أي ورقة من الدفعة'));
     });
     await this.loadAndCleanCache();
+  }
+
+  private applyDocumentLine(doc: StockDocument, line: StockDocument['lines'][number], before?: InventoryItem): InventoryItem | undefined {
+    const now = new Date().toISOString();
+    const marks = interpretMark(line.check, line.remark);
+    const { category, descAr } = categorizeAndTranslate(line.description_en);
+    let after: InventoryItem;
+    if (doc.kind === 'inventory' && marks.excludedIncrease) return;
+    if ((doc.kind === 'issue' || doc.kind === 'transfer') && !before) throw new Error('رقم غير موجود: ' + line.part_number);
+    const fresh = (): InventoryItem => {
+      if (!isValidSpecificLocation(line.location)) throw new Error('موقع غير صالح');
+      return { part_number: line.part_number, location_code: line.location, description_en: line.description_en,
+        description_ar: line.description_ar || descAr, category, qty_total: line.quantity, qty_out: 0,
+        qty_remaining: line.quantity, is_moved: 0, is_missing: 0, status: 'مضاف' };
+    };
+    if (doc.kind === 'receipt') {
+      if (!isValidSpecificLocation(line.location)) throw new Error('موقع غير صالح');
+      if (before && before.location_code !== line.location) throw new Error('إضافة لموقع مختلف تستلزم طلب نقل مستقل');
+      after = before ? { ...before, qty_total: before.qty_total + line.quantity, qty_remaining: before.qty_remaining + line.quantity } : fresh();
+    } else if (doc.kind === 'issue') {
+      if (line.quantity > before!.qty_remaining || before!.is_missing === 1) throw new Error('الكمية تتجاوز الرصيد المتاح');
+      after = { ...before!, qty_out: before!.qty_out + line.quantity, qty_remaining: before!.qty_remaining - line.quantity };
+    } else if (doc.kind === 'transfer') {
+      if (line.old_location && line.old_location !== before!.location_code) throw new Error('تغير الموقع منذ إنشاء الطلب؛ أنشئ طلب نقل محدثًا');
+      if (line.quantity !== before!.qty_remaining || !isValidSpecificLocation(line.location)) throw new Error('هذا الإصدار يدعم نقل كامل الرصيد المتاح فقط إلى موقع صالح');
+      after = { ...before!, old_location: before!.location_code, location_code: line.location, is_moved: 1, status: 'تم النقل', moved_at: now };
+    } else {
+      let base = before || fresh();
+      if (before && doc.duplicateResolution === 'sum' && doc.lines.filter(row => row.part_number === line.part_number).length > 1) {
+        // Explicit supervisor-approved additional stock; retain issued history and source rows.
+        base = { ...before, qty_total: before.qty_total + line.quantity, qty_remaining: before.qty_remaining + line.quantity };
+      }
+      if (line.location !== base.location_code) throw new Error('تغيير الموقع يستلزم طلب نقل');
+      if (marks.shortage > base.qty_remaining) throw new Error('النقص يتجاوز المتاح');
+      // Existing book stock is never replaced by an inventory OCR quantity.
+      after = { ...base, status: marks.status, is_missing: marks.status === 'غير موجودة' ? 1 : 0, remark: line.remark,
+        qty_out: base.qty_out + marks.shortage, qty_remaining: base.qty_remaining - marks.shortage };
+    }
+    if (![after.qty_total, after.qty_out, after.qty_remaining].every(v => Number.isSafeInteger(v) && v >= 0)
+      || after.qty_remaining > after.qty_total - after.qty_out) throw new Error('كمية غير صالحة');
+    after.updated_at = now;
+    return after;
   }
 
   public getAvailableItems(): InventoryItem[] {
@@ -624,7 +692,7 @@ class InventoryDatabase {
       validateDocument(doc);
       if (!['pending', 'approved'].includes(doc.status)) throw new Error('حالة مستند غير صالحة');
       const original = doc.original ? new Blob([new Uint8Array(doc.original.bytes)], { type: doc.original.type }) : undefined;
-      return { ...doc, original, originalHash: original ? await documentImageHash(original) : undefined };
+      return { ...doc, original, originalHash: undefined };
     }));
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction([STORE_NAME, 'audit', 'documents'], 'readwrite');

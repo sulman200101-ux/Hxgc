@@ -1,3 +1,4 @@
+import { BatchDocumentsPanel } from './BatchDocumentsPanel';
 import { suggestTechnicalTranslation, suggestModelTranslation } from '../services/partTranslation';
 import { prepareAudio, playOperationSound } from '../utils/operationSounds';
 import React, { useEffect, useState } from 'react';
@@ -11,8 +12,9 @@ function OriginalDocument({ image }: { image: Blob }) {
   useEffect(() => { const next = URL.createObjectURL(image); setUrl(next); return () => URL.revokeObjectURL(next); }, [image]);
   return <details><summary>عرض أصل الورقة للمراجعة</summary><img src={url} alt="أصل ورقة المستند" className="max-h-96" /></details>;
 }
-export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
-  const [kind, setKind] = useState<StockDocument['kind'] | null>(null);
+export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, onCapture }: { onRefresh: () => void; initialKind?: StockDocument['kind']; compact?: boolean; onCapture?: (kind: 'issue' | 'receipt' | 'inventory') => void }) {
+  const [kind, setKind] = useState<StockDocument['kind'] | null>(initialKind || null);
+  const [sumDuplicates, setSumDuplicates] = useState(false);
   const [id, setId] = useState('');
   const [requester, setRequester] = useState('');
   const [reason, setReason] = useState('');
@@ -27,14 +29,15 @@ export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
   useEffect(() => { if (!original) { setPreview(''); return; } const url = URL.createObjectURL(original); setPreview(url); return () => URL.revokeObjectURL(url); }, [original]);
   const update = (index: number, values: Partial<DocumentLine>) => setLines(current => current.map((line, i) => i === index ? { ...line, ...values } : line));
   return <section className="m-4 border border-amber-800 p-4 rounded-xl space-y-3" dir="rtl">
+    {!compact && <BatchDocumentsPanel onChanged={() => { refresh().catch(err => setMessage(String(err))); onRefresh(); }} />}
     <div className="flex flex-wrap gap-3">{([
-      ['issue', 'ورقة صرف', ArrowUpFromLine], ['receipt', 'إدخال مخزون', ArrowDownToLine], ['inventory', 'مراجعة جرد', ClipboardList], ['transfer', 'طلب نقل', MapPin],
-    ] as const).map(([value, title, Icon]) => <button key={value} className="p-2 bg-stone-800 rounded-lg flex gap-2" onClick={() => { setKind(value); setLines([blank()]); setId(''); setOriginal(undefined); }}><Icon size={18} />{title}</button>)}</div>
-    <p>كل قراءة اقتراح يحتاج مراجعة. الموظف يحفظ الطلب؛ اعتماد المشرف خطوة مستقلة. النقل الجزئي وتعدد الحسابات غير مدعومين بعد.</p>
+      ['issue', 'صرف', ArrowUpFromLine], ['receipt', 'إدخال مخزون', ArrowDownToLine], ['inventory', 'مراجعة جرد', ClipboardList],
+    ] as const).map(([value, title, Icon]) => <button key={value} className="p-2 bg-stone-800 rounded-lg flex gap-2" onClick={() => { if (onCapture) { onCapture(value); return; } setKind(value); setSumDuplicates(false); setLines([blank()]); setId(''); setOriginal(undefined); }}><Icon size={18} />{title}</button>)}</div>
+
     {kind && <form className="space-y-3" onSubmit={async e => {
       e.preventDefault(); prepareAudio(); setBusy(true);
       try {
-        await dbService.submitDocument({ id: id.trim(), kind, requester, reason, lines, original, status: 'pending', createdAt: '' });
+        await dbService.submitDocument({ id: id.trim(), duplicateResolution: sumDuplicates ? 'sum' : undefined, kind, requester, reason, lines, original, status: 'pending', createdAt: '' });
         await refresh(); setMessage('حُفظ الطلب للمراجعة؛ المخزون لم يتغير'); setKind(null);
       } catch (err) { setMessage((err as Error).message); if ((err as Error).message.includes('تم حفظها مسبقًا')) playOperationSound('duplicate'); } finally { setBusy(false); }
     }}>
@@ -44,29 +47,27 @@ export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
       <label className="block">تصوير / اختيار الأصل <input type="file" accept="image/*" capture="environment" onChange={async e => {
         prepareAudio();
         const image = e.target.files?.[0]; if (!image) return;
-        try {
-          const existing = await dbService.findDocumentByImage(image);
-          if (existing) { setMessage('تم حفظها مسبقًا — المستند ' + existing.id); playOperationSound('duplicate'); setOriginal(undefined); e.target.value = ''; return; }
-          setOriginal(image);
-        } catch (err) { setMessage(String(err)); }
+        setSumDuplicates(false); setOriginal(image);
       }} /></label>
       {preview && <img src={preview} className="max-h-72" alt="أصل المستند للمراجعة" />}
       {original && <button type="button" disabled={busy} onClick={async () => {
         prepareAudio(); setBusy(true);
         try {
           const rows = await processOcrFromImage(original);
+          if (!rows.length) throw new Error("لم تُقرأ أرقام قطع كاملة؛ راجع الصورة أو أدخل السطور يدويًا");
           playOperationSound('uncertain');
-          setLines(rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total, location: row.location_code, description_en: row.description_en, description_ar: row.description_ar, check: '', remark: row.remark || '', reviewed: false })));
+          setLines(rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total > 0 ? row.qty_total : Number.NaN, location: row.location_code, description_en: row.description_en, description_ar: row.description_ar, check: '', remark: row.remark || '', reviewed: false })));
           setMessage('راجع الرقم والكمية والعلامات والموقع مقابل الأصل؛ رقم المستند يُدخل يدويًا. لا توجد دقة مضمونة.');
         } catch (err) { playOperationSound('uncertain'); setMessage(String(err)); } finally { setBusy(false); }
       }}>اقتراح سطور بالقراءة المحلية</button>}
       {lines.map((line, i) => <fieldset key={i} className="border border-stone-600 p-3 flex flex-wrap gap-2"><legend>السطر {i + 1}</legend>
+        {line.part_number && lines.filter(candidate => candidate.part_number.trim() === line.part_number.trim()).length > 1 && <p role="alert" className="w-full text-red-300">رقم مكرر في الورقة: راجع السطرين واطلب اعتماد جمع الكميات أدناه؛ لن يتم الجمع تلقائيًا.</p>}
         <label>Material<input required className="bg-stone-800 w-36 p-1" value={line.part_number} onChange={e => {
           const part_number = e.target.value; const match = dbService.getItemByPartNumber(part_number);
           update(i, { part_number, reviewed: false, ...(match ? { location: match.location_code, description_en: match.description_en, description_ar: match.description_ar } : {}) });
         }} /></label>
         {dbService.getItemByPartNumber(line.part_number) && <p className="text-amber-300">موجود؛ المتاح: {dbService.getItemByPartNumber(line.part_number)!.qty_remaining}</p>}
-        <label>QTY<input type="number" min="0" step="1" required className="bg-stone-800 w-20 p-1" value={line.quantity} onChange={e => update(i, { quantity: Number(e.target.value), reviewed: false })} /></label>
+        <label>QTY<input type="number" min="0" step="1" required className="bg-stone-800 w-20 p-1" value={Number.isFinite(line.quantity) ? line.quantity : ''} onChange={e => update(i, { quantity: Number(e.target.value), reviewed: false })} /></label>
         <label>{kind === 'transfer' ? 'الموقع المقترح' : 'Storage Bin'}<input required className="bg-stone-800 w-28 p-1" value={line.location} onChange={e => update(i, { location: e.target.value, reviewed: false })} /></label>
 <div className="flex flex-col gap-2 border border-stone-700 rounded p-2 w-full">        <label>الوصف العربي<input className="bg-stone-800 p-1" value={line.description_ar} onChange={e => update(i, { description_ar: e.target.value, reviewed: false })} /></label>        <label>الوصف الإنجليزي<input required dir="ltr" className="bg-stone-800 p-1" value={line.description_en} onChange={e => update(i, { description_en: e.target.value, reviewed: false })} /></label></div>
         <button type="button" onClick={() => { update(i, { description_ar: suggestTechnicalTranslation(line.description_en).arabic, reviewed: false }); setMessage('اقتراح من القاموس الصناعي؛ الاسم الإنجليزي محفوظ. راجع الترجمة.'); }}>ترجمة بالقاموس الصناعي</button>
@@ -80,12 +81,14 @@ export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
         <label><input type="checkbox" checked={line.reviewed} onChange={e => update(i, { reviewed: e.target.checked })} />راجعت السطر مقابل الأصل</label>
         <button type="button" onClick={() => setLines(current => current.filter((_, index) => i !== index))}>إزالة من المسودة</button>
       </fieldset>)}
+      {lines.some((line, index) => line.part_number && lines.findIndex(candidate => candidate.part_number === line.part_number) !== index) && <label className="block text-amber-200"><input type="checkbox" checked={sumDuplicates} onChange={e => setSumDuplicates(e.target.checked)} />طلب اعتماد جمع سطور القطعة: تضاف الكميات المعتمدة إلى الرصيد الموجود بعد اعتماد المشرف. يبقى السطران محفوظين.</label>}
       <button type="button" className="p-2" onClick={() => setLines(current => [...current, blank()])}>سطر جديد</button>
       <button disabled={busy} className="p-2 bg-amber-800">حفظ للمراجعة (دون تعديل المخزون)</button>
     </form>}
     <p role="status">{message}</p>
     <details><summary>المستندات وطلبات النقل</summary>{docs.map(doc => <article key={doc.id} className="border-b border-stone-700 p-2">
       <p>{doc.id} — {doc.kind} — {doc.requester} — {doc.status} — {doc.createdAt} — {doc.reason}</p>
+      {doc.duplicateResolution === 'sum' && <p className="text-amber-200">طلب جمع سطور مكررة: يضاف مجموع الكميات إلى الرصيد الموجود بعد الاعتماد. يتطلب اعتماد المشرف.</p>}
       {doc.original && <OriginalDocument image={doc.original} />}
       {doc.kind === 'issue' && <p className="text-amber-200">راجع رقم المستند وأرقام القطع والكميات مقابل الأصل. الاعتماد وحده ينقص المخزون.</p>}
       {doc.lines.map(line => <div key={line.part_number} className="p-2 border-b border-stone-700"><p>{line.part_number} — {line.quantity} — {line.old_location || "—"} → {line.location} — {line.check || 'غير مدقق'} — {line.remark}</p><p className="font-bold">{line.description_ar}</p><p dir="ltr" className="text-sm text-neutral-400">{line.description_en}</p></div>)}

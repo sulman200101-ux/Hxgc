@@ -1,8 +1,10 @@
+import { TransferSuggestionsPanel } from './components/TransferSuggestionsPanel';
+import { PdfExportProgress } from './components/PdfExportProgress';
 import { ReportsPanel } from './components/ReportsPanel';
 import { StockDocumentsPanel } from './components/StockDocumentsPanel';
 import { DataSafetyPanel } from './components/DataSafetyPanel';
 import { AuthorizationDialog } from './components/AuthorizationDialog';
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { dbService } from './services/db';
 import { InventoryItem, LocationSummary } from './types';
 import { Header } from './components/Header';
@@ -21,6 +23,9 @@ import { ExtractedSparePart } from './services/localOcr';
 import { Camera, Plus, CheckCircle, RefreshCw, MapPin, Edit3, XCircle, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
+  const [screen, setScreen] = useState<'inventory' | 'operations'>('inventory');
+  const swipeStart = useRef<{ x: number; y: number } | null>(null);
+  const changeScreen = (next: 'inventory' | 'operations') => { setScreen(next); window.scrollTo({ top: 0, behavior: 'instant' }); };
   const [availableOnly, setAvailableOnly] = useState(true);
   const [isDbReady, setIsDbReady] = useState(false);
   const [allItems, setAllItems] = useState<InventoryItem[]>([]);
@@ -33,6 +38,8 @@ export default function App() {
   const [visibleLocationsLimit, setVisibleLocationsLimit] = useState(25);
 
   // Modals state
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [captureKind, setCaptureKind] = useState<'inventory' | 'issue' | 'receipt'>('inventory');
   const [isOcrOpen, setIsOcrOpen] = useState(false);
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
   const [isWipeModalOpen, setIsWipeModalOpen] = useState(false);
@@ -207,6 +214,7 @@ export default function App() {
     partNumber: string,
     newStatus: InventoryItem['status']
   ) => {
+    try {
     await dbService.markStatus(partNumber, newStatus);
     refreshData();
     if (newStatus === 'غير موجودة') {
@@ -214,6 +222,7 @@ export default function App() {
     } else {
       showNotification(`تم تحديث حالة القطعة ${partNumber} إلى (${newStatus})`, 'success');
     }
+    } catch (error) { showNotification((error as Error).message, 'info'); }
   };
 
   const handleOcrSaveItems = async (extracted: ExtractedSparePart[]) => {
@@ -262,10 +271,32 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#19110D] text-neutral-100 flex flex-col font-sans pb-28 selection:bg-amber-700 selection:text-white">
       <AuthorizationDialog />
-      <label className="m-4"><input type="checkbox" checked={!availableOnly} onChange={e => setAvailableOnly(!e.target.checked)} /> عرض التاريخ والرصيد الصفري وغير المتاح</label>
-      <DataSafetyPanel onRefresh={refreshData} />
-      {isDbReady && <ReportsPanel />}
-      {isDbReady && <StockDocumentsPanel onRefresh={refreshData} />}
+      {showSuggestions && <TransferSuggestionsPanel items={allItems} onClose={() => setShowSuggestions(false)} onRefresh={refreshData} />}
+      <PdfExportProgress />
+      <nav aria-label="شاشات التطبيق" className="sticky top-0 z-40 bg-[#19110D] border-b border-amber-900 px-4 py-3 flex gap-2" dir="rtl">
+        <button type="button" aria-pressed={screen === 'inventory'} onClick={() => changeScreen('inventory')} className={`flex-1 rounded-xl py-3 font-bold ${screen === 'inventory' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>المخزون</button>
+        <button type="button" aria-pressed={screen === 'operations'} onClick={() => changeScreen('operations')} className={`flex-1 rounded-xl py-3 font-bold ${screen === 'operations' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>العمليات والتقارير</button>
+      </nav>
+      <div onTouchStart={event => {
+        const target = event.target as HTMLElement;
+        if (event.touches.length !== 1 || target.closest('input,textarea,select,button,a,summary,table,[data-no-swipe]')) { swipeStart.current = null; return; }
+        swipeStart.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+      }} onTouchCancel={() => { swipeStart.current = null; }} onTouchEnd={event => {
+        const start = swipeStart.current; swipeStart.current = null;
+        if (!start || !event.changedTouches.length) return;
+        const dx = event.changedTouches[0].clientX - start.x;
+        const dy = event.changedTouches[0].clientY - start.y;
+        if (Math.abs(dx) >= 70 && Math.abs(dx) > Math.abs(dy) * 1.5) changeScreen(dx > 0 ? 'operations' : 'inventory');
+      }}>
+      <section hidden={screen !== 'operations'} aria-label="شاشة العمليات والتقارير" className="max-w-7xl mx-auto w-full min-h-[75vh]">
+        <header className="p-4" dir="rtl"><h1 className="text-xl font-bold">العمليات والتقارير</h1><p className="text-sm text-neutral-400">اسحب لليسار للعودة إلى المخزون</p></header>
+        <button className="m-4 p-3 rounded-xl bg-amber-800 text-white font-bold" onClick={() => setShowSuggestions(true)}>اقتراح تجميع القطع في مواقع متجاورة</button>
+        <DataSafetyPanel onRefresh={refreshData} />
+        {isDbReady && <ReportsPanel />}
+        {isDbReady && <StockDocumentsPanel onRefresh={refreshData} onCapture={kind => { setCaptureKind(kind); setIsOcrOpen(true); }} />}
+      </section>
+      <section hidden={screen !== 'inventory'} aria-label="شاشة المخزون" className="min-h-[75vh]">
+
       {/* Notification Toast */}
       {notification && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 transition-all animate-bounce">
@@ -284,6 +315,8 @@ export default function App() {
         </div>
       )}
 
+      <p className="px-4 pt-2 text-sm text-neutral-400" dir="rtl">اسحب لليمين لفتح العمليات والتقارير</p>
+      <label className="block px-4 py-2" dir="rtl"><input type="checkbox" checked={!availableOnly} onChange={e => setAvailableOnly(!e.target.checked)} /> عرض التاريخ والرصيد الصفري وغير المتاح</label>
       {/* Main Header */}
       <Header
         locationCount={locationsSummary.length}
@@ -554,16 +587,19 @@ export default function App() {
       {/* الزر البرتقالي المزخرف العائم أسفل الشاشة لفتح نافذة الكاميرا والألبوم (Gemini Vision) */}
       <div className="fixed bottom-6 inset-x-0 flex justify-center z-40 pointer-events-none">
         <button
-          onClick={() => setIsOcrOpen(true)}
+          onClick={() => { setCaptureKind('inventory'); setIsOcrOpen(true); }}
           className="pointer-events-auto px-6 py-3.5 rounded-full bg-gradient-to-r from-[#FF6D00] via-[#FF8F00] to-[#E65100] hover:from-[#FF8500] hover:to-[#FF6D00] text-white font-black text-sm sm:text-base flex items-center gap-3 shadow-2xl shadow-orange-950/90 border-2 border-[#FFD54F] active:scale-95 transition-all cursor-pointer group relative overflow-hidden"
         >
           <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#3E1C0A] to-[#1F0D05] border border-[#FFB74D] text-[#FFB74D] flex items-center justify-center group-hover:scale-110 transition-transform relative">
             <Camera className="w-4 h-4 text-[#FFD54F]" />
           </div>
           <span className="tracking-wide text-white drop-shadow">
-            التعرف الفائق على النصوص (قراءة كامل الورقة)
+            قراءة ورقة أو عدة أوراق
           </span>
         </button>
+      </div>
+
+      </section>
       </div>
 
       {/* Location Details Modal */}
@@ -601,9 +637,10 @@ export default function App() {
 
       {/* OCR Modal (Gemini Vision Camera & Album) */}
       <OcrModal
+        kind={captureKind}
         isOpen={isOcrOpen}
         onClose={() => setIsOcrOpen(false)}
-        onSaveItems={handleOcrSaveItems}
+        onRefresh={refreshData}
       />
 
       {/* Item Modal */}

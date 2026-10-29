@@ -1,3 +1,4 @@
+import { rotateImageDegrees } from '../utils/imagePreprocessor';
 import { createWorker } from 'tesseract.js';
 import { categorizeAndTranslate } from '../utils/translator';
 import { preprocessImageWithOpenCV } from '../utils/imagePreprocessing';
@@ -41,32 +42,43 @@ export async function processOcrFromImage(
   onProgress?: (progress: number, status: string) => void
 ): Promise<ExtractedSparePart[]> {
   let cleanedSource: string | File | Blob = imageSource;
+  let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
 
   try {
-    if (onProgress) onProgress(15, 'تنظيف الصورة برمجياً وإزالة الظلال...');
-    const preprocessed = await preprocessImageWithOpenCV(imageSource);
-    cleanedSource = preprocessed.cleanedDataUrl;
-
-    if (onProgress) onProgress(40, 'تهيئة محرك القراءة المحلي...');
-    const worker = await createWorker('eng');
-
-    if (onProgress) onProgress(65, 'جاري قراءة واستخراج نصوص الجدول...');
-    const ret = await worker.recognize(cleanedSource);
-    const rawText = ret.data.text;
-
-    if (onProgress) onProgress(90, 'تطبيق فلتر أسمو الصارم (10 أرقام + موقع محدد)...');
-    await worker.terminate();
-
-    let extracted = parseStrictAsmoTable(rawText);
-    if (extracted.length === 0) {
-      extracted = parseRawTextOcr(rawText);
+    if (onProgress) onProgress(20, 'تهيئة محرك القراءة المحلي...');
+    worker = await createWorker('eng', 1, { workerPath: '/ocr/worker.min.js', corePath: '/ocr/tesseract-core-lstm.wasm.js', langPath: '/ocr/lang' });
+    if (onProgress) onProgress(50, 'قراءة الصورة الأصلية...');
+    const raw = await worker.recognize(imageSource);
+    let extracted = parseRawTextOcr(raw.data.text);
+    const usable = (rows: ExtractedSparePart[]) => rows.some(row => /^\d{10}$/.test(row.part_number) && isValidSpecificLocation(row.location_code));
+    if (!usable(extracted)) {
+      const source = typeof imageSource === 'string' ? imageSource : await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(imageSource);
+      });
+      for (const [index, degrees] of ([270, 90, 180] as const).entries()) {
+        if (onProgress) onProgress(60 + index * 10, 'محاولة قراءة الورقة باتجاه آخر...');
+        const rotated = await rotateImageDegrees(source, degrees);
+        const attempt = parseRawTextOcr((await worker.recognize(rotated)).data.text);
+        if (attempt.length > extracted.length || usable(attempt)) extracted = attempt;
+        if (usable(extracted)) break;
+      }
+    }
+    if (!usable(extracted)) {
+      if (onProgress) onProgress(90, 'محاولة تحسين الصورة...');
+      const preprocessed = await preprocessImageWithOpenCV(imageSource, { rotateCounterClockwise90: false });
+      cleanedSource = preprocessed.cleanedDataUrl;
+      const enhanced = parseRawTextOcr((await worker.recognize(cleanedSource)).data.text);
+      if (enhanced.length > extracted.length || usable(enhanced)) extracted = enhanced;
     }
 
     if (onProgress) onProgress(100, 'اكتملت المعالجة بنجاح!');
     return extracted;
   } catch (err) {
     console.warn('Local OCR notice:', err);
-    return [];
+    throw new Error('تعذر تشغيل القراءة المحلية. جرّب صورة أخرى وأعد المحاولة؛ لم يتغير المخزون.');
+  } finally {
+    // Release OCR resources after success and failure before starting another sheet.
+    await worker?.terminate().catch(() => {});
   }
 }
 

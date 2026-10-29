@@ -134,9 +134,22 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
 /**
  * استخراج الكمية الصارمة (QTY): أرقام صحيحة فقط (Integers)
  */
+function textAfterStorageBin(line: string, storageBin: string): string | null {
+  if (!storageBin) return null;
+  const tokens = Array.from(line.matchAll(/\S+/g));
+  for (let i = 0; i < tokens.length; i++) {
+    for (let width = 1; width <= 3 && i + width <= tokens.length; width++) {
+      const last = tokens[i + width - 1];
+      const candidate = line.slice(tokens[i].index!, last.index! + last[0].length);
+      if (sanitizeLocationCode(candidate) === storageBin) return line.slice(last.index! + last[0].length);
+    }
+  }
+  return null;
+}
+const QTY_FIELD = /^\s*(?:\|\s*)?(?:(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD)\s+)?(\d{1,9})(?=\s|\||$)/i;
 export function extractStrictQuantity(line: string, partNumber: string, storageBin: string): { total: number; out: number } {
-  // Plain OCR text does not reliably preserve column boundaries. Never invent QTY or issued stock.
-  return { total: 0, out: 0 };
+  const match = textAfterStorageBin(line, storageBin)?.match(QTY_FIELD);
+  return { total: match ? Number(match[1]) : 0, out: 0 };
 }
 
 /**
@@ -147,45 +160,14 @@ export function extractStrictDescription(
   partNumber: string,
   storageBin: string
 ): { descEn: string; descAr: string; category: string } {
-  const upperLine = line.toUpperCase();
-
-  // 1. فحص المطابقة المباشرة مع القاموس الفني المحلي
-  for (const term of TECHNICAL_TERMS_DICTIONARY) {
-    if (upperLine.includes(term)) {
-      // استخراج السياق والمقاس المحيط بالمصطلح الفني (مثل: 80 MM, 4 IN, 36 WATT)
-      const sizeMatch = line.match(/\b(\d{1,3}\s*(?:MM|INCH|IN|WATT|W|CM|PSI|V|VOLT|M))\b/i);
-      const fullDesc = sizeMatch ? `${term} ${sizeMatch[1].toUpperCase()}` : term;
-      const { category, descAr } = categorizeAndTranslate(fullDesc);
-      return { descEn: fullDesc, descAr, category };
-    }
-  }
-
-  // 2. استخراج النص المتبقي بعد حذف رقم القطعة والموقع والأرقام المجردة
-  let cleaned = line
-    .replace(partNumber, ' ')
-    .replace(storageBin, ' ')
-    .replace(/[\[\]\(\)\{\}\=\|\&\~\\\/@\#\$\%\^\*\+\?\!\;\:\"\'\`<>_]/g, ' ')
-    .replace(/\b\d{1,4}\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toUpperCase();
-
-  // فحص هل النص المتبقي مجرد حروف عشوائية مشوهة (مثل SLSLSLS أو ULUGULY)
-  if (isRandomNoiseOrGibberish(cleaned)) {
-    // في حال كانت حروف عشوائية، مطابقة رقم القطعة بالقاموس المرجعي لجدول أسمو
-    const fallbackDesc = getAsmoReferenceDescription(partNumber);
-    const { category, descAr } = categorizeAndTranslate(fallbackDesc);
-    return { descEn: fallbackDesc, descAr, category };
-  }
-
-  if (cleaned.length >= 3) {
-    const { category, descAr } = categorizeAndTranslate(cleaned);
-    return { descEn: cleaned, descAr, category };
-  }
-
-  const fallbackDesc = getAsmoReferenceDescription(partNumber);
-  const { category, descAr } = categorizeAndTranslate(fallbackDesc);
-  return { descEn: fallbackDesc, descAr, category };
+  const upper = line.toUpperCase();
+  const starts = TECHNICAL_TERMS_DICTIONARY.map(term => upper.indexOf(term)).filter(index => index >= 0);
+  const tail = textAfterStorageBin(line, storageBin);
+  const quantity = tail?.match(QTY_FIELD);
+  const remaining = quantity && tail ? tail.slice(quantity[0].length).replace(/^\s*[|✓✔×]\s*/, '').trim() : '';
+  const descEn = starts.length ? line.slice(Math.min(...starts)).trim() : remaining;
+  const { category, descAr } = categorizeAndTranslate(descEn);
+  return { descEn, descAr, category };
 }
 
 /**
@@ -220,7 +202,6 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
 
   const lines = rawText.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
   const results: ExtractedSparePart[] = [];
-  const seenParts = new Set<string>();
 
   for (const line of lines) {
     // ==========================================
@@ -233,11 +214,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
       continue;
     }
 
-    // منع التكرار لنفس رقم القطعة في نفس المسح
-    if (seenParts.has(partNumber)) {
-      continue;
-    }
-    seenParts.add(partNumber);
+    // Retain repeated source rows for review; document validation prevents duplicate stock identities.
 
     // 2. عمود الموقع (Storage Bin)
     const storageBin = extractStrictStorageBin(line, partNumber);

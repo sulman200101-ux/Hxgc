@@ -236,6 +236,7 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1.5 justify-end flex-wrap">
+                      <button onClick={() => onMarkItemStatus(item.part_number, item.status === 'مدقق' ? 'غير مدقق' : 'مدقق')} title="تغيير حالة تدقيق القطعة" className="px-2 py-1 rounded border border-amber-700 text-amber-200 text-xs">{item.status === 'مدقق' ? 'مدققة ✓' : 'غير مدققة'}</button>
                       <button
                         onClick={() =>
                           onMarkItemStatus(
