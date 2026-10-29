@@ -1,4 +1,4 @@
-import { canonicalDocumentId, documentImageHash, interpretMark, validateDocument, type StockDocument } from './documents';
+import { canonicalDocumentId, interpretMark, validateDocument, type StockDocument } from './documents';
 import { authorizeMutation } from './security';
 import type { InventoryItem, LocationSummary } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
@@ -10,7 +10,7 @@ import {
 } from '../utils/regexSanitizer';
 
 const DB_NAME = 'ASMO_Inventory_DB';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 const STORE_NAME = 'items';
 
 class InventoryDatabase {
@@ -38,7 +38,8 @@ class InventoryDatabase {
           if (!store.indexNames.contains(name)) store.createIndex(name, key, { unique });
         }
         const documents = db.objectStoreNames.contains('documents') ? request.transaction!.objectStore('documents') : db.createObjectStore('documents', { keyPath: 'id' });
-        if (!documents.indexNames.contains('originalHash')) documents.createIndex('originalHash', 'originalHash', { unique: true });
+        // Images are evidence, not record identity. Changed part numbers must remain saveable.
+        if (documents.indexNames.contains('originalHash')) documents.deleteIndex('originalHash');
         if (!db.objectStoreNames.contains('audit')) db.createObjectStore('audit', { keyPath: 'id', autoIncrement: true });
 
       };
@@ -99,7 +100,7 @@ class InventoryDatabase {
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      const loc = item.location_code;
+      const loc = sanitizeLocationCode(item.location_code) || item.location_code.trim().toUpperCase();
       if (!loc || loc === 'عام') continue;
 
       let entry = summaryMap.get(loc);
@@ -149,7 +150,7 @@ class InventoryDatabase {
     const items = this.getAllItems();
     const res: InventoryItem[] = [];
     for (let i = 0; i < items.length; i++) {
-      if (items[i].location_code === locationCode) {
+      if ((sanitizeLocationCode(items[i].location_code) || items[i].location_code.trim().toUpperCase()) === (sanitizeLocationCode(locationCode) || locationCode.trim().toUpperCase())) {
         res.push(items[i]);
       }
     }
@@ -501,22 +502,11 @@ class InventoryDatabase {
     });
   }
 
-  public async findDocumentByImage(image: Blob): Promise<StockDocument | undefined> {
-    const hash = await documentImageHash(image);
-    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction('documents', 'readonly');
-      const req = tx.objectStore('documents').index('originalHash').get(hash);
-      tx.oncomplete = () => resolve(req.result);
-      tx.onabort = () => reject(tx.error);
-    });
-  }
-
   public async submitDocument(doc: StockDocument): Promise<void> {
+    doc = { ...doc, lines: doc.lines.map(line => ({ ...line, part_number: line.part_number.trim(), location: sanitizeLocationCode(line.location) })) };
     validateDocument(doc);
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
-    const originalHash = doc.original ? await documentImageHash(doc.original) : undefined;
-    const safe = structuredClone({ ...doc, id: canonicalDocumentId(doc.id), originalHash, lines: doc.lines.map(line => ({ ...line, old_location: this.itemMap.get(line.part_number)?.location_code })), status: 'pending' as const, createdAt: new Date().toISOString(), executedAt: undefined, approvedBy: undefined });
+    const safe = structuredClone({ ...doc, id: canonicalDocumentId(doc.id), lines: doc.lines.map(line => ({ ...line, old_location: this.itemMap.get(line.part_number)?.location_code })), status: 'pending' as const, createdAt: new Date().toISOString(), executedAt: undefined, approvedBy: undefined });
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction('documents', 'readwrite');
       tx.objectStore('documents').add(safe);
@@ -624,7 +614,7 @@ class InventoryDatabase {
       validateDocument(doc);
       if (!['pending', 'approved'].includes(doc.status)) throw new Error('حالة مستند غير صالحة');
       const original = doc.original ? new Blob([new Uint8Array(doc.original.bytes)], { type: doc.original.type }) : undefined;
-      return { ...doc, original, originalHash: original ? await documentImageHash(original) : undefined };
+      return { ...doc, original, originalHash: undefined };
     }));
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction([STORE_NAME, 'audit', 'documents'], 'readwrite');

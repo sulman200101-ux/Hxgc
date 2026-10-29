@@ -44,11 +44,7 @@ export function StockDocumentsPanel({ onRefresh }: { onRefresh: () => void }) {
       <label className="block">تصوير / اختيار الأصل <input type="file" accept="image/*" capture="environment" onChange={async e => {
         prepareAudio();
         const image = e.target.files?.[0]; if (!image) return;
-        try {
-          const existing = await dbService.findDocumentByImage(image);
-          if (existing) { setMessage('تم حفظها مسبقًا — المستند ' + existing.id); playOperationSound('duplicate'); setOriginal(undefined); e.target.value = ''; return; }
-          setOriginal(image);
-        } catch (err) { setMessage(String(err)); }
+        setOriginal(image);
       }} /></label>
       {preview && <img src={preview} className="max-h-72" alt="أصل المستند للمراجعة" />}
       {original && <button type="button" disabled={busy} onClick={async () => {

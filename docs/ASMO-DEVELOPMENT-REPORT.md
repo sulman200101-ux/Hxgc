@@ -4,7 +4,7 @@ Branch: `feat/asmo-inventory-safety`. No merge into main.
 
 ## Implemented
 
-- IndexedDB version 6 upgrades stores and indexes in place. Startup no longer deletes malformed legacy records, rewrites quantities, or automatically seeds sample stock. Public reads return copies.
+- IndexedDB version 7 upgrades stores and indexes in place. Startup no longer deletes malformed legacy records, rewrites quantities, or automatically seeds sample stock. Public reads return copies.
 - Durable before/after audit events share the same IndexedDB transaction as stock mutations. Wiping stock retains audit history and before-images.
 - JSON backup includes inventory, audit history, documents and original image bytes. Restore validates inventory before writes, merges without clearing existing records, archives imported audit history, and preserves existing document approvals to prevent replay. Backups contain sensitive business data and are not encrypted.
 - Four-digit local supervisor PIN uses salted PBKDF2-SHA256 (600,000 iterations), temporary lockout after repeated failures, verified changes, and migration of the previous plaintext PIN. No owner-selected PIN is embedded in source. The former unauthenticated reset control was removed.
@@ -19,7 +19,7 @@ Branch: `feat/asmo-inventory-safety`. No merge into main.
 
 - `npm ci --no-audit --no-fund`: passed after lockfile repair.
 - `npm run lint` and `npm run typecheck`: passed. Both currently invoke TypeScript; this repository has no separate ESLint configuration.
-- `npm test`: real Chromium/IndexedDB regression suite; 41 checks passed.
+- `npm test`: real Chromium/IndexedDB regression suite; 45 checks passed.
 - `npm run build`: passed; remaining warnings concern CSS import ordering, large bundle size and future Vite native config loading.
 - `npm run dev`: started; HTML request and missing-image API response verified.
 - Browser UI smoke: receipt draft, initial PIN setup, supervisor approval, report rendering and a PDF download passed with no page errors.
@@ -41,7 +41,9 @@ Branch: `feat/asmo-inventory-safety`. No merge into main.
 
 ## Follow-up: document replay and audio
 
-The document store now has a unique SHA-256 original-image index, plus normalized document IDs. Rescanning the same image with a different ID is rejected; the UI reports “تم حفظها مسبقًا” and plays a distinct warning. A successful committed issue plays an ascending success tone. Provisional OCR plays a separate uncertainty warning and requires manual review. Rephotographing the same paper changes image bytes; recognition then depends on entering the same document number. No visual-fingerprint guarantee is claimed. Device volume and browser autoplay policy may affect audible playback; text warnings remain visible. Tests verify duplicate-image rejection, ID normalization, and scheduled tone patterns; physical speaker output is not verified.
+Document IDs remain unique and normalized, but original images no longer impose uniqueness. The same image can be saved with changed part numbers and a new document ID. IndexedDB v7 drops the old unique image index without deleting documents or stock. Part numbers remain inventory primary keys: an approved receipt updates an existing part rather than inserting a duplicate. New location codes are normalized; location summaries group case/spacing variants into one card. Multiple different parts can share that location. Duplicate part rows inside one document remain rejected. Approval replay protection still prevents applying a given issue document twice.
+
+A successful committed issue plays an ascending success tone. Provisional OCR plays a separate uncertainty warning and requires manual review. A duplicate document ID plays an already-saved warning. Device volume and browser autoplay policy may affect audible playback; text warnings remain visible. Tests verify distinct scheduled tone patterns; physical speaker output is not verified.
 
 GitHub API access returned Forbidden. The environment draft now requests api.github.com, preserving the existing package-manager network preset. That draft change is not yet applied or published. A PR cannot be claimed until GitHub confirms creation.
 

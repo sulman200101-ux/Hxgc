@@ -16,7 +16,6 @@ export interface StockDocument {
   reason: string;
   lines: DocumentLine[];
   original?: Blob;
-  originalHash?: string;
   status: 'pending' | 'approved';
   createdAt: string;
   executedAt?: string;
@@ -44,7 +43,3 @@ export function validateDocument(doc: StockDocument) {
 }
 
 export const canonicalDocumentId = (value: string) => value.normalize('NFKC').replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit))).replace(/\s+/g, '').toUpperCase();
-export async function documentImageHash(image: Blob): Promise<string> {
-  const hash = await crypto.subtle.digest('SHA-256', await image.arrayBuffer());
-  return Array.from(new Uint8Array(hash), value => value.toString(16).padStart(2, '0')).join('');
-}

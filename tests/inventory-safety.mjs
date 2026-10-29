@@ -24,8 +24,11 @@ try {
     const check = (ok, label) => { if (!ok) throw new Error(label); passed.push(label); };
     const legacy = { part_number: '1000000001', location_code: 'N01B1', description_en: 'BOLT M16', description_ar: 'مسمار M16', category: 'BOLT', qty_total: 10, qty_out: 2, qty_remaining: 8, is_moved: 0, status: 'غير مدقق' };
     await new Promise((resolve, reject) => {
-      const req = indexedDB.open('ASMO_Inventory_DB', 3);
+      const req = indexedDB.open('ASMO_Inventory_DB', 6);
       req.onupgradeneeded = () => {
+        const docs = req.result.createObjectStore('documents', { keyPath: 'id' });
+        docs.createIndex('originalHash', 'originalHash', { unique: true });
+        req.result.createObjectStore('audit', { keyPath: 'id', autoIncrement: true });
         const store = req.result.createObjectStore('items', { keyPath: 'part_number' });
         store.put(legacy);
         store.put({ ...legacy, part_number: 'legacy-invalid', location_code: 'عام' });
@@ -85,10 +88,10 @@ try {
     const doc = { id: 'ISSUE-1', kind: 'issue', requester: 'tester', reason: '', lines: [line], status: 'pending', createdAt: '' };
     const original = new Blob(['original'], { type: 'image/png' });
     await db.submitDocument({ ...doc, original });
-    let duplicateImage = false;
-    try { await db.submitDocument({ ...doc, id: 'DIFFERENT-ID', original }); } catch (error) { duplicateImage = error.message.includes('تم حفظها مسبقًا'); }
-    check(duplicateImage && (await db.getDocuments()).length === 1, 'same image under another document ID rejected with already-saved warning');
-    check((await db.findDocumentByImage(original)).id === doc.id, 'reselected image recognized before OCR');
+    const changedLine = { ...line, part_number: '1000000099', location: ' n01b1 ' };
+    await db.submitDocument({ ...doc, kind: 'receipt', id: 'CHANGED-PART', lines: [changedLine], original });
+    check((await db.getDocuments()).length === 2, 'same image with a changed part number is accepted after v6 migration');
+    check((await db.getDocuments()).find(d => d.id === 'CHANGED-PART').lines[0].location === 'N01B1', 'new document location is normalized');
     check(db.getItemByPartNumber(legacy.part_number).qty_remaining === 8, 'document submission does not change stock');
     await db.approveDocument(doc.id);
     check(db.getItemByPartNumber(legacy.part_number).qty_remaining === 5, 'issue deducts only approved quantity');
@@ -117,6 +120,15 @@ try {
     await db.submitDocument({ ...doc, id: 'COUNT-OVER', kind: 'inventory', lines: [{ ...line, location: 'N02A1', remark: '-7' }] });
     rejected = false; try { await db.approveDocument('COUNT-OVER'); } catch { rejected = true; }
     check(rejected && db.getItemByPartNumber(legacy.part_number).qty_remaining === 6, 'shortage greater than available stock rejected');
+    await db.approveDocument('CHANGED-PART');
+    check(db.getAllItems().filter(item => item.part_number === '1000000099').length === 1, 'changed part number creates one distinct inventory record');
+    await db.submitDocument({ ...doc, kind: 'receipt', id: 'EXISTING-PART', lines: [{ ...changedLine, location: ' N01B1 ' }], original });
+    await db.approveDocument('EXISTING-PART');
+    check(db.getAllItems().filter(item => item.part_number === '1000000099').length === 1 && db.getItemByPartNumber('1000000099').qty_remaining === 6, 'receipt updates existing part without duplicating its record');
+    check(db.getLocationsSummary().filter(location => location.location_code === 'N01B1').length === 1, 'multiple parts share one location card without duplicate locations');
+    rejected = false;
+    try { await db.submitDocument({ ...doc, id: 'DUPLICATE-ROWS', lines: [line, line] }); } catch { rejected = true; }
+    check(rejected, 'repeated part rows in the same document are rejected');
     const portable = JSON.parse(await db.exportBackup());
     check(portable.documents.find(d => d.id === 'ISSUE-1').original.bytes.length === 8, 'portable backup retains original document bytes');
     await db.restoreBackup(JSON.stringify(portable));
