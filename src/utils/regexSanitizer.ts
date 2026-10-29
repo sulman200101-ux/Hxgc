@@ -57,57 +57,8 @@ export function charToDigitMapper(raw: string | number | null | undefined, defau
  * - تصلح الأخطاء البصرية الناتجة عن خط اليد أو خطوط الجدول
  */
 export function strict10DigitRegexFilter(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-
-  let cleaned = String(raw).trim();
-  if (!cleaned) return null;
-
-  // تحويل الحروف المتشابهة بصرياً مع الأرقام
-  const normalizedChars = cleaned
-    .replace(/[OoQD]/g, '0')
-    .replace(/[Il|!]/g, '1')
-    .replace(/[Zz]/g, '2')
-    .replace(/[Ss$]/g, '5')
-    .replace(/[Gg]/g, '6')
-    .replace(/[Bb]/g, '8');
-
-  // 1. البحث المباشر عن 10 أرقام تبدأ بـ 10 (مثل 1001523111 أو 1000082689) حتى لو كان حولها نص أو رقم تسلسلي
-  const exactSap10 = normalizedChars.match(/(10\d{8})/);
-  if (exactSap10) {
-    return exactSap10[1];
-  }
-
-  // إزالة كافة الفواصل والرموز
-  const digitsOnly = normalizedChars.replace(/[^0-9]/g, '');
-
-  // 2. إذا كان الرقم 10 خانات بالضبط
-  if (/^\d{10}$/.test(digitsOnly)) {
-    // إذا قرأ الموديل الرقم الأول 4 أو 7 بدلاً من 1 قبل 00 (مثل 7000082689 -> 1000082689)
-    if (/^[47]00\d{7}$/.test(digitsOnly)) {
-      return '1' + digitsOnly.slice(1);
-    }
-    return digitsOnly;
-  }
-
-  // 3. خوارزمية المساعدة للـ 9 أرقام في أوراق SAP:
-  // أ) إذا طمس خط الجدول الأيسر رقم (1) في البداية فقرئت 9 أرقام تبدأ بـ 00 (مثل 000082689 أو 001523111)
-  if (/^00\d{7}$/.test(digitsOnly)) {
-    return '1' + digitsOnly;
-  }
-  // ب) إذا اندمج أحد الأصفار بعد 100 بسبب الظل فقرئت 9 أرقام تبدأ بـ 100 (مثل 100082689 -> 1000082689)
-  if (/^100\d{6}$/.test(digitsOnly)) {
-    return '1000' + digitsOnly.slice(3);
-  }
-
-  // 4. إذا التصق رقم من العمود المجاور فأصبح 11 أو 12 رقماً ويحتوي بداخله على (100xxxxxxx)
-  if (digitsOnly.length > 10) {
-    const embedded10 = digitsOnly.match(/(100\d{7})/) || digitsOnly.match(/(10\d{8})/);
-    if (embedded10) {
-      return embedded10[1];
-    }
-  }
-
-  return null;
+  const value = String(raw ?? '').trim();
+  return /^\d{10}$/.test(value) ? value : null;
 }
 
 /**

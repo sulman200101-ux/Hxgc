@@ -1,3 +1,7 @@
+import { ReportsPanel } from './components/ReportsPanel';
+import { StockDocumentsPanel } from './components/StockDocumentsPanel';
+import { DataSafetyPanel } from './components/DataSafetyPanel';
+import { AuthorizationDialog } from './components/AuthorizationDialog';
 import React, { useEffect, useState, useMemo } from 'react';
 import { dbService } from './services/db';
 import { InventoryItem, LocationSummary } from './types';
@@ -17,6 +21,7 @@ import { ExtractedSparePart } from './services/localOcr';
 import { Camera, Plus, CheckCircle, RefreshCw, MapPin, Edit3, XCircle, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
+  const [availableOnly, setAvailableOnly] = useState(true);
   const [isDbReady, setIsDbReady] = useState(false);
   const [allItems, setAllItems] = useState<InventoryItem[]>([]);
   const [locationsSummary, setLocationsSummary] = useState<LocationSummary[]>([]);
@@ -84,8 +89,8 @@ export default function App() {
 
   // فهرسة وبحث فوري يدعم 100,000 قطعة بدون أي تأخير
   const filteredItems = useMemo(() => {
-    return dbService.searchItems(searchQuery, selectedCategory, selectedStatus, searchField);
-  }, [allItems, searchQuery, selectedCategory, selectedStatus, searchField]);
+    return dbService.searchItems(searchQuery, selectedCategory, selectedStatus, searchField).filter(item => !availableOnly || (item.qty_remaining > 0 && item.is_missing !== 1));
+  }, [allItems, searchQuery, selectedCategory, selectedStatus, searchField, availableOnly]);
 
   // تجميع القطع المفلترة حسب الموقع في تمريرة واحدة O(N) لمنع التهنيج عند 100,000 قطعة
   const itemsByLocationMap = useMemo(() => {
@@ -105,11 +110,11 @@ export default function App() {
 
   // المواقع المفلترة
   const filteredLocations = useMemo(() => {
-    if (!searchQuery && selectedCategory === 'الكل' && selectedStatus === 'الكل') {
+    if (!availableOnly && !searchQuery && selectedCategory === 'الكل' && selectedStatus === 'الكل') {
       return locationsSummary;
     }
     return locationsSummary.filter((loc) => itemsByLocationMap.has(loc.location_code));
-  }, [locationsSummary, itemsByLocationMap, searchQuery, selectedCategory, selectedStatus]);
+  }, [locationsSummary, itemsByLocationMap, searchQuery, selectedCategory, selectedStatus, availableOnly]);
 
   const displayedLocations = useMemo(() => {
     return filteredLocations.slice(0, visibleLocationsLimit);
@@ -122,8 +127,8 @@ export default function App() {
 
   const selectedLocationItems = useMemo(() => {
     if (!selectedLocationCode) return [];
-    return dbService.getItemsByLocation(selectedLocationCode);
-  }, [allItems, selectedLocationCode]);
+    return dbService.getItemsByLocation(selectedLocationCode).filter(item => !availableOnly || (item.qty_remaining > 0 && item.is_missing !== 1));
+  }, [allItems, selectedLocationCode, availableOnly]);
 
   // الإحصائيات الشاملة
   const overallTotals = useMemo(() => {
@@ -256,6 +261,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#19110D] text-neutral-100 flex flex-col font-sans pb-28 selection:bg-amber-700 selection:text-white">
+      <AuthorizationDialog />
+      <label className="m-4"><input type="checkbox" checked={!availableOnly} onChange={e => setAvailableOnly(!e.target.checked)} /> عرض التاريخ والرصيد الصفري وغير المتاح</label>
+      <DataSafetyPanel onRefresh={refreshData} />
+      {isDbReady && <ReportsPanel />}
+      {isDbReady && <StockDocumentsPanel onRefresh={refreshData} />}
       {/* Notification Toast */}
       {notification && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 transition-all animate-bounce">

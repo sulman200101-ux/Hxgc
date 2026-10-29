@@ -1,3 +1,4 @@
+import { suggestTechnicalTranslation, suggestModelTranslation } from '../services/partTranslation';
 import React, { useState, useEffect } from 'react';
 import { InventoryItem } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
@@ -189,6 +190,22 @@ export const ItemModal: React.FC<ItemModalProps> = ({
             </div>
           </div>
 
+          <fieldset className="border border-amber-900 rounded-xl p-3 space-y-2">
+            <legend>اسم القطعة</legend>
+          {/* Description AR */}
+          <div>
+            <label className="block text-neutral-300 font-semibold mb-1">
+              اسم ووصف القطعة بالعربية
+            </label>
+            <input
+              type="text"
+              value={descAr}
+              onChange={(e) => setDescAr(e.target.value)}
+              placeholder="جازكيت حلزوني مدعم 3 بوصة..."
+              className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 font-bold focus:outline-none focus:border-amber-500"
+            />
+          </div>
+
           {/* Description EN */}
           <div>
             <div className="flex items-center justify-between mb-1">
@@ -209,20 +226,16 @@ export const ItemModal: React.FC<ItemModalProps> = ({
             />
           </div>
 
-          {/* Description AR */}
-          <div>
-            <label className="block text-neutral-300 font-semibold mb-1">
-              اسم ووصف القطعة بالعربية
-            </label>
-            <input
-              type="text"
-              value={descAr}
-              onChange={(e) => setDescAr(e.target.value)}
-              placeholder="جازكيت حلزوني مدعم 3 بوصة..."
-              className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 font-bold focus:outline-none focus:border-amber-500"
-            />
+          </fieldset>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setDescAr(suggestTechnicalTranslation(descEn).arabic)}>ترجمة بالقاموس الصناعي</button>
+            <button type="button" disabled={isSubmitting} onClick={async () => {
+              setIsSubmitting(true);
+              try { const result = await suggestModelTranslation(descEn); setDescAr(result.arabic); }
+              catch (err) { setValidationError((err as Error).message); } finally { setIsSubmitting(false); }
+            }}>تحميل نموذج الترجمة واقتراح العربية</button>
           </div>
-
+          <p className="text-xs text-amber-300">الترجمة اقتراح يحتاج مراجعة؛ يبقى الاسم الإنجليزي والمواصفات محفوظة.</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Category */}
             <div>

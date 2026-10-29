@@ -4,7 +4,6 @@ const config: CapacitorConfig = {
   appId: 'com.asmo.inventory',
   appName: 'ASMO Spare Parts Inventory',
   webDir: 'dist',
-  bundledWebRuntime: false,
   server: {
     androidScheme: 'https',
   },

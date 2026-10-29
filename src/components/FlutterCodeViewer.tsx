@@ -1,3 +1,4 @@
+import { Smartphone } from 'lucide-react';
 import React, { useState } from 'react';
 import { FLUTTER_DART_CODE } from '../utils/flutterCode';
 import { Copy, Check, Download, Code2, Sparkles } from 'lucide-react';

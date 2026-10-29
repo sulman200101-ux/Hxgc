@@ -135,36 +135,8 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
  * استخراج الكمية الصارمة (QTY): أرقام صحيحة فقط (Integers)
  */
 export function extractStrictQuantity(line: string, partNumber: string, storageBin: string): { total: number; out: number } {
-  // إزالة رقم القطعة والموقع لتجنب الخلط مع أرقامها
-  let text = line
-    .replace(partNumber, ' ')
-    .replace(storageBin, ' ')
-    .replace(/\b(100\d{7})\b/g, ' ');
-
-  // البحث عن الأرقام المجردة في نهاية أو وسط خلايا الجدول
-  const numbers = text.match(/\b\d{1,4}\b/g);
-
-  if (!numbers || numbers.length === 0) {
-    return { total: 10, out: 0 };
-  }
-
-  // فلترة أرقام المقاسات المعروفة (مثل 80, 220, 316, 150) إذا كانت مرافقة للوحدات
-  const validQtys: number[] = [];
-  for (const n of numbers) {
-    const val = parseInt(n, 10);
-    // استبعاد قيم المقاسات الشائعة مثل مقاس الفولت 220 أو 380 أو ضغط 150 إذا أمكن
-    if (val > 0 && val < 5000) {
-      validQtys.push(val);
-    }
-  }
-
-  const total = validQtys.length > 0 ? validQtys[validQtys.length - 1] : 25;
-  const out = validQtys.length > 1 ? validQtys[0] : Math.floor(total * 0.2);
-
-  return {
-    total: Math.max(1, total),
-    out: Math.max(0, out > total ? 0 : out),
-  };
+  // Plain OCR text does not reliably preserve column boundaries. Never invent QTY or issued stock.
+  return { total: 0, out: 0 };
 }
 
 /**
@@ -285,7 +257,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
       qty_total: total,
       qty_out: out,
       qty_remaining: Math.max(0, total - out),
-      confidence: 'Strict Template Extractor (100% Validated)',
+      confidence: 'اقتراح غير مؤكد: راجع رقم القطعة والكمية والعلامات مقابل الأصل',
     });
   }
 

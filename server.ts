@@ -46,29 +46,8 @@ function charToDigitMapper(raw: any, defaultValue: number = 1): number {
 }
 
 function strict10DigitMaterialFilter(raw: any): string | null {
-  if (!raw) return null;
-  let cleaned = String(raw)
-    .trim()
-    .replace(/[OoQD]/g, '0')
-    .replace(/[Il|!]/g, '1')
-    .replace(/[Zz]/g, '2')
-    .replace(/[Ss$]/g, '5')
-    .replace(/[Gg]/g, '6')
-    .replace(/[Bb]/g, '8');
-
-  const exact10 = cleaned.match(/(10\d{8})/);
-  if (exact10) return exact10[1];
-
-  const digits = cleaned.replace(/[^0-9]/g, '');
-  if (/^\d{10}$/.test(digits)) {
-    if (/^[47]00\d{7}$/.test(digits)) return '1' + digits.slice(1);
-    return digits;
-  }
-  // ترميم الأرقام ذات الـ 9 خانات إذا طمس خط الجدول الرقم الأول (1) أو أحد أصفار البادئة (1000)
-  if (/^00\d{7}$/.test(digits)) return '1' + digits;
-  if (/^100\d{6}$/.test(digits)) return '1000' + digits.slice(3);
-
-  return null;
+  const value = String(raw ?? '').trim();
+  return /^\d{10}$/.test(value) ? value : null;
 }
 
 function dynamicLocationNormalizer(rawLoc: any): string {
@@ -179,7 +158,7 @@ TABLE COLUMNS (in order):
 6. "QTY" (Integer quantity) -> Extract as integer "quantity".
 7. "Check" (Handwritten mark column):
    - If marked with handwritten cross "X" or "×" -> set "is_missing": true and "check_mark": "X".
-   - If marked with handwritten checkmark "✓", "✔", "/", or left blank -> set "is_missing": false and "check_mark": "CHECK". Never fail on messy handwriting in the Check column!
+   - If marked with handwritten checkmark "✓", "✔", "/", -> set "is_missing": false and "check_mark": "CHECK". Blank or uncertain marks must be UNVERIFIED. Never infer a checkmark.
 8. "Remark" (Handwritten note like "+90", "+3", "+96", "-7", "F1", "F2") -> Extract as "remark".
 9. "Material Description" (English description) -> Extract as "description".
 
@@ -316,11 +295,6 @@ MANDATE:
         item.description ?? item.description_en ?? item.desc ?? item.name ?? item['Description'] ?? 'SPARE PART ASMO'
       ).trim();
 
-      if (finalPartNumber === '1000082689' && (normLocation === 'N01BB2' || seqNum === 653)) {
-        finalPartNumber = '1000082688';
-      } else if (finalPartNumber === '1000986658' && (normLocation === 'N01C2' || seqNum === 7832)) {
-        finalPartNumber = '1000986659';
-      }
 
       if (finalPartNumber && normLocation) {
         validItems.push({
@@ -329,7 +303,7 @@ MANDATE:
           location: normLocation,
           quantity: normQuantity,
           is_missing: isMissing,
-          check_mark: isMissing ? 'X' : 'CHECK',
+          check_mark: isMissing ? 'X' : String(item.check_mark || 'UNVERIFIED'),
           remark,
           description_en: desc,
         });
