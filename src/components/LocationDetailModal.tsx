@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { InventoryItem, LocationSummary } from '../types';
 import { exportLocationToPdfFile } from '../utils/pdfExportUtil';
+import { parseShelfElevation, estimatePartSizeProfile } from '../services/transferSuggestions';
 import {
   ArrowRight,
   Plus,
@@ -97,9 +98,18 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
               <span>⬅ عودة</span>
             </button>
 
-            <h2 className="text-base sm:text-lg font-black text-white font-mono flex items-center gap-2">
-              تفاصيل الموقع: {locationCode}
-            </h2>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base sm:text-lg font-black text-white font-mono flex items-center gap-2">
+                تفاصيل الموقع: {locationCode}
+              </h2>
+              <span
+                className={`text-xs px-2.5 py-0.5 rounded-md border font-bold ${
+                  parseShelfElevation(locationCode).badgeColorClass
+                }`}
+              >
+                {parseShelfElevation(locationCode).shortLabelAr}
+              </span>
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
@@ -219,6 +229,9 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                       <div className="flex flex-wrap items-center gap-2 text-neutral-300 pt-0.5">
                         <span className="font-mono text-amber-300 font-bold bg-[#19110D] px-2 py-0.5 rounded border border-[#3D271F]">
                           رقم القطعة: {item.part_number}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-[#19110D] text-amber-200 border border-amber-700/40 font-bold">
+                          الحجم: {estimatePartSizeProfile(item).sizeCategory} ({estimatePartSizeProfile(item).dimensionsLabel})
                         </span>
                         <span className="text-neutral-500">|</span>
                         <span>

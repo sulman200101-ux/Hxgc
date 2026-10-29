@@ -187,13 +187,16 @@ export async function parseTableWithGeminiVision(
       ).trim();
 
       if (valid10DigitPart && isLocValid) {
-        const { category, descAr } = categorizeAndTranslate(descEn);
+        const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
+        const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
+        const hasArabicChars = /[\u0600-\u06FF]/.test(rawAiAr);
+        const finalDescAr = hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr;
 
         validatedItems.push({
           part_number: valid10DigitPart,
           location_code: normLocation,
           description_en: descEn,
-          description_ar: descAr,
+          description_ar: finalDescAr,
           category,
           qty_total: total,
           qty_out: out,

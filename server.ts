@@ -166,25 +166,29 @@ app.post('/api/gemini/parse-table', async (req, res) => {
       },
     });
 
-    const prompt = `You are an expert industrial AI vision system specialized in reading ASMO "SAP Inventory Controller" spare parts sheets (whether upright landscape or rotated 90 degrees portrait/sideways).
+    const prompt = `You are an expert industrial AI vision system specialized in performing a COMPREHENSIVE, TOP-TO-BOTTOM SCAN of ASMO "SAP Inventory Controller" spare parts sheets (whether upright landscape or rotated 90 degrees portrait/sideways).
 
 TABLE COLUMNS (in order):
 1. "#" (Short sequence number: 1 to 5 digits like 496, 1162, 5466, 11470, 18195) -> Extract as integer "seq". NEVER put "#" in "part_number"!
 2. "Material" (Part Number: 10-digit number starting with 100, e.g. "1001023714", "1001032639", "1001011116", "1000428938") -> Extract the exact 10 digits as "part_number". Even if a pen mark touches a digit, read the 10-digit number starting with 100 carefully.
 3. "Plant" (C006, M016, D04D) and "Area" (002) -> Ignore.
 4. "Storage Bin" (Exact Location Code: e.g. "N11C2", "N11D1", "N11D2", "N11FL1", "N11FL2", "N12A1", "N12A2", "N16D1", "N16D2", "N17A1", "N17A2", "N17B1") -> Extract as "location". Never output "عام".
+   Note on Shelf Elevations in Storage Bin: FL = Floor (0m), A = 1m height, B = 2m height, BB = 3m height, C = 4m height, D = 5m height.
 5. "Bun" (Unit: EA, PK, AY, SET, SH, CO, PAA, ZYD).
 6. "QTY" (Integer quantity) -> Extract as integer "quantity".
 7. "Check" (Handwritten mark column):
    - If marked with handwritten cross "X" or "×" -> set "is_missing": true and "check_mark": "X".
    - If marked with handwritten checkmark "✓", "✔", "/", -> set "is_missing": false and "check_mark": "✓".
    - If blank -> set "is_missing": false and "check_mark": "".
-8. "Remark" (Handwritten note like "F1", "F2", "F3", "F5", "F20", "-4", "SET", "+90") -> Extract as "remark".
+8. "Remark" (Handwritten deduction note):
+   - ONLY extract minus deductions like "-1", "-2", "-4" as "remark".
+   - Completely IGNORE and EXCLUDE any increase marks like "F1", "F2", "F3", "F5", "F20", "+N" (output "" for those).
 9. "Material Description" (Full English technical description including sizes, grades, and dimensions) -> Extract as "description".
+10. "description_ar": Translate the "Material Description" accurately into clear, professional industrial Arabic while preserving dimensions and material grades (e.g., "حلقة تآكل حماية غلاف المضخة، ستانلس ASTM A276 TYPE 316").
 
 MANDATE:
-- Extract EVERY SINGLE ITEM ROW on the sheet from top to bottom (e.g. all 29 rows on the sheet), preserving repeated Material rows if a part appears twice on the sheet.
-- Ignore table headers, page footers (e.g. Page 27 of 43), and blank margins.`;
+- Perform a complete, exhaustive scan and extract EVERY SINGLE ITEM ROW on the sheet from top to bottom without skipping any row, preserving repeated Material rows if a part appears twice on the sheet.
+- Ignore table headers, page footers (e.g. Page 27 of 43, Page 41 of 43), and blank margins.`;
 
     const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
     let response: any = null;
@@ -222,6 +226,7 @@ MANDATE:
                   is_missing: { type: Type.BOOLEAN },
                   remark: { type: Type.STRING },
                   description: { type: Type.STRING },
+                  description_ar: { type: Type.STRING },
                 },
               },
             },
@@ -323,11 +328,14 @@ MANDATE:
         : /^(✓|✔|\/|CHECK)$/i.test(rawCheck)
         ? '✓'
         : '';
-      const remark = item.remark ? String(item.remark).trim() : '';
+      const rawRemark = item.remark ? String(item.remark).trim() : '';
+      const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
+      const remark = minusMatch ? `-${minusMatch[1] || minusMatch[2]}` : '';
       const seqNum = item.seq ? Number(item.seq) : undefined;
       const desc = String(
         item.description ?? item.description_en ?? item.desc ?? 'SPARE PART ASMO'
       ).trim();
+      const descAr = item.description_ar ? String(item.description_ar).trim() : '';
 
       if (finalPartNumber && normLocation) {
         validItems.push({
@@ -341,6 +349,7 @@ MANDATE:
           check_mark: checkMark,
           remark,
           description_en: desc,
+          description_ar: descAr,
         });
       } else if (rawPart.replace(/[^0-9]/g, '').length > 0) {
         const cleanDigits = rawPart.replace(/[^0-9]/g, '');

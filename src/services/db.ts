@@ -97,8 +97,22 @@ class InventoryDatabase {
       tx.onabort = () => reject(tx.error);
       tx.onerror = () => reject(tx.error);
     });
-    // Preserve legacy records verbatim. Invalid identifiers must be reviewed, never discarded.
-    this.itemMap = new Map(items.map(item => [item.part_number, item]));
+    // Enrich existing records with the latest industrial Arabic dictionary while preserving quantities and status
+    const enrichedItems = items.map((item) => {
+      if (typeof item.description_en === 'string' && item.description_en.trim()) {
+        const suggestion = categorizeAndTranslate(item.description_en);
+        const updated = { ...item };
+        if (suggestion.descAr && suggestion.descAr !== item.description_en) {
+          updated.description_ar = suggestion.descAr;
+        }
+        if (suggestion.category && (!item.category || item.category === 'عام' || item.category === 'قطع ميكانيكية متنوعة')) {
+          updated.category = suggestion.category;
+        }
+        return updated;
+      }
+      return item;
+    });
+    this.itemMap = new Map(enrichedItems.map((item) => [item.part_number, item]));
     this.rebuildCacheArray();
   }
 

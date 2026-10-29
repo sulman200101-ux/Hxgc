@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { LocationSummary, InventoryItem } from '../types';
+import { parseShelfElevation, estimatePartSizeProfile } from '../services/transferSuggestions';
 import {
   MapPin,
   ChevronDown,
@@ -38,6 +39,7 @@ export const LocationCard: React.FC<LocationCardProps> = ({
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const previewItems = items.slice(0, 25);
+  const shelfElevation = parseShelfElevation(summary.location_code);
 
   return (
     <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] shadow-lg hover:border-amber-700/50 transition-all overflow-hidden mb-4">
@@ -54,10 +56,16 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                 <span className="text-lg font-black text-white tracking-wide font-mono">
                   موقع: {summary.location_code}
                 </span>
+                <span className={`text-xs px-2.5 py-0.5 rounded-md border font-bold ${shelfElevation.badgeColorClass}`}>
+                  {shelfElevation.shortLabelAr}
+                </span>
                 <span className="text-xs px-2 py-0.5 rounded-md bg-[#3B2820] text-amber-200/80 border border-[#4F362B] font-bold">
                   {summary.item_count} أصناف
                 </span>
               </div>
+              <p className="text-[11px] text-neutral-400 mt-0.5">
+                {shelfElevation.fullExplanationAr} — {shelfElevation.suitabilityAr}
+              </p>
             </div>
           </div>
 
@@ -179,6 +187,7 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
                 const isVerified = !isMissing && item.status === 'مدقق';
                 const isMoved = item.is_moved === 1 || item.status === 'منقول' || item.status === 'تم النقل';
+                const sizeProf = estimatePartSizeProfile(item);
 
                 return (
                   <div
@@ -198,6 +207,9 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                         </span>
                         <span className="px-2 py-0.5 rounded-md bg-[#3A271F] text-neutral-300 text-xs font-medium">
                           {item.category}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-[#1B120E] text-amber-200 border border-amber-700/40 text-[11px] font-bold">
+                          الحجم: {sizeProf.sizeCategory} ({sizeProf.dimensionsLabel})
                         </span>
 
                         {isMissing ? (
