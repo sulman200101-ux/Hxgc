@@ -146,8 +146,7 @@ app.post('/api/gemini/parse-table', async (req, res) => {
     cleanBase64 = cleanBase64.replace(/\s+/g, '');
 
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-    // التحقق من صلاحية صيغة المفتاح أو حالة عدم التطابق لتجنب أخطاء 401 المتكررة والتحويل الفوري للقارئ المحلي
-    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.startsWith('AIza') || isGeminiKeyUnsupported) {
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || isGeminiKeyUnsupported) {
       return res.status(200).json({
         success: false,
         fallbackToLocal: true,
@@ -166,31 +165,19 @@ app.post('/api/gemini/parse-table', async (req, res) => {
       },
     });
 
-    const prompt = `You are an expert industrial AI vision system specialized in performing a COMPREHENSIVE, TOP-TO-BOTTOM SCAN of ASMO "SAP Inventory Controller" spare parts sheets (whether upright landscape or rotated 90 degrees portrait/sideways).
+    const systemInstruction = `You are an advanced industrial Document AI system specialized in reading dense, 37+ row SAP Inventory Controller sheets (both upright and rotated 90/180/270 degrees).
+CRITICAL RULES:
+1. Read the entire table from beginning to end (top to bottom) without skipping a single row.
+2. Extract each row into the structured JSON array: Material (part_number / material_number), Storage Bin (location / storage_bin), QTY (quantity / qty), Remark (remark), and Material Description (description).
+3. Put an empty string "" for any unreadable or blank field.
+4. Strictly ignore phone numbers or unrelated margin chatter.`;
 
-TABLE COLUMNS (in order):
-1. "#" (Short sequence number: 1 to 5 digits like 496, 1162, 5466, 11470, 18195) -> Extract as integer "seq". NEVER put "#" in "part_number"!
-2. "Material" (Part Number: 10-digit number starting with 100, e.g. "1001023714", "1001032639", "1001011116", "1000428938") -> Extract the exact 10 digits as "part_number". Even if a pen mark touches a digit, read the 10-digit number starting with 100 carefully.
-3. "Plant" (C006, M016, D04D) and "Area" (002) -> Ignore.
-4. "Storage Bin" (Exact Location Code: e.g. "N11C2", "N11D1", "N11D2", "N11FL1", "N11FL2", "N12A1", "N12A2", "N16D1", "N16D2", "N17A1", "N17A2", "N17B1") -> Extract as "location". Never output "عام".
-   Note on Shelf Elevations in Storage Bin: FL = Floor (0m), A = 1m height, B = 2m height, BB = 3m height, C = 4m height, D = 5m height.
-5. "Bun" (Unit: EA, PK, AY, SET, SH, CO, PAA, ZYD).
-6. "QTY" (Integer quantity) -> Extract as integer "quantity".
-7. "Check" (Handwritten mark column):
-   - If marked with handwritten cross "X" or "×" -> set "is_missing": true and "check_mark": "X".
-   - If marked with handwritten checkmark "✓", "✔", "/", -> set "is_missing": false and "check_mark": "✓".
-   - If blank -> set "is_missing": false and "check_mark": "".
-8. "Remark" (Handwritten deduction note):
-   - ONLY extract minus deductions like "-1", "-2", "-4" as "remark".
-   - Completely IGNORE and EXCLUDE any increase marks like "F1", "F2", "F3", "F5", "F20", "+N" (output "" for those).
-9. "Material Description" (Full English technical description including sizes, grades, and dimensions) -> Extract as "description".
-10. "description_ar": Translate the "Material Description" accurately into clear, professional industrial Arabic while preserving dimensions and material grades (e.g., "حلقة تآكل حماية غلاف المضخة، ستانلس ASTM A276 TYPE 316").
+    const prompt = `Perform a complete, top-to-bottom scan of this dense spare parts inventory sheet (approximately 37 rows or more).
+1. Read every single row from beginning to end without skipping any row, handling rotated orientation automatically.
+2. Extract: Material (10-digit code starting with 100), Storage Bin (e.g. N11C2, N16D1), QTY, Remark, and Material Description (plus Arabic translation description_ar).
+3. If any field is blank or unreadable, output "" for that field.`;
 
-MANDATE:
-- Perform a complete, exhaustive scan and extract EVERY SINGLE ITEM ROW on the sheet from top to bottom without skipping any row, preserving repeated Material rows if a part appears twice on the sheet.
-- Ignore table headers, page footers (e.g. Page 27 of 43, Page 41 of 43), and blank margins.`;
-
-    const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
     let response: any = null;
 
     for (const modelName of candidateModels) {
@@ -209,23 +196,46 @@ MANDATE:
             ],
           },
           config: {
+            systemInstruction,
             responseMimeType: 'application/json',
+            maxOutputTokens: 8192,
+            temperature: 0.1,
             ...(modelName === 'gemini-3.8-flash'
               ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
               : {}),
             responseSchema: {
               type: Type.ARRAY,
+              description: 'قائمة بجميع المواد الموجودة في جدول الجرد',
               items: {
                 type: Type.OBJECT,
+                required: ['part_number', 'description'],
                 properties: {
+                  part_number: {
+                    type: Type.STRING,
+                    description: 'Exact spare part number (10 digits starting with 100). Never include phone numbers.',
+                  },
+                  material_number: {
+                    type: Type.STRING,
+                    description: 'رقم المادة (Material) مثل 1001011116',
+                  },
+                  storage_bin: {
+                    type: Type.STRING,
+                    description: 'موقع التخزين (Storage Bin) مثل N16D1',
+                  },
+                  qty: {
+                    type: Type.NUMBER,
+                    description: 'الكمية (QTY) المطبوعة كأرقام',
+                  },
+                  description: {
+                    type: Type.STRING,
+                    description: 'Clean technical description of the spare part, excluding distracting text or phone numbers.',
+                  },
                   seq: { type: Type.INTEGER },
-                  part_number: { type: Type.STRING },
                   location: { type: Type.STRING },
                   quantity: { type: Type.INTEGER },
                   check_mark: { type: Type.STRING },
                   is_missing: { type: Type.BOOLEAN },
                   remark: { type: Type.STRING },
-                  description: { type: Type.STRING },
                   description_ar: { type: Type.STRING },
                 },
               },
@@ -290,7 +300,13 @@ MANDATE:
 
     let lastValidLoc = '';
     const preNormalized = rawItems.map((item) => {
-      const rawLoc = item.location ?? item.location_code ?? item.bin ?? item.storage_bin ?? item.storageBin ?? '';
+      const rawLoc =
+        item.location ??
+        item.storage_bin ??
+        item.location_code ??
+        item.bin ??
+        item.storageBin ??
+        '';
       let normLoc = dynamicLocationNormalizer(rawLoc);
       if (normLoc) {
         lastValidLoc = normLoc;
@@ -314,7 +330,12 @@ MANDATE:
 
     preNormalized.forEach((item, idx) => {
       const rawPart = String(
-        item.part_number ?? item.partNumber ?? item.material ?? item.part ?? ''
+        item.part_number ??
+          item.material_number ??
+          item.partNumber ??
+          item.material ??
+          item.part ??
+          ''
       ).trim();
 
       const finalPartNumber = strict10DigitMaterialFilter(rawPart);
@@ -341,13 +362,17 @@ MANDATE:
         validItems.push({
           seq: seqNum,
           part_number: finalPartNumber,
+          material_number: finalPartNumber,
           location: normLocation,
           location_code: normLocation,
+          storage_bin: normLocation,
           quantity: normQuantity,
+          qty: normQuantity,
           qty_total: normQuantity,
           is_missing: isMissing ? 1 : 0,
           check_mark: checkMark,
           remark,
+          description: desc,
           description_en: desc,
           description_ar: descAr,
         });
@@ -386,6 +411,163 @@ MANDATE:
       skipped_rows: [],
       message: error?.message || 'حدث خطأ أثناء معالجة الصورة عبر السيرفر',
     });
+  }
+});
+
+app.post('/api/gemini/extract-inventory-table', async (req, res) => {
+  try {
+    const { imageBase64, mimeType = 'image/jpeg' } = req.body;
+    if (!imageBase64) {
+      return res.status(400).json({ error: 'الصورة غير متوفرة' });
+    }
+    const cleanBase64 = String(imageBase64)
+      .replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '')
+      .replace(/\s+/g, '');
+
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+      return res.status(503).json({ error: 'مفتاح الخدمة السحابية غير متوفر' });
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
+
+    const responseSchema = {
+      type: Type.ARRAY,
+      description: 'قائمة بجميع المواد الموجودة في جدول الجرد',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          material_number: {
+            type: Type.STRING,
+            description: 'رقم المادة (Material) مثل 1001011116',
+          },
+          storage_bin: {
+            type: Type.STRING,
+            description: 'موقع التخزين (Storage Bin) مثل N16D1',
+          },
+          qty: {
+            type: Type.NUMBER,
+            description: 'الكمية (QTY) المطبوعة كأرقام',
+          },
+          remark: {
+            type: Type.STRING,
+            description:
+              'أي ملاحظات مكتوبة بخط اليد في عمود Remark مثل F2 أو S&T، اتركه فارغاً إن لم يوجد',
+          },
+          description: {
+            type: Type.STRING,
+            description: 'وصف المادة بالكامل (Material Description)',
+          },
+        },
+        required: ['material_number', 'storage_bin', 'qty', 'description'],
+      },
+    };
+
+    const prompt = `
+    أنت نظام متطور لاستخراج البيانات من جداول الجرد الصناعية (Document AI).
+    الصورة المرفقة تحتوي على جدول جرد (Inventory Sheet).
+    ملاحظات هامة جداً:
+    1. الصورة قد تكون مقلوبة (Rotated)، اقرأ النص بالاتجاه الصحيح برمجياً.
+    2. استخرج البيانات صفاً بصف، وركز على الأعمدة التالية: Material, Storage Bin, QTY, Remark, Material Description.
+    3. تجاهل علامات "الصح" الموجودة في عمود Check.
+    4. إذا كان هناك نص مكتوب بخط اليد في عمود Remark، قم بقراءته بدقة.
+  `;
+
+    const systemInstruction = `أنت نظام متطور لاستخراج البيانات من جداول الجرد الصناعية (Document AI).
+يجب قراءة الجدول بالكامل من البداية للنهاية دون تخطي أي صف، وتجاهل علامات "الصح" في عمود Check، ووضع قيم فارغة "" للحقول غير المقروءة.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: [
+        prompt,
+        { inlineData: { data: cleanBase64, mimeType } },
+      ],
+      config: {
+        systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema,
+        maxOutputTokens: 8192,
+        temperature: 0.1,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+
+    const inventoryItems = JSON.parse(response.text || '[]');
+    return res.status(200).json(inventoryItems);
+  } catch (err: any) {
+    console.error('Error in /api/gemini/extract-inventory-table:', err);
+    return res.status(500).json({ error: 'لم يتمكن النظام من قراءة الجدول. تأكد من وضوح الصورة.' });
+  }
+});
+
+app.post('/api/gemini/extract-part', async (req, res) => {
+  try {
+    const { imageBase64, mimeType = 'image/jpeg' } = req.body;
+    if (!imageBase64) {
+      return res.status(400).json({ error: 'الصورة غير متوفرة' });
+    }
+    const cleanBase64 = String(imageBase64)
+      .replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '')
+      .replace(/\s+/g, '');
+
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+      return res.status(503).json({ error: 'مفتاح الخدمة السحابية غير متوفر' });
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
+
+    const prompt = `
+    أنت خبير في التعرف على قطع الغيار الصناعية وإدارة المخزون.
+    قم بقراءة الصورة المرفقة واستخرج البيانات التالية بدقة:
+    1. part_number: رقم القطعة (تجاهل أرقام الهواتف أو التواريخ).
+    2. description: وصف القطعة بالعربية والإنجليزية إذا توفر.
+    3. category: صنف القطعة (مثل: فلاتر، سيور، زيوت، إلخ).
+
+    **قواعد صارمة جداً:**
+    - أرجع الناتج بصيغة JSON فقط، بدون أي نصوص إضافية أو علامات تنسيق (Markdown).
+    - إذا لم تكن متأكداً من حقل معين، اجعل قيمته "".
+    - لا تقم بتأليف بيانات غير موجودة في الصورة.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: [
+        prompt,
+        { inlineData: { data: cleanBase64, mimeType } },
+      ],
+      config: {
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseSchema: {
+          type: Type.OBJECT,
+          required: ['part_number', 'description_en', 'description_ar', 'category'],
+          properties: {
+            part_number: { type: Type.STRING },
+            description_en: { type: Type.STRING },
+            description_ar: { type: Type.STRING },
+            category: { type: Type.STRING },
+          },
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    return res.status(200).json({
+      part_number: String(parsed.part_number || '').trim(),
+      description_en: String(parsed.description_en || '').trim(),
+      description_ar: String(parsed.description_ar || '').trim(),
+      category: String(parsed.category || '').trim(),
+    });
+  } catch (err: any) {
+    console.error('Error in /api/gemini/extract-part:', err);
+    return res.status(500).json({ error: 'فشل في استخراج البيانات من الصورة.' });
   }
 });
 

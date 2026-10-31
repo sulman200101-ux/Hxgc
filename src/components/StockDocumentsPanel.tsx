@@ -1,5 +1,5 @@
 import { BatchDocumentsPanel } from './BatchDocumentsPanel';
-import { suggestTechnicalTranslation, suggestModelTranslation } from '../services/partTranslation';
+import { suggestTechnicalTranslation } from '../services/partTranslation';
 import { prepareAudio, playOperationSound } from '../utils/operationSounds';
 import React, { useEffect, useState } from 'react';
 import { dbService } from '../services/db';
@@ -9,7 +9,7 @@ import {
   type StockDocument,
 } from '../services/documents';
 import { processOcrFromImage } from '../services/localOcr';
-import { ArrowDownToLine, ArrowUpFromLine, ClipboardList, MapPin, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpFromLine, ClipboardList, CheckCircle2, AlertTriangle } from 'lucide-react';
 const blank = (): DocumentLine => ({ part_number: '', quantity: 0, location: '', description_en: '', description_ar: '', check: '', remark: '', reviewed: false });
 function OriginalDocument({ image }: { image: Blob }) {
   const [url, setUrl] = useState<string | null>(null);
@@ -87,11 +87,6 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, o
         <label>{kind === 'transfer' ? 'الموقع المقترح' : 'Storage Bin'}<input required className="bg-stone-800 w-28 p-1" value={line.location} onChange={e => update(i, { location: e.target.value, reviewed: false })} /></label>
 <div className="flex flex-col gap-2 border border-stone-700 rounded p-2 w-full">        <label>الوصف العربي<input className="bg-stone-800 p-1" value={line.description_ar} onChange={e => update(i, { description_ar: e.target.value, reviewed: false })} /></label>        <label>الوصف الإنجليزي<input required dir="ltr" className="bg-stone-800 p-1" value={line.description_en} onChange={e => update(i, { description_en: e.target.value, reviewed: false })} /></label></div>
         <button type="button" onClick={() => { update(i, { description_ar: suggestTechnicalTranslation(line.description_en).arabic, reviewed: false }); setMessage('اقتراح من القاموس الصناعي؛ الاسم الإنجليزي محفوظ. راجع الترجمة.'); }}>ترجمة بالقاموس الصناعي</button>
-        <button type="button" disabled={busy} onClick={async () => {
-          setBusy(true);
-          try { const result = await suggestModelTranslation(line.description_en, setMessage); update(i, { description_ar: result.arabic, reviewed: false }); setMessage('اقتراح ترجمة آلية؛ راجع المصطلحات. الاسم الأصلي محفوظ.'); }
-          catch (err) { setMessage((err as Error).message); } finally { setBusy(false); }
-        }}>تحميل النموذج واقتراح ترجمة عربية</button>
         <label>Check<select className="bg-stone-800" value={line.check} onChange={e => update(i, { check: e.target.value, reviewed: false })}><option value="">غير مدققة</option><option>✓</option><option>X</option></select></label>
         <label>Remark<input className="bg-stone-800 w-20" value={line.remark} onChange={e => update(i, { remark: e.target.value, reviewed: false })} /></label>
         <label><input type="checkbox" checked={line.reviewed} onChange={e => update(i, { reviewed: e.target.checked })} />راجعت السطر مقابل الأصل</label>

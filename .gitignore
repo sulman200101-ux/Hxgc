@@ -8,4 +8,7 @@ coverage/
 !.env.example
 
 /public/ocr/
+/public/assets/aistudio/
+/android/app/src/main/assets/public/
+/downloads/*.apk
 .aistudio/

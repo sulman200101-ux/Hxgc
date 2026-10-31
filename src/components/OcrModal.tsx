@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { ImageSourcePicker } from './ImageSourcePicker';
 import { BatchDocumentsPanel } from './BatchDocumentsPanel';
-import { FileStack, RotateCcw, CheckCircle2, ScanLine } from 'lucide-react';
+import { RotateCcw, CheckCircle2, ScanLine } from 'lucide-react';
+export { captureAndProcessImage } from '../services/cameraService';
 
 function CaptureFlow({
   onClose,
@@ -14,41 +15,6 @@ function CaptureFlow({
 }) {
   const [files, setFiles] = useState<File[]>([]);
   const [message, setMessage] = useState('');
-  const [loadingSamples, setLoadingSamples] = useState(false);
-
-  const handleLoadAttachedSheets = async () => {
-    setLoadingSamples(true);
-    setMessage('جاري تحميل ورقتي الجرد المرفقتين (صفحة 27 + صفحة 41)...');
-    try {
-      const samplePaths = [
-        {
-          url: '/assets/aistudio/IMG_20261029_222333_2a538328.jpg',
-          name: 'SAP_Inventory_Page_27_of_43.jpg',
-        },
-        {
-          url: '/assets/aistudio/_____ChatGPT_29________2026__10_12_32___d0ea9fc3.jpg',
-          name: 'SAP_Inventory_Page_41_of_43.jpg',
-        },
-      ];
-      const loaded: File[] = [];
-      for (const s of samplePaths) {
-        const resp = await fetch(s.url);
-        if (!resp.ok) continue;
-        const blob = await resp.blob();
-        loaded.push(new File([blob], s.name, { type: 'image/jpeg' }));
-      }
-      if (loaded.length > 0) {
-        setFiles(loaded);
-        setMessage('');
-      } else {
-        setMessage('تعذر تحميل الأوراق المرفقة');
-      }
-    } catch (err) {
-      setMessage((err as Error).message);
-    } finally {
-      setLoadingSamples(false);
-    }
-  };
 
   return (
     <div
@@ -145,9 +111,11 @@ function CaptureFlow({
             onChanged={onRefresh}
           />
         )}
-        <p role="status" className="text-amber-300 text-xs font-bold">
-          {message}
-        </p>
+        {message && (
+          <p role="status" className="text-amber-300 text-xs font-bold">
+            {message}
+          </p>
+        )}
       </div>
     </div>
   );

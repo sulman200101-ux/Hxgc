@@ -19,7 +19,13 @@ import {
   resolveSheetLocationsWithContext,
 } from '../utils/regexSanitizer';
 import { prepareImageForAi } from '../utils/imagePreprocessor';
+import { preprocessImageForOCR } from '../utils/imagePreprocess';
 import type { SkippedRow } from '../components/SkippedRowsModal';
+
+export interface StructuredSparePartJson {
+  part_number: string;
+  description: string;
+}
 
 export interface GeminiVisionError {
   errorCode: string;
@@ -33,6 +39,7 @@ export interface GeminiVisionError {
 export interface GeminiVisionResult {
   success: boolean;
   items: ExtractedSparePart[];
+  structuredParts?: StructuredSparePartJson[];
   skippedRows?: SkippedRow[];
   totalDetectedRows?: number;
   isSheetComplete?: boolean;
@@ -41,10 +48,18 @@ export interface GeminiVisionResult {
   error?: GeminiVisionError;
 }
 
+function isPhoneNumberNoise(digits: string): boolean {
+  // استبعاد أرقام الهواتف والجوال (مثل 05xxxxxxxx أو 9665xxxxxxxx أو 011xxxxxxx)
+  return /^(?:05\d{8}|966\d{8,9}|00966\d{8,9}|01[1-9]\d{7})$/.test(digits);
+}
+
 function repair10DigitMaterialClient(raw: string | number | null | undefined): string | null {
   if (raw === null || raw === undefined) return null;
+  const rawDigits = String(raw).replace(/[^0-9]/g, '');
+  if (isPhoneNumberNoise(rawDigits)) return null;
+
   const strict = strict10DigitRegexFilter(String(raw));
-  if (strict) return strict;
+  if (strict && !isPhoneNumberNoise(strict)) return strict;
   const cleaned = String(raw)
     .trim()
     .toUpperCase()
@@ -55,13 +70,14 @@ function repair10DigitMaterialClient(raw: string | number | null | undefined): s
     .replace(/G/g, '6')
     .replace(/Z/g, '2')
     .replace(/[^0-9]/g, '');
+  if (isPhoneNumberNoise(cleaned)) return null;
   if (/^10\d{8}$/.test(cleaned)) return cleaned;
   const match = cleaned.match(/(10\d{8})/);
   return match ? match[1] : null;
 }
 
 /**
- * فحص هل السطر مجرد ترويسة جدول أو تذييل صفحة فارغ (وليس سطر قطعة حقيقي)
+ * فحص هل السطر مجرد ترويسة جدول أو تذييل صفحة فارغ أو رقم هاتف مشتت (وليس سطر قطعة حقيقي)
  */
 function isHeaderOrFooterNoise(item: any): boolean {
   if (!item) return true;
@@ -79,6 +95,10 @@ function isHeaderOrFooterNoise(item: any): boolean {
   }
 
   const digits = rawPart.replace(/[^0-9]/g, '');
+  if (isPhoneNumberNoise(digits)) {
+    return true;
+  }
+
   if (digits.length === 0 && (!rawDesc || rawDesc === 'SPARE PART ASMO' || rawDesc.length < 3)) {
     return true;
   }
@@ -87,7 +107,7 @@ function isHeaderOrFooterNoise(item: any): boolean {
 }
 
 /**
- * إرسال الصورة للمسار الخادمي الآمن `/api/gemini/parse-table` مع تطبيق الخوارزميات المساعدة الذكية
+ * إرسال الصورة للمسار الخادمي الآمن `/api/gemini/parse-table` بعد تنقيتها بـ Canvas (Grayscale & Contrast)
  */
 export async function parseTableWithGeminiVision(
   imageSource: string | File | Blob
@@ -105,8 +125,10 @@ export async function parseTableWithGeminiVision(
       });
     }
 
+    const preprocessedDataUrl = await preprocessImageForOCR(base64String);
+
     // ضغط وتحسين الصورة لتسريع الإرسال ومنع التعليق
-    const optimizedDataUrl = await prepareImageForAi(base64String, {
+    const optimizedDataUrl = await prepareImageForAi(preprocessedDataUrl, {
       maxDimension: 1600,
       enhanceContrast: true,
     });
@@ -165,7 +187,7 @@ export async function parseTableWithGeminiVision(
 
     contextResolvedItems.forEach((item: any, idx: number) => {
       const rawPartStr = String(
-        item.part_number ?? item.material ?? item.partNumber ?? ''
+        item.part_number ?? item.material_number ?? item.material ?? item.partNumber ?? ''
       ).trim();
 
       const valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
@@ -173,11 +195,13 @@ export async function parseTableWithGeminiVision(
         repairedCount++;
       }
 
-      const normLocation = item.location_code || dynamicLocationNormalizer(item.location);
+      const normLocation =
+        item.location_code ||
+        dynamicLocationNormalizer(item.location ?? item.storage_bin ?? item.storageBin);
       const isLocValid = isValidSpecificLocation(normLocation);
 
       const isMissing = detectMissingFromCheckMark(item);
-      const total = Math.max(0, charToDigitMapper(item.qty_total ?? item.quantity ?? 1, 1));
+      const total = Math.max(0, charToDigitMapper(item.qty_total ?? item.quantity ?? item.qty ?? 1, 1));
       const rawRemark = item.remark ? String(item.remark).trim() : '';
       const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
       const out = isMissing ? 0 : minusMatch ? Math.min(total, Number(minusMatch[1] || minusMatch[2] || 0)) : 0;

@@ -1,9 +1,16 @@
 import { rotateImageDegrees, prepareImageForAi } from '../utils/imagePreprocessor';
+import { preprocessImageForOCR } from '../utils/imagePreprocess';
 import { createWorker } from 'tesseract.js';
 import { categorizeAndTranslate } from '../utils/translator';
 import { preprocessImageWithOpenCV } from '../utils/imagePreprocessing';
 import { parseStrictAsmoTable } from '../utils/strictTableParser';
 import { parseTableWithGeminiVision } from './geminiVisionService';
+export {
+  extractSparePartData,
+  extractInventoryTable,
+  type ExtractedSparePartData,
+  type ExtractedInventoryTableRow,
+} from './geminiService';
 import {
   sanitizeQuantity,
   sanitizeLocationCode,
@@ -62,7 +69,7 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
 
 /**
  * قراءة أوراق الجرد بدمج المحرك الذكي الخادمي (للصور الميدانية المدورة والمكتوبة بخط اليد)
- * مع المحرك المحلي غير المتصل (Offline Tesseract Engine) لضمان قراءة كامل الورقة بدقة 100% وعدم ضياع أي قطعة.
+ * مع المحرك المحلي غير المتصل (Offline Tesseract Engine - دعم العربية والإنجليزية) لضمان قراءة كامل الورقة بدقة 100%.
  */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
@@ -71,7 +78,7 @@ export async function processOcrFromImage(
   let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
 
   try {
-    if (onProgress) onProgress(15, '1/4 تجهيز صورة الورقة ومعايرة الأبعاد...');
+    if (onProgress) onProgress(15, '1/4 تجهيز وتنقية صورة الورقة (Grayscale & Contrast)...');
     await pauseUi(40);
 
     const sourceDataUrl =
@@ -101,11 +108,14 @@ export async function processOcrFromImage(
       enhanceContrast: true,
     });
 
-    // 1. محاولة القراءة السريعة عبر الخادم الذكي إذا كان الاتصال متاحاً (يدعم الورق المقلوب 90° وعلامات اليد ✓ و × بدقة 100%)
+    // تنقية الصورة (Grayscale & Contrast = 100) عبر Canvas قبل إرسالها للـ OCR
+    const preprocessedGrayscale = await preprocessImageForOCR(scaledSource);
+
+    // 1. محاولة القراءة السريعة عبر الخادم الذكي (Gemini Vision) إذا كان الاتصال متاحاً
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
         if (onProgress) onProgress(35, '2/4 تحليل جدول الجرد واستخراج جميع السطور...');
-        const visionResult = await parseTableWithGeminiVision(scaledSource);
+        const visionResult = await parseTableWithGeminiVision(preprocessedGrayscale);
         if (visionResult.success && isUsableExtraction(visionResult.items)) {
           const recovered = recoverFullVerifiedSheetIfMatched(visionResult.items);
           const finalVisionItems = recovered || visionResult.items;
@@ -119,18 +129,26 @@ export async function processOcrFromImage(
       }
     }
 
-    // 2. المحرك المحلي (Offline Tesseract WASM)
-    if (onProgress) onProgress(45, '2/4 تشغيل محرك القراءة الضوئي المحلي...');
+    // 2. المحرك المحلي (Offline Tesseract WASM) بدعم اللغتين الإنجليزية والعربية (eng+ara)
+    if (onProgress) onProgress(45, '2/4 تشغيل محرك القراءة الضوئي المحلي (عربي + إنجليزي)...');
     await pauseUi();
 
-    worker = await createWorker('eng', 1, {
-      workerPath: '/ocr/worker.min.js',
-      corePath: '/ocr/tesseract-core-lstm.wasm.js',
-      langPath: '/ocr/lang',
-    });
+    try {
+      worker = await createWorker(['eng', 'ara'], 1, {
+        workerPath: '/ocr/worker.min.js',
+        corePath: '/ocr/tesseract-core-lstm.wasm.js',
+        langPath: '/ocr/lang',
+      });
+    } catch {
+      worker = await createWorker('eng', 1, {
+        workerPath: '/ocr/worker.min.js',
+        corePath: '/ocr/tesseract-core-lstm.wasm.js',
+        langPath: '/ocr/lang',
+      });
+    }
 
     if (onProgress) onProgress(60, '3/4 قراءة سطور الجدول وأرقام القطع والمواقع...');
-    const raw = await worker.recognize(scaledSource);
+    const raw = await worker.recognize(preprocessedGrayscale);
     let extracted = parseRawTextOcr(raw.data.text);
     const recoveredDirect = recoverFullVerifiedSheetIfMatched(extracted, raw.data.text);
     if (recoveredDirect) {

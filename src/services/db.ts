@@ -298,8 +298,10 @@ class InventoryDatabase {
       }
 
       if (statusFilter && statusFilter !== 'الكل') {
-        if (statusFilter === 'غير موجودة') {
-          if (item.status !== 'غير موجودة' && item.is_missing !== 1) continue;
+        if (statusFilter === 'غير موجودة' || statusFilter === 'مفقود') {
+          if (item.status !== 'غير موجودة' && item.status !== 'مفقود' && item.is_missing !== 1) continue;
+        } else if (statusFilter === 'مضاف' || statusFilter === 'موجود') {
+          if (item.status === 'غير موجودة' || item.status === 'مفقود' || item.is_missing === 1) continue;
         } else if (statusFilter === 'تم النقل') {
           if (item.status !== 'تم النقل' && item.status !== 'منقول' && item.is_moved !== 1) continue;
         } else if (statusFilter === 'لم تنتقل') {

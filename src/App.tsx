@@ -16,7 +16,6 @@ import { ItemsTableView } from './components/ItemsTableView';
 import { OcrModal } from './components/OcrModal';
 import { ItemModal } from './components/ItemModal';
 import { RenameLocationModal } from './components/RenameLocationModal';
-import { FlutterCodeViewer } from './components/FlutterCodeViewer';
 import { WipeDatabaseModal } from './components/WipeDatabaseModal';
 import { RelocateModal } from './components/RelocateModal';
 import { RelocationReportModal } from './components/RelocationReportModal';
@@ -33,9 +32,9 @@ export default function App() {
   const [locationsSummary, setLocationsSummary] = useState<LocationSummary[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchField, setSearchField] = useState<'all' | 'part' | 'name' | 'location'>('all');
-  const [selectedCategory, setSelectedCategory] = useState('الكل');
-  const [selectedStatus, setSelectedStatus] = useState('الكل');
-  const [activeTab, setActiveTab] = useState<'locations' | 'categories' | 'items' | 'similar' | 'flutter'>('locations');
+  const [selectedCategory, setSelectedCategory] = useState('');
+  const [selectedStatus, setSelectedStatus] = useState('');
+  const [activeTab, setActiveTab] = useState<'locations' | 'categories' | 'items' | 'similar'>('locations');
   const [visibleLocationsLimit, setVisibleLocationsLimit] = useState(25);
 
   // Modals state
@@ -126,7 +125,12 @@ export default function App() {
 
   // المواقع المفلترة
   const filteredLocations = useMemo(() => {
-    if (!availableOnly && !searchQuery && selectedCategory === 'الكل' && selectedStatus === 'الكل') {
+    if (
+      !availableOnly &&
+      !searchQuery &&
+      (!selectedCategory || selectedCategory === 'الكل') &&
+      (!selectedStatus || selectedStatus === 'الكل')
+    ) {
       return locationsSummary;
     }
     return locationsSummary.filter((loc) => itemsByLocationMap.has(loc.location_code));
@@ -159,7 +163,7 @@ export default function App() {
       totalQty += item.qty_total;
       totalOut += item.qty_out;
       totalRemaining += item.qty_remaining;
-      if (item.is_missing === 1 || item.status === 'غير موجودة') {
+      if (item.is_missing === 1 || item.status === 'غير موجودة' || item.status === 'مفقود') {
         totalMissing += 1;
       }
     }
@@ -199,18 +203,18 @@ export default function App() {
       data.qty_out,
       data.status,
       data.description_ar,
-      data.status === 'غير موجودة' ? 1 : 0
+      data.status === 'غير موجودة' || data.status === 'مفقود' ? 1 : 0
     );
 
     if (existing && existing.location_code !== targetLocation) {
       await dbService.relocateItem(data.part_number, targetLocation);
       refreshData();
-      showNotification(`تم نقل القطعة ${data.part_number} إلى موقعها الجديد ${targetLocation} بنجاح 🟢`);
+      showNotification(`تم نقل القطعة ${data.part_number} إلى موقعها الجديد ${targetLocation} بنجاح 🟢`, 'success');
       return;
     }
 
     refreshData();
-    showNotification(`تم حفظ القطعة ${data.part_number} في موقع ${targetLocation} بنجاح`);
+    showNotification(`تم حفظ القطعة ${data.part_number} في موقع ${targetLocation} بنجاح`, 'success');
   };
 
   const handleDeleteItem = async (partNumber: string) => {
@@ -258,8 +262,8 @@ export default function App() {
   const handleWipeDatabase = async () => {
     await dbService.fullProgramWipe();
     setSearchQuery('');
-    setSelectedStatus('الكل');
-    setSelectedCategory('الكل');
+    setSelectedStatus('');
+    setSelectedCategory('');
     setSelectedLocationCode(null);
     setReportMovedOverride(undefined);
     refreshData();
@@ -398,11 +402,11 @@ export default function App() {
                     </span>
                   </div>
 
-                  {(searchQuery || selectedStatus !== 'الكل') && (
+                  {(searchQuery || (selectedStatus && selectedStatus !== 'الكل')) && (
                     <button
                       onClick={() => {
                         setSearchQuery('');
-                        setSelectedStatus('الكل');
+                        setSelectedStatus('');
                       }}
                       className="text-xs text-amber-400 hover:text-amber-300 font-bold cursor-pointer"
                     >
@@ -412,7 +416,7 @@ export default function App() {
                 </div>
 
                 {/* نتائج البحث الفوري بالقطعة أو الرقم أو الموقع */}
-                {(searchQuery.trim() !== '' || selectedStatus === 'غير موجودة') && (
+                {(searchQuery.trim() !== '' || selectedStatus === 'غير موجودة' || selectedStatus === 'مفقود') && (
                   <div className="space-y-2 mb-6">
                     <div className="text-xs font-bold text-neutral-400 mb-1 flex items-center justify-between">
                       <span>
@@ -429,8 +433,12 @@ export default function App() {
                     </div>
 
                     {filteredItems.slice(0, 20).map((item, idx) => {
-                      const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
-                      const isVerified = !isMissing && item.status === 'مدقق';
+                      const isMissing =
+                        item.is_missing === 1 ||
+                        item.status === 'غير موجودة' ||
+                        item.status === 'مفقود';
+                      const isVerified =
+                        !isMissing && (item.status === 'مدقق' || item.status === 'موجود');
                       return (
                         <div
                           key={`${item.part_number}-${idx}`}
@@ -637,9 +645,6 @@ export default function App() {
                 onOpenLocation={showLocationDetails}
               />
             )}
-
-            {/* View Mode 5: Flutter Code */}
-            {activeTab === 'flutter' && <FlutterCodeViewer />}
           </>
         )}
       </main>
@@ -681,13 +686,13 @@ export default function App() {
             location_code: code,
             description_en: '',
             description_ar: '',
-            category: 'مسامير وروابط',
+            category: '',
             qty_total: 10,
             qty_out: 0,
             qty_remaining: 10,
             is_moved: 0,
             is_missing: 0,
-            status: 'غير مدقق',
+            status: 'موجود',
           });
           setIsItemModalOpen(true);
         }}

@@ -13,8 +13,8 @@ interface HeaderProps {
   onSearchFieldChange?: (field: 'all' | 'part' | 'name' | 'location') => void;
   selectedStatus: string;
   onStatusChange: (status: string) => void;
-  activeTab: 'locations' | 'categories' | 'items' | 'similar' | 'flutter';
-  onTabChange: (tab: 'locations' | 'categories' | 'items' | 'similar' | 'flutter') => void;
+  activeTab: 'locations' | 'categories' | 'items' | 'similar';
+  onTabChange: (tab: 'locations' | 'categories' | 'items' | 'similar') => void;
   onOpenAddItem: () => void;
   onOpenWipeModal: () => void;
   onOpenRelocationReport?: () => void;
@@ -235,11 +235,13 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="flex items-center gap-2 w-full md:w-auto justify-between md:justify-start">
               <div className="flex items-center gap-1 bg-[#1F1511] px-2.5 py-1.5 rounded-xl border border-[#4D3429] text-xs">
                 <select
-                  value={selectedStatus}
+                  value={selectedStatus || ''}
                   onChange={(e) => onStatusChange(e.target.value)}
                   className="bg-transparent text-neutral-200 text-xs font-bold focus:outline-none cursor-pointer"
                 >
-                  <option value="الكل" className="bg-[#2C1E18]">كل الحالات</option>
+                  <option value="" className="bg-[#2C1E18]">كل الحالات</option>
+                  <option value="موجود" className="bg-[#2C1E18]">✓ موجود</option>
+                  <option value="مفقود" className="bg-[#2C1E18]">× مفقود ({missingCount})</option>
                   <option value="غير موجودة" className="bg-[#2C1E18]">× غير موجودة ({missingCount})</option>
                   <option value="مضاف" className="bg-[#2C1E18]">✓ موجودة / مضاف</option>
                   <option value="تم النقل" className="bg-[#2C1E18]">تم النقل 🟢</option>
