@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -30,12 +30,15 @@ let isGeminiKeyUnsupported = false;
 
 function charToDigitMapper(raw: any, defaultValue: number = 1): number {
   if (raw === null || raw === undefined) return defaultValue;
-  if (typeof raw === 'number') return isNaN(raw) ? defaultValue : Math.max(0, Math.floor(raw));
+  if (typeof raw === 'number') {
+    if (isNaN(raw) || raw <= 0) return defaultValue;
+    return Math.floor(raw);
+  }
 
   const str = String(raw)
     .trim()
     .replace(/[OoQD]/g, '0')
-    .replace(/[Il|!]/g, '1')
+    .replace(/[Il|!t]/g, '1')
     .replace(/[Zz]/g, '2')
     .replace(/[Ss$]/g, '5')
     .replace(/[Bb]/g, '8')
@@ -43,13 +46,17 @@ function charToDigitMapper(raw: any, defaultValue: number = 1): number {
     .replace(/[q]/g, '9');
 
   const parsed = parseInt(str.replace(/[^0-9]/g, ''), 10);
-  return isNaN(parsed) ? defaultValue : parsed;
+  return isNaN(parsed) || parsed <= 0 ? defaultValue : parsed;
 }
 
 function strict10DigitMaterialFilter(raw: any): string | null {
-  let value = String(raw ?? '').trim();
+  const value = String(raw ?? '').trim();
   if (/^\d{10}$/.test(value)) return value;
-  const repaired = value
+  const stripped = value.replace(/^[|\[\]()]+|[|\[\]()]+$/g, '');
+  const exactInStr = stripped.match(/(?:^|[^0-9])(100\d{7})(?=[^0-9]|$)/);
+  if (exactInStr) return exactInStr[1];
+
+  const repaired = stripped
     .replace(/[OoQD]/g, '0')
     .replace(/[Il|!]/g, '1')
     .replace(/[Zz]/g, '2')
@@ -58,7 +65,9 @@ function strict10DigitMaterialFilter(raw: any): string | null {
     .replace(/[Bb]/g, '8')
     .replace(/[^0-9]/g, '');
   if (/^10\d{8}$/.test(repaired)) return repaired;
-  return null;
+  if (/^00[01]\d{6}$/.test(repaired)) return `1${repaired}`;
+  const m = repaired.match(/(100\d{7})/);
+  return m ? m[1] : null;
 }
 
 function dynamicLocationNormalizer(rawLoc: any): string {
@@ -101,7 +110,7 @@ function dynamicLocationNormalizer(rawLoc: any): string {
   if (
     /^[A-Z0-9][A-Z0-9\s\/._-]{1,18}$/i.test(sapFixed) &&
     /[A-Z]/i.test(sapFixed) &&
-    !['C006', 'M016', 'D04D', 'EA', 'SET', 'PK', 'SH', 'CO', 'AY', 'PAA', 'ZYD'].includes(sapFixed)
+    !['C006', 'M016', 'D04D', 'EA', 'SET', 'PK', 'SH', 'CO', 'AY', 'PAA', 'ZYD', 'KIT'].includes(sapFixed)
   ) {
     return sapFixed;
   }
@@ -145,7 +154,12 @@ app.post('/api/gemini/parse-table', async (req, res) => {
     }
     cleanBase64 = cleanBase64.replace(/\s+/g, '');
 
-    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    const apiKey = (
+      process.env.GEMINI_API_KEY ||
+      process.env.VITE_GEMINI_API_KEY ||
+      process.env.API_KEY ||
+      ''
+    ).trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || isGeminiKeyUnsupported) {
       return res.status(200).json({
         success: false,
@@ -165,19 +179,14 @@ app.post('/api/gemini/parse-table', async (req, res) => {
       },
     });
 
-    const systemInstruction = `You are an advanced industrial Document AI system specialized in reading dense, 37+ row SAP Inventory Controller sheets (both upright and rotated 90/180/270 degrees).
+    const systemInstruction = `You are an industrial Document AI system specialized in reading dense, 37-row SAP Inventory Controller sheets (both upright and rotated 90/180/270 degrees).
 CRITICAL RULES:
-1. Read the entire table from beginning to end (top to bottom) without skipping a single row.
-2. Extract each row into the structured JSON array: Material (part_number / material_number), Storage Bin (location / storage_bin), QTY (quantity / qty), Remark (remark), and Material Description (description).
-3. Put an empty string "" for any unreadable or blank field.
-4. Strictly ignore phone numbers or unrelated margin chatter.`;
+1. Read the entire table from top to bottom without skipping a single row (all ~37 rows).
+2. Extract each row into the JSON array: part_number (10 digits starting with 100 in Material column), location (Storage Bin column, e.g. N13B1, N16D1; if covered by a checkmark, infer from adjacent row), quantity (printed integer in QTY column, never 0), check_mark ("X" if handwritten X/×, "✓" if checked), is_missing (true only if handwritten X/×), remark (handwritten shortage like "-1" or "-4"), and description (full English Material Description).`;
 
-    const prompt = `Perform a complete, top-to-bottom scan of this dense spare parts inventory sheet (approximately 37 rows or more).
-1. Read every single row from beginning to end without skipping any row, handling rotated orientation automatically.
-2. Extract: Material (10-digit code starting with 100), Storage Bin (e.g. N11C2, N16D1), QTY, Remark, and Material Description (plus Arabic translation description_ar).
-3. If any field is blank or unreadable, output "" for that field.`;
+    const prompt = `Read every single row of this SAP Inventory Controller table from top to bottom without skipping any row (all ~37 rows). Extract part_number (10 digits), location (Storage Bin), quantity (QTY integer), check_mark, is_missing, remark, and full English description.`;
 
-    const candidateModels = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
     let response: any = null;
 
     for (const modelName of candidateModels) {
@@ -199,43 +208,34 @@ CRITICAL RULES:
             systemInstruction,
             responseMimeType: 'application/json',
             maxOutputTokens: 8192,
-            temperature: 0.1,
-            ...(modelName === 'gemini-3.8-flash'
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-              : {}),
+            temperature: 0.05,
             responseSchema: {
               type: Type.ARRAY,
-              description: 'قائمة بجميع المواد الموجودة في جدول الجرد',
+              description: 'قائمة بجميع صفوف جدول الجرد بالكامل دون تخطي أي سطر',
               items: {
                 type: Type.OBJECT,
-                required: ['part_number', 'description'],
+                required: ['part_number', 'location', 'quantity', 'description'],
                 properties: {
+                  seq: { type: Type.INTEGER },
                   part_number: {
                     type: Type.STRING,
-                    description: 'Exact spare part number (10 digits starting with 100). Never include phone numbers.',
+                    description: 'Exact 10-digit Material code starting with 100.',
                   },
-                  material_number: {
+                  location: {
                     type: Type.STRING,
-                    description: 'رقم المادة (Material) مثل 1001011116',
+                    description: 'Storage Bin code (e.g. N13B1, N16D1).',
                   },
-                  storage_bin: {
-                    type: Type.STRING,
-                    description: 'موقع التخزين (Storage Bin) مثل N16D1',
+                  quantity: {
+                    type: Type.INTEGER,
+                    description: 'Printed integer quantity in QTY column (>= 1).',
                   },
-                  qty: {
-                    type: Type.NUMBER,
-                    description: 'الكمية (QTY) المطبوعة كأرقام',
-                  },
-                  description: {
-                    type: Type.STRING,
-                    description: 'Clean technical description of the spare part, excluding distracting text or phone numbers.',
-                  },
-                  seq: { type: Type.INTEGER },
-                  location: { type: Type.STRING },
-                  quantity: { type: Type.INTEGER },
                   check_mark: { type: Type.STRING },
                   is_missing: { type: Type.BOOLEAN },
                   remark: { type: Type.STRING },
+                  description: {
+                    type: Type.STRING,
+                    description: 'Full English Material Description.',
+                  },
                   description_ar: { type: Type.STRING },
                 },
               },
@@ -341,7 +341,7 @@ CRITICAL RULES:
       const finalPartNumber = strict10DigitMaterialFilter(rawPart);
       const normLocation = item._normLocation || '';
       const rawQty = item.quantity ?? item.qty ?? item.total_qty ?? 1;
-      const normQuantity = charToDigitMapper(rawQty, 1);
+      const normQuantity = Math.max(1, charToDigitMapper(rawQty, 1));
       const isMissing = detectMissingFromCheckMark(item);
       const rawCheck = String(item.check_mark ?? item.check ?? '').trim();
       const checkMark = isMissing
@@ -353,9 +353,8 @@ CRITICAL RULES:
       const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
       const remark = minusMatch ? `-${minusMatch[1] || minusMatch[2]}` : '';
       const seqNum = item.seq ? Number(item.seq) : undefined;
-      const desc = String(
-        item.description ?? item.description_en ?? item.desc ?? 'SPARE PART ASMO'
-      ).trim();
+      const rawDesc = String(item.description ?? item.description_en ?? item.desc ?? '').trim();
+      const desc = rawDesc.length >= 2 ? rawDesc : 'SPARE PART ASMO';
       const descAr = item.description_ar ? String(item.description_ar).trim() : '';
 
       if (finalPartNumber && normLocation) {
@@ -382,7 +381,7 @@ CRITICAL RULES:
           ? cleanDigits.length <= 5
             ? `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام`
             : `رقم القطعة (${rawPart}) ناقص ولا يتكون من 10 أرقام كاملة`
-          : `اسم الموقع غير واضح في عمود Storage Bin`;
+          : 'اسم الموقع غير واضح في عمود Storage Bin';
 
         skippedRows.push({
           id: `skip-${idx + 1}`,
@@ -424,7 +423,12 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
       .replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '')
       .replace(/\s+/g, '');
 
-    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    const apiKey = (
+      process.env.GEMINI_API_KEY ||
+      process.env.VITE_GEMINI_API_KEY ||
+      process.env.API_KEY ||
+      ''
+    ).trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
       return res.status(503).json({ error: 'مفتاح الخدمة السحابية غير متوفر' });
     }
@@ -454,8 +458,7 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
           },
           remark: {
             type: Type.STRING,
-            description:
-              'أي ملاحظات مكتوبة بخط اليد في عمود Remark مثل F2 أو S&T، اتركه فارغاً إن لم يوجد',
+            description: 'أي ملاحظات مكتوبة بخط اليد في عمود Remark مثل F2 أو -4، اتركه فارغاً إن لم يوجد',
           },
           description: {
             type: Type.STRING,
@@ -471,16 +474,14 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
     الصورة المرفقة تحتوي على جدول جرد (Inventory Sheet).
     ملاحظات هامة جداً:
     1. الصورة قد تكون مقلوبة (Rotated)، اقرأ النص بالاتجاه الصحيح برمجياً.
-    2. استخرج البيانات صفاً بصف، وركز على الأعمدة التالية: Material, Storage Bin, QTY, Remark, Material Description.
-    3. تجاهل علامات "الصح" الموجودة في عمود Check.
-    4. إذا كان هناك نص مكتوب بخط اليد في عمود Remark، قم بقراءته بدقة.
-  `;
+    2. استخرج البيانات صفاً بصف دون تخطي أي سطر، وركز على الأعمدة التالية: Material, Storage Bin, QTY, Remark, Material Description.
+    `;
 
     const systemInstruction = `أنت نظام متطور لاستخراج البيانات من جداول الجرد الصناعية (Document AI).
-يجب قراءة الجدول بالكامل من البداية للنهاية دون تخطي أي صف، وتجاهل علامات "الصح" في عمود Check، ووضع قيم فارغة "" للحقول غير المقروءة.`;
+يجب قراءة الجدول بالكامل من البداية للنهاية دون تخطي أي صف، ووضع قيم فارغة "" للحقول غير المقروءة.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       contents: [
         prompt,
         { inlineData: { data: cleanBase64, mimeType } },
@@ -490,8 +491,7 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
         responseMimeType: 'application/json',
         responseSchema,
         maxOutputTokens: 8192,
-        temperature: 0.1,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        temperature: 0.05,
       },
     });
 
@@ -513,7 +513,12 @@ app.post('/api/gemini/extract-part', async (req, res) => {
       .replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '')
       .replace(/\s+/g, '');
 
-    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    const apiKey = (
+      process.env.GEMINI_API_KEY ||
+      process.env.VITE_GEMINI_API_KEY ||
+      process.env.API_KEY ||
+      ''
+    ).trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
       return res.status(503).json({ error: 'مفتاح الخدمة السحابية غير متوفر' });
     }
@@ -529,22 +534,16 @@ app.post('/api/gemini/extract-part', async (req, res) => {
     1. part_number: رقم القطعة (تجاهل أرقام الهواتف أو التواريخ).
     2. description: وصف القطعة بالعربية والإنجليزية إذا توفر.
     3. category: صنف القطعة (مثل: فلاتر، سيور، زيوت، إلخ).
-
-    **قواعد صارمة جداً:**
-    - أرجع الناتج بصيغة JSON فقط، بدون أي نصوص إضافية أو علامات تنسيق (Markdown).
-    - إذا لم تكن متأكداً من حقل معين، اجعل قيمته "".
-    - لا تقم بتأليف بيانات غير موجودة في الصورة.
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       contents: [
         prompt,
         { inlineData: { data: cleanBase64, mimeType } },
       ],
       config: {
         responseMimeType: 'application/json',
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseSchema: {
           type: Type.OBJECT,
           required: ['part_number', 'description_en', 'description_ar', 'category'],

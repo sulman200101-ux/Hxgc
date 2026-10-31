@@ -1,10 +1,17 @@
-import { rotateImageDegrees, prepareImageForAi } from '../utils/imagePreprocessor';
+import {
+  rotateImageDegrees,
+  prepareImageForAi,
+  splitImageIntoOverlappingHalves,
+} from '../utils/imagePreprocessor';
 import { preprocessImageForOCR } from '../utils/imagePreprocess';
 import { createWorker } from 'tesseract.js';
 import { categorizeAndTranslate } from '../utils/translator';
 import { preprocessImageWithOpenCV } from '../utils/imagePreprocessing';
 import { parseStrictAsmoTable } from '../utils/strictTableParser';
-import { parseTableWithGeminiVision } from './geminiVisionService';
+import {
+  parseTableWithGeminiVision,
+  mergeOverlappingSheetRows,
+} from './geminiVisionService';
 export {
   extractSparePartData,
   extractInventoryTable,
@@ -30,7 +37,7 @@ export interface ExtractedSparePart {
   qty_total: number;
   qty_out: number;
   qty_remaining: number;
-  is_missing?: number; // 1 إذا كانت معلمة بـ × بخط اليد (غير موجودة)
+  is_missing?: number;
   remark?: string;
   status?: ItemStatus;
   confidence?: string;
@@ -48,7 +55,7 @@ export interface OcrProcessResult {
 
 const pauseUi = (ms = 0) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-// تجمع العامل المحلي (Reusable Tesseract Worker Pool) لتسريع قراءة الأوراق المتتالية 3× ومنع إعادة تحميل WASM
+// تجمع العامل المحلي (Reusable Tesseract Worker Pool) لتسريع قراءة الأوراق المتتالية ومنع إعادة تحميل WASM
 let sharedWorkerPromise: Promise<Awaited<ReturnType<typeof createWorker>>> | null = null;
 let workerIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -125,15 +132,17 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
 }
 
 /**
- * قراءة أوراق الجرد عبر المحرك السحابي والمحلي غير المتصل (Offline Tesseract Engine)
- * مع تدوير أوراق الجوال العمودية وتنقية الصورة تلقائياً.
+ * قراءة أوراق الجرد قراءة حقيقية كاملة (بدون أي أرقام قطع مخزنة مسبقاً):
+ * 1. تدوير الصور الطولية الملتقطة بالجوال (90° عكس عقارب الساعة) وتكبيرها لدقة 2200px
+ * 2. إرسال الصورة الطبيعية الواضحة (دون فلتر التباين الحاد الذي يمسح السطور) إلى Gemini Vision مع دعم تقسيم الورقة لنصفين (Top/Bottom Halves) لضمان قراءة الـ 37 سطراً كاملة
+ * 3. في حال عدم توفر الاتصال، تشغيل محرك Tesseract المحلي مع توحيد الإضاءة الموضعي وتقسيم النصفين لاسترجاع كافة السطور
  */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
   onProgress?: (progress: number, status: string) => void
 ): Promise<ExtractedSparePart[]> {
   try {
-    if (onProgress) onProgress(15, '1/4 تجهيز وتنقية صورة الورقة بسرعة فائقة...');
+    if (onProgress) onProgress(15, '1/4 تجهيز ومعايرة أبعاد صورة الورقة...');
     await pauseUi(0);
 
     const sourceDataUrl =
@@ -147,56 +156,71 @@ export async function processOcrFromImage(
           });
 
     const dims = await getImageDimensions(sourceDataUrl);
+    const isFullSheetPhoto = dims.width >= 500 && dims.height >= 500;
+    const isPortraitTablePhoto = dims.height > dims.width * 1.12;
 
-    // تحجيم الصورة أولاً لمنع تعليق الذاكرة أو المتصفح مع صور الكاميرا الكبيرة
-    // إذا كانت الصورة ملتقطة بشكل عمودي (Portrait: height > width * 1.15)، نقوم بتدويرها 90° عكس عقارب الساعة تلقائياً لتصبح أفقية معتدلة
-    const isPortraitTablePhoto = dims.height > dims.width * 1.15;
-    const scaledSource = await prepareImageForAi(sourceDataUrl, {
-      maxDimension: 1600,
+    // تجهيز الصورة الطبيعية الواضحة (بدون طمس الرمادي) لإرسالها لمحرك الذكاء الاصطناعي البصري
+    const scaledNaturalSource = await prepareImageForAi(sourceDataUrl, {
+      maxDimension: 2200,
+      minDimension: isFullSheetPhoto ? 1800 : 800,
       enhanceContrast: true,
       forceRotateCcw: isPortraitTablePhoto,
     });
 
-    // تنقية الصورة (Grayscale & Contrast) عبر Canvas مرة واحدة فقط
-    const preprocessedGrayscale = await preprocessImageForOCR(scaledSource);
-
-    // 1. محاولة القراءة السريعة عبر الخادم الذكي (Gemini Vision) إذا كان الاتصال متاحاً
+    // 1. القراءة الذكية الكاملة عبر Gemini Vision (المتصفح المباشر في AI Studio أو الخادم)
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        if (onProgress) onProgress(35, '2/4 تحليل جدول الجرد واستخراج جميع السطور...');
-        const visionResult = await parseTableWithGeminiVision(preprocessedGrayscale, true);
+        if (onProgress) onProgress(35, '2/4 قراءة جميع سطور الورقة بالماسح الذكي...');
+        const visionResult = await parseTableWithGeminiVision(scaledNaturalSource, true);
         if (visionResult.success && isUsableExtraction(visionResult.items)) {
           if (onProgress) {
-            onProgress(100, `4/4 اكتملت قراءة الورقة بنجاح (${visionResult.items.length} صنفاً)!`);
+            onProgress(100, `4/4 اكتملت قراءة الورقة بنجاح (${visionResult.items.length} سطراً)!`);
           }
           return visionResult.items;
         }
       } catch {
-        // المتابعة تلقائياً إلى القارئ المحلي عند عدم توفر الخادم أو حجب الشبكة
+        // المتابعة تلقائياً إلى القارئ المحلي عند عدم توفر الاتصال
       }
     }
 
-    // 2. المحرك المحلي المعاد استخدامه (Offline Tesseract WASM Pool)
-    if (onProgress) onProgress(45, '2/4 تشغيل محرك القراءة الضوئي المحلي السريع...');
+    // 2. المحرك المحلي (Offline Tesseract WASM Pool) مع تنقية الإضاءة الموضعية بدون طمس الحروف
+    if (onProgress) onProgress(50, '2/4 تشغيل محرك القراءة الضوئي المحلي وتنقية الظلال...');
     await pauseUi(0);
 
+    const preprocessedShadowFree = await preprocessImageForOCR(scaledNaturalSource);
     const worker = await acquireOcrWorker();
 
-    if (onProgress) onProgress(60, '3/4 قراءة سطور الجدول وأرقام القطع والمواقع...');
-    const raw = await worker.recognize(preprocessedGrayscale);
+    if (onProgress) onProgress(65, '3/4 قراءة سطور الجدول وأرقام القطع والمواقع...');
+    const raw = await worker.recognize(preprocessedShadowFree);
     let extracted = parseRawTextOcr(raw.data.text);
 
-    // إذا كانت الورقة تحتاج تدوير إضافي، نجرب زوايا التدوير مع تنقية الصورة
-    const minExpectedRows = dims.height > 400 && dims.width > 400 ? 3 : 1;
+    // إذا كانت الورقة كاملة واستخرج المحرك المحلي عدداً جزئياً من السطور (بين 8 و 34 سطراً)،
+    // نقوم بقراءة النصف العلوي والنصف السفلي بتكبير عالٍ ودمج السطور المفقودة!
+    if (isFullSheetPhoto && extracted.length >= 8 && extracted.length < 34) {
+      if (onProgress) onProgress(78, '3/4 فحص تفصيلي للنصف العلوي والسفلي لاستكمال كافة السطور...');
+      await pauseUi(0);
+      const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(preprocessedShadowFree);
+      const topRec = await worker.recognize(topHalf);
+      const botRec = await worker.recognize(bottomHalf);
+      const topRows = parseRawTextOcr(topRec.data.text);
+      const botRows = parseRawTextOcr(botRec.data.text);
+      const merged = mergeOverlappingSheetRows(extracted, topRows, botRows);
+      if (merged.length > extracted.length) {
+        extracted = merged;
+      }
+    }
+
+    // إذا كانت الورقة تحتاج تدوير إضافي، نجرب زوايا التدوير
+    const minExpectedRows = isFullSheetPhoto ? 3 : 1;
     if (!isUsableExtraction(extracted, minExpectedRows)) {
       const candidateAngles = isPortraitTablePhoto ? ([180, 90, 270] as const) : ([270, 90, 180] as const);
       for (const [index, degrees] of candidateAngles.entries()) {
-        if (onProgress) onProgress(70 + index * 8, `3/4 معايرة اتجاه الورقة بزاوية ${degrees}°...`);
+        if (onProgress) onProgress(82 + index * 5, `3/4 معايرة اتجاه الورقة بزاوية ${degrees}°...`);
         await pauseUi(0);
-        const baseForRot = isPortraitTablePhoto ? sourceDataUrl : scaledSource;
+        const baseForRot = isPortraitTablePhoto ? sourceDataUrl : scaledNaturalSource;
         const rotated = await rotateImageDegrees(baseForRot, degrees);
-        const rotatedGray = await preprocessImageForOCR(rotated);
-        const rotRec = await worker.recognize(rotatedGray);
+        const rotatedClean = await preprocessImageForOCR(rotated);
+        const rotRec = await worker.recognize(rotatedClean);
         const attempt = parseRawTextOcr(rotRec.data.text);
         if (attempt.length > extracted.length) {
           extracted = attempt;
@@ -207,9 +231,9 @@ export async function processOcrFromImage(
 
     // إذا لم تنجح القراءة المباشرة، تطبيق فلتر OpenCV المحسن لإزالة الظلال وخطوط الجدول
     if (!isUsableExtraction(extracted)) {
-      if (onProgress) onProgress(92, '3/4 تحسين التباين وإزالة خطوط الشبكة...');
+      if (onProgress) onProgress(94, '3/4 تحسين التباين وإزالة خطوط الشبكة...');
       await pauseUi(0);
-      const preprocessed = await preprocessImageWithOpenCV(scaledSource, {
+      const preprocessed = await preprocessImageWithOpenCV(scaledNaturalSource, {
         rotateCounterClockwise90: false,
       });
       const enhRec = await worker.recognize(preprocessed.cleanedDataUrl);
@@ -219,7 +243,7 @@ export async function processOcrFromImage(
       }
     }
 
-    if (onProgress) onProgress(100, `4/4 اكتملت القراءة (${extracted.length} صنفاً)!`);
+    if (onProgress) onProgress(100, `4/4 اكتملت القراءة (${extracted.length} سطراً)!`);
     return extracted;
   } catch (err) {
     console.warn('Local OCR notice:', err);
@@ -243,7 +267,6 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
   const rawResults: Array<ExtractedSparePart & { location?: string }> = [];
 
   for (const line of lines) {
-    // ترميم الأخطاء البصرية الشائعة في أرقام القطع ذات الـ 10 خانات التي تبدأ بـ 100
     const normalizedDigitsLine = line.replace(/\b1[0OQD][0OQD][0-9OILSBGZD]{7}\b/gi, (token) =>
       token
         .toUpperCase()
@@ -269,7 +292,7 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     const remark = remarkMatch ? remarkMatch[1].toUpperCase() : undefined;
 
     const qtyUnitMatch =
-      line.match(/\b(EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT|FT|M|KG|L|ROL|BOX)\s+(\d{1,4})\b/i) ||
+      line.match(/\b(EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT|FT|M|KG|L|ROL|BOX)[\s|\[\]()—\-]+(\d{1,4})\b/i) ||
       line.match(/\b(\d{1,4})\s*(PCS|EA|SET|PK|SH|CO|AY|ZYD|PAA|KIT|\b)?$/i);
 
     const rawQtyVal = qtyUnitMatch
@@ -277,10 +300,10 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
         ? qtyUnitMatch[1]
         : qtyUnitMatch[2]
       : 1;
-    const total = sanitizeQuantity(rawQtyVal, 1);
+    const total = Math.max(1, sanitizeQuantity(rawQtyVal, 1));
     const out = 0;
 
-    let rawDesc = line
+    const rawDesc = line
       .replace(partNum, '')
       .replace(loc, '')
       .replace(/\b(C006|M016|D04D|002|EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT)\b/gi, ' ')
@@ -308,7 +331,6 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     });
   }
 
-  // استنتاج الموقع الفعلي للسطور التي غطت فيها علامة اليد خانة الموقع من السطور المجاورة
   const contextResolved = resolveSheetLocationsWithContext(rawResults);
   return contextResolved
     .filter((item) => isValidSpecificLocation(item.location_code))

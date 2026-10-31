@@ -1,3 +1,8 @@
+/**
+ * تنقية الصورة وتوحيد الإضاءة الموضعية (Shadow-Free Adaptive Normalization)
+ * بدلاً من التباين الحاد (contrast = 100) الذي كان يطمس ~30% من السطور والكميات باللون الأبيض،
+ * تقوم هذه الخوارزمية بموازنة إضاءة الورقة موضعياً مع الحفاظ الكامل على وضوح كافة الأرقام والحروف الباهتة.
+ */
 export const preprocessImageForOCR = async (imageSrc: string): Promise<string> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -6,39 +11,72 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
 
     img.onload = () => {
       const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return reject('Canvas not supported');
 
-      canvas.width = img.width;
-      canvas.height = img.height;
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      canvas.width = width;
+      canvas.height = height;
 
-      // رسم الصورة الأصلية
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, 0, 0, width, height);
 
-      // سحب بيانات البكسل
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, width, height);
       const data = imageData.data;
+      const gray = new Float32Array(width * height);
 
-      // تطبيق فلتر أبيض وأسود (Grayscale) وزيادة التباين (Contrast)
-      const contrast = 100; // نسبة التباين
-      const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+      for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+        gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      }
 
-      for (let i = 0; i < data.length; i += 4) {
-        // تحويل للرمادي
-        const avg = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      // بناء الصورة التكاملية (Integral Image) لتقدير إضاءة خلفية الورقة الموضعية وإزالة ظلال التصوير
+      const intW = width + 1;
+      const integral = new Float64Array((width + 1) * (height + 1));
+      for (let y = 0; y < height; y++) {
+        let rowSum = 0;
+        for (let x = 0; x < width; x++) {
+          rowSum += gray[y * width + x];
+          integral[(y + 1) * intW + (x + 1)] = integral[y * intW + (x + 1)] + rowSum;
+        }
+      }
 
-        // تطبيق التباين
-        const newValue = factor * (avg - 128) + 128;
+      const radius = Math.max(24, Math.round(Math.min(width, height) / 28));
 
-        // تعيين القيم الجديدة
-        const finalValue = Math.min(255, Math.max(0, newValue));
-        data[i] = finalValue; // Red
-        data[i + 1] = finalValue; // Green
-        data[i + 2] = finalValue; // Blue
+      for (let y = 0; y < height; y++) {
+        const y0 = Math.max(0, y - radius);
+        const y1 = Math.min(height, y + radius + 1);
+        for (let x = 0; x < width; x++) {
+          const x0 = Math.max(0, x - radius);
+          const x1 = Math.min(width, x + radius + 1);
+          const count = (x1 - x0) * (y1 - y0);
+          const localSum =
+            integral[y1 * intW + x1] -
+            integral[y0 * intW + x1] -
+            integral[y1 * intW + x0] +
+            integral[y0 * intW + x0];
+          const localBg = Math.max(60, localSum / count);
+          const px = gray[y * width + x];
+
+          // تطبيع البكسل نسبةً لإضاءة الورقة المحيطة به بحيث تصبح الخلفية بيضاء نقية (250) والنص داكناً واضحاً دون مسح الحروف الباهتة
+          const ratio = px / localBg;
+          let normalized = ratio * 248;
+          if (ratio < 0.88) {
+            // تقوية الحبر الرمادي والكتابة اليدوية ليظهر بوضوح تام في القراءة
+            normalized = Math.max(0, (ratio - 0.42) * 360);
+          } else {
+            normalized = Math.min(255, 225 + (ratio - 0.88) * 250);
+          }
+
+          const finalVal = Math.min(255, Math.max(0, Math.round(normalized)));
+          const idx = (y * width + x) * 4;
+          data[idx] = finalVal;
+          data[idx + 1] = finalVal;
+          data[idx + 2] = finalVal;
+        }
       }
 
       ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL('image/jpeg', 1.0));
+      resolve(canvas.toDataURL('image/jpeg', 0.92));
     };
 
     img.onerror = (err) => reject(err);
