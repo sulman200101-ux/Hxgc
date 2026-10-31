@@ -64,11 +64,23 @@ let workerPoolPromises: Array<Promise<TesseractWorkerInstance>> = [];
 let workerIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function createConfiguredFastWorker(): Promise<TesseractWorkerInstance> {
-  const worker = await createWorker('eng', 1, {
-    workerPath: '/ocr/worker.min.js',
-    corePath: '/ocr/tesseract-core-lstm.wasm.js',
-    langPath: '/ocr/lang',
-  });
+  const baseOrigin =
+    typeof window !== 'undefined' && window.location?.origin ? window.location.origin : '';
+  const workerOptions = {
+    workerPath: `${baseOrigin}/ocr/worker.min.js`,
+    corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
+    langPath: `${baseOrigin}/ocr/lang`,
+    workerBlobURL: false,
+  };
+
+  let worker: TesseractWorkerInstance;
+  try {
+    worker = await createWorker('eng', 1, workerOptions);
+  } catch {
+    await pauseUi(250);
+    worker = await createWorker('eng', 1, workerOptions);
+  }
+
   try {
     await worker.setParameters({
       tessedit_do_invert: '0',

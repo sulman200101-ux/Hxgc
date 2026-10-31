@@ -26,14 +26,52 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// تقديم ملفات محرك OCR المحلي (/ocr/worker.min.js وملفات WASM واللغات) مباشرة وبأعلى سرعة
+const ocrStaticPath = path.resolve(__dirname, 'public', 'ocr');
+if (fs.existsSync(ocrStaticPath)) {
+  app.use(
+    '/ocr',
+    express.static(ocrStaticPath, {
+      maxAge: '7d',
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.wasm')) {
+          res.setHeader('Content-Type', 'application/wasm');
+        } else if (filePath.endsWith('.js')) {
+          res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        }
+      },
+    })
+  );
+}
+
+let pythonEnvUnavailable = false;
+
 /**
  * تشغيل محرك بايثون الذكي (OpenCV + NumPy + C++ Tesseract Multi-Core) مباشرةً بدون الحاجة إلى Gemini API
  */
 function runPythonTableOcr(imageBase64: string): Promise<any> {
+  if (pythonEnvUnavailable) {
+    return Promise.resolve({
+      success: false,
+      fallbackToLocal: true,
+      items: [],
+      skipped_rows: [],
+      message: 'يتم استخدام محرك المتصفح المتوازي مباشرة.',
+    });
+  }
+
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (payload: any) => {
+      if (settled) return;
+      settled = true;
+      resolve(payload);
+    };
+
     const scriptPath = path.resolve(__dirname, 'scripts', 'asmo_python_ocr.py');
     if (!fs.existsSync(scriptPath)) {
-      return resolve({
+      pythonEnvUnavailable = true;
+      return finish({
         success: false,
         fallbackToLocal: true,
         items: [],
@@ -42,12 +80,29 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
       });
     }
 
-    const py = spawn('python3', [scriptPath], {
-      env: { ...process.env, OMP_THREAD_LIMIT: '1' },
-    });
+    let py;
+    try {
+      py = spawn('python3', [scriptPath], {
+        env: { ...process.env, OMP_THREAD_LIMIT: '1' },
+      });
+    } catch {
+      pythonEnvUnavailable = true;
+      return finish({
+        success: false,
+        fallbackToLocal: true,
+        items: [],
+        skipped_rows: [],
+        message: 'تعذر تشغيل python3 على الخادم، يتم استخدام محرك المتصفح المحلي.',
+      });
+    }
 
     let stdoutData = '';
     let stderrData = '';
+
+    // منع خطأ write EPIPE عند إغلاق عملية بايثون مبكراً
+    py.stdin.on('error', () => {
+      // تجاهل خطأ EPIPE بأمان دون إيقاف خادم Node
+    });
 
     py.stdout.on('data', (chunk) => {
       stdoutData += chunk.toString();
@@ -58,7 +113,8 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
     });
 
     py.on('error', () => {
-      resolve({
+      pythonEnvUnavailable = true;
+      finish({
         success: false,
         fallbackToLocal: true,
         items: [],
@@ -69,7 +125,8 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
 
     py.on('close', (code) => {
       if (code !== 0 || !stdoutData.trim()) {
-        return resolve({
+        pythonEnvUnavailable = true;
+        return finish({
           success: false,
           fallbackToLocal: true,
           items: [],
@@ -80,14 +137,18 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
       try {
         const parsed = JSON.parse(stdoutData.trim());
         if (!parsed.success) {
-          return resolve({
+          if (parsed.fallbackToLocal) {
+            pythonEnvUnavailable = true;
+          }
+          return finish({
             ...parsed,
             fallbackToLocal: true,
           });
         }
-        resolve(parsed);
+        finish(parsed);
       } catch {
-        resolve({
+        pythonEnvUnavailable = true;
+        finish({
           success: false,
           fallbackToLocal: true,
           items: [],
@@ -96,8 +157,14 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
       }
     });
 
-    py.stdin.write(JSON.stringify({ imageBase64 }));
-    py.stdin.end();
+    try {
+      if (py.stdin.writable) {
+        py.stdin.write(JSON.stringify({ imageBase64 }));
+        py.stdin.end();
+      }
+    } catch {
+      // تجاهل أي خطأ في الكتابة إلى stdin
+    }
   });
 }
 

@@ -7,15 +7,27 @@
 - خوارزمية التصحيح البصري لـ 10 أرقام (normalize_sap_material) وتنعيم الساندويتش السياقي للمواقع (Sandwich Context Resolver)
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import re
 import json
 import base64
 from concurrent.futures import ThreadPoolExecutor
-import numpy as np
-import cv2
-import pytesseract
+
+try:
+    import numpy as np
+    import cv2
+    import pytesseract
+    HAS_PYTHON_OCR_DEPS = True
+    PYTHON_IMPORT_ERROR = ""
+except Exception as _imp_err:
+    np = None  # type: ignore
+    cv2 = None  # type: ignore
+    pytesseract = None  # type: ignore
+    HAS_PYTHON_OCR_DEPS = False
+    PYTHON_IMPORT_ERROR = str(_imp_err)
 
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
@@ -318,10 +330,19 @@ def process_sheet_with_python(input_source: str) -> dict:
 if __name__ == "__main__":
     try:
         if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
-            res = process_sheet_with_python(sys.argv[1])
+            if not HAS_PYTHON_OCR_DEPS:
+                print(json.dumps({"success": False, "fallbackToLocal": True, "items": [], "skipped_rows": [], "message": PYTHON_IMPORT_ERROR}, ensure_ascii=False))
+            else:
+                res = process_sheet_with_python(sys.argv[1])
+                print(json.dumps(res, ensure_ascii=False))
         else:
-            payload = json.loads(sys.stdin.read())
-            res = process_sheet_with_python(payload.get("imageBase64", ""))
-        print(json.dumps(res, ensure_ascii=False))
+            raw_stdin = sys.stdin.read()
+            if not HAS_PYTHON_OCR_DEPS:
+                print(json.dumps({"success": False, "fallbackToLocal": True, "items": [], "skipped_rows": [], "message": PYTHON_IMPORT_ERROR}, ensure_ascii=False))
+            else:
+                payload = json.loads(raw_stdin) if raw_stdin.strip() else {}
+                res = process_sheet_with_python(payload.get("imageBase64", ""))
+                print(json.dumps(res, ensure_ascii=False))
     except Exception as exc:
-        print(json.dumps({"success": False, "items": [], "skipped_rows": [], "message": str(exc)}, ensure_ascii=False))
+        print(json.dumps({"success": False, "fallbackToLocal": True, "items": [], "skipped_rows": [], "message": str(exc)}, ensure_ascii=False))
+
