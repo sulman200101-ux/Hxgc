@@ -196,7 +196,7 @@ export async function splitImageIntoOverlappingHalves(
  */
 export async function splitImageIntoThreeOverlappingBands(
   imageSource: string
-): Promise<{ topBand: string; midBand: string; botBand: string; bands: [string, string, string] }> {
+): Promise<[string, string, string]> {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -206,12 +206,7 @@ export async function splitImageIntoThreeOverlappingBands(
         const w = img.naturalWidth || img.width;
         const h = img.naturalHeight || img.height;
         if (w < 300 || h < 300) {
-          return resolve({
-            topBand: imageSource,
-            midBand: imageSource,
-            botBand: imageSource,
-            bands: [imageSource, imageSource, imageSource],
-          });
+          return resolve([imageSource, imageSource, imageSource]);
         }
 
         const cropBand = (startRatio: number, endRatio: number): string => {
@@ -225,33 +220,17 @@ export async function splitImageIntoThreeOverlappingBands(
           return canvas.toDataURL('image/jpeg', 0.9);
         };
 
-        const topBand = cropBand(0, 0.42);
-        const midBand = cropBand(0.30, 0.70);
-        const botBand = cropBand(0.58, 1.0);
+        const topBand = cropBand(0, 0.38);
+        const midBand = cropBand(0.32, 0.70);
+        const botBand = cropBand(0.64, 1.0);
 
-        resolve({
-          topBand,
-          midBand,
-          botBand,
-          bands: [topBand, midBand, botBand],
-        });
+        resolve([topBand, midBand, botBand]);
       } catch {
-        resolve({
-          topBand: imageSource,
-          midBand: imageSource,
-          botBand: imageSource,
-          bands: [imageSource, imageSource, imageSource],
-        });
+        resolve([imageSource, imageSource, imageSource]);
       }
     };
 
-    img.onerror = () =>
-      resolve({
-        topBand: imageSource,
-        midBand: imageSource,
-        botBand: imageSource,
-        bands: [imageSource, imageSource, imageSource],
-      });
+    img.onerror = () => resolve([imageSource, imageSource, imageSource]);
     img.src = imageSource;
   });
 }
