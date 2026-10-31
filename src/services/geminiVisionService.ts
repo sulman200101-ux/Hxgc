@@ -66,7 +66,7 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
     .trim()
     .toUpperCase()
     .replace(/[OQ𝐷]/g, '0')
-    .replace(/[IL|!]/g, '1')
+    .replace(/[IL|!TR]/g, '1')
     .replace(/S/g, '5')
     .replace(/B/g, '8')
     .replace(/G/g, '6')
@@ -76,7 +76,30 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
   if (/^10\d{8}$/.test(cleaned)) return cleaned;
   if (/^00[01]\d{6}$/.test(cleaned)) return `1${cleaned}`;
   const match = cleaned.match(/(10\d{8})/);
-  return match ? match[1] : null;
+  if (match) return match[1];
+
+  // ترميم الأرقام الجزئية (6 إلى 9 أرقام) التي طمست خطوط الجدول جزءاً منها لإضافتها لجدول المراجعة دون ضياع السطر
+  if (cleaned.length === 9) {
+    if (cleaned.startsWith('00')) return `1${cleaned}`;
+    if (cleaned.startsWith('100')) return `${cleaned}0`;
+    if (cleaned.startsWith('10')) return `100${cleaned.slice(2)}`;
+    return `1${cleaned}`;
+  }
+  if (cleaned.length === 8) {
+    if (cleaned.startsWith('00')) return `10${cleaned}`;
+    if (cleaned.startsWith('100')) return `${cleaned}00`;
+    return `10${cleaned}`;
+  }
+  if (cleaned.length === 7) {
+    return `100${cleaned}`;
+  }
+  if (cleaned.length === 6) {
+    return `1000${cleaned}`;
+  }
+  if (cleaned.length > 10) {
+    return cleaned.slice(0, 10);
+  }
+  return null;
 }
 
 function isHeaderOrFooterNoise(item: any): boolean {
@@ -109,9 +132,12 @@ function isHeaderOrFooterNoise(item: any): boolean {
 /**
  * استدعاء مسار الخادم (/api/gemini/parse-table) لقراءة صورة واحدة
  */
-async function callGeminiVisionRaw(dataUrl: string, customPrompt?: string): Promise<any[] | null> {
+async function callGeminiVisionRaw(
+  dataUrl: string,
+  customPrompt?: string
+): Promise<{ items: any[]; fallbackToLocal?: boolean } | null> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 45000);
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
   try {
     const response = await fetch('/api/gemini/parse-table', {
       method: 'POST',
@@ -125,8 +151,11 @@ async function callGeminiVisionRaw(dataUrl: string, customPrompt?: string): Prom
     });
     if (response.ok) {
       const candidateData = await response.json();
+      if (candidateData?.fallbackToLocal) {
+        return { items: [], fallbackToLocal: true };
+      }
       if (candidateData && Array.isArray(candidateData.items) && candidateData.items.length > 0) {
-        return candidateData.items;
+        return { items: candidateData.items };
       }
     }
   } catch {
@@ -158,14 +187,19 @@ function normalizeRawVisionItems(rawItems: any[]): {
       item.part_number ?? item.material_number ?? item.material ?? item.partNumber ?? ''
     ).trim();
 
-    const valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
-    if (valid10DigitPart && valid10DigitPart !== rawPartStr) {
+    const exact10 = strict10DigitRegexFilter(rawPartStr);
+    const valid10DigitPart = exact10 || repair10DigitMaterialClient(rawPartStr);
+    const wasRepaired = Boolean(
+      item.needs_review || (valid10DigitPart && valid10DigitPart !== rawPartStr)
+    );
+    if (wasRepaired) {
       repairedCount++;
     }
 
     const normLocation =
       item.location_code ||
-      dynamicLocationNormalizer(item.location ?? item.storage_bin ?? item.storageBin);
+      dynamicLocationNormalizer(item.location ?? item.storage_bin ?? item.storageBin) ||
+      'D1';
     const isLocValid = isValidSpecificLocation(normLocation);
 
     const isMissing = detectMissingFromCheckMark(item);
@@ -189,7 +223,8 @@ function normalizeRawVisionItems(rawItems: any[]): {
       const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
       const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
       const hasArabicChars = /[\u0600-\u06FF]/.test(rawAiAr);
-      const finalDescAr = hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr;
+      const baseDescAr = hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr;
+      const finalDescAr = wasRepaired ? `⚠️ راجع الرقم — ${baseDescAr}` : baseDescAr;
 
       validatedItems.push({
         part_number: valid10DigitPart,
@@ -203,7 +238,28 @@ function normalizeRawVisionItems(rawItems: any[]): {
         is_missing: isMissing ? 1 : 0,
         remark,
         status: isMissing ? 'غير موجودة' : 'غير مدقق',
-        confidence: 'اقتراح قراءة غير مؤكد',
+        confidence: wasRepaired ? '⚠️ تم ترميم رقم القطعة جزئياً — يرجى المراجعة' : 'اقتراح قراءة غير مؤكد',
+      });
+    } else if (descEn !== 'SPARE PART ASMO' && rawPartStr.replace(/[^0-9]/g, '').length >= 4) {
+      // تضمين السطر في جدول المراجعة مع رقم مرمم وتنبيه واضح بدلاً من إهماله
+      const fallbackDigits = rawPartStr.replace(/[^0-9]/g, '').padEnd(7, '0').slice(0, 7);
+      const fallbackPart = `100${fallbackDigits}`;
+      const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
+      repairedCount++;
+
+      validatedItems.push({
+        part_number: fallbackPart,
+        location_code: isLocValid ? normLocation : 'D1',
+        description_en: descEn,
+        description_ar: `⚠️ يحتاج مراجعة الرقم — ${dictDescAr}`,
+        category,
+        qty_total: total,
+        qty_out: out,
+        qty_remaining: isMissing ? 0 : Math.max(0, total - out),
+        is_missing: isMissing ? 1 : 0,
+        remark,
+        status: isMissing ? 'غير موجودة' : 'غير مدقق',
+        confidence: '⚠️ رقم المادة غير واضح جزئياً — يرجى مراجعته',
       });
     } else {
       const cleanDigits = rawPartStr.replace(/[^0-9]/g, '');
@@ -245,13 +301,14 @@ export function mergeOverlappingSheetRows(
   topRows: ExtractedSparePart[],
   bottomRows: ExtractedSparePart[]
 ): ExtractedSparePart[] {
-  const combinedSource = topRows.length + bottomRows.length > baseRows.length
-    ? [...topRows, ...bottomRows]
-    : baseRows;
+  const combinedSource =
+    topRows.length + bottomRows.length > baseRows.length
+      ? [...topRows, ...bottomRows]
+      : baseRows;
 
   if (topRows.length > 0 && bottomRows.length > 0) {
     const merged: ExtractedSparePart[] = [...topRows];
-    const overlapTail = topRows.slice(-10);
+    const overlapTail = topRows.slice(-12);
     const usedOverlapIndices = new Set<number>();
 
     for (const botRow of bottomRows) {
@@ -304,7 +361,7 @@ export function mergeOverlappingSheetRows(
 
 /**
  * قراءة ورقة الجرد بالكامل عبر المسار الخادمي (/api/gemini/parse-table)
- * مع التفعيل التلقائي للقراءة المقسمة (Top/Bottom Split Scan) إذا كانت الورقة كثيفة ورجعت بأقل من 34 سطراً
+ * مع التفعيل التلقائي للقراءة المقسمة (Top/Bottom Split Scan) إذا كانت الورقة كثيفة ورجعت بأقل من 35 سطراً
  */
 export async function parseTableWithGeminiVision(
   imageSource: string | File | Blob,
@@ -326,14 +383,14 @@ export async function parseTableWithGeminiVision(
             });
 
       cleanImageDataUrl = await prepareImageForAi(rawDataUrl, {
-        maxDimension: 2200,
-        minDimension: 1800,
+        maxDimension: 1850,
+        minDimension: 1500,
         enhanceContrast: true,
       });
     }
 
-    const rawItems = await callGeminiVisionRaw(cleanImageDataUrl);
-    if (!rawItems || rawItems.length === 0) {
+    const firstCall = await callGeminiVisionRaw(cleanImageDataUrl);
+    if (!firstCall || firstCall.fallbackToLocal || firstCall.items.length === 0) {
       return {
         success: false,
         items: [],
@@ -343,24 +400,24 @@ export async function parseTableWithGeminiVision(
       };
     }
 
-    let { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(rawItems);
+    let { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(firstCall.items);
 
-    if (validatedItems.length >= 10 && validatedItems.length < 35) {
+    if (validatedItems.length >= 1 && validatedItems.length < 35) {
       try {
         const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(cleanImageDataUrl);
-        const [topRaw, botRaw] = await Promise.all([
+        const [topRes, botRes] = await Promise.all([
           callGeminiVisionRaw(
             topHalf,
-            'اقرأ جميع صفوف هذا النصف العلوي من جدول الجرد سطراً بسطر دون تخطي أي صف، واستخرج رقم القطعة (10 أرقام) والموقع والكمية والوصف الكامل.'
+            'Read EVERY row in this top half of the SAP inventory table from top to bottom without skipping any row. Extract 10-digit part_number, location, quantity, check_mark, remark, and full description.'
           ),
           callGeminiVisionRaw(
             bottomHalf,
-            'اقرأ جميع صفوف هذا النصف السفلي من جدول الجرد سطراً بسطر حتى آخر سطر في أسفل الورقة دون تخطي أي صف، واستخرج رقم القطعة (10 أرقام) والموقع والكمية والوصف الكامل.'
+            'Read EVERY row in this bottom half of the SAP inventory table down to the very last row (#37) without skipping any row. Extract 10-digit part_number, location, quantity, check_mark, remark, and full description.'
           ),
         ]);
 
-        const topNorm = topRaw ? normalizeRawVisionItems(topRaw) : null;
-        const botNorm = botRaw ? normalizeRawVisionItems(botRaw) : null;
+        const topNorm = topRes?.items?.length ? normalizeRawVisionItems(topRes.items) : null;
+        const botNorm = botRes?.items?.length ? normalizeRawVisionItems(botRes.items) : null;
 
         if (topNorm || botNorm) {
           const merged = mergeOverlappingSheetRows(

@@ -207,34 +207,46 @@ export function isRandomNoiseOrGibberish(text: string): boolean {
   return false;
 }
 
-/**
- * استخراج رقم القطعة الصارم: 10 أرقام تبدأ بـ 100، مع دعم إصلاح الحروف المتشابهة بصرياً في مخرجات Tesseract
- * وفصل الرقم حتى لو التصق بخط جدول عمودي (|) أو كود مصنع (M016 / C006) أو انقسم بمسافة.
- */
-export function extractStrictMaterialNumber(line: string): string | null {
+function isLikelySapRowLine(line: string): boolean {
+  if (
+    /\b(?:C[0Oo]{2}[6bB8]|M[0Oo][1Il|i][6bB8]|[0Oo]{2}2|EA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|PCS|ROL|BOX|N[0Oo1Il|i\d]{2}[A-Za-z]{1,3}[0-9Il|!12]?)\b/i.test(
+      line
+    )
+  ) {
+    return true;
+  }
+  const upper = line.toUpperCase();
+  for (let i = 0; i < TECHNICAL_TERMS_REGEXES.length; i++) {
+    if (TECHNICAL_TERMS_REGEXES[i].test(upper)) return true;
+  }
+  return false;
+}
+
+export function extractMaterialWithRepairInfo(
+  line: string
+): { partNumber: string; needsReview: boolean } | null {
   const exactMatch = line.match(/\b(100\d{7})\b/);
   if (exactMatch) {
-    return exactMatch[1];
+    return { partNumber: exactMatch[1], needsReview: false };
   }
 
   // فحص إذا التصق رقم الـ Material بحدود جدول أو أرقام إضافية ناتجة عن قراءة خط الجدول العمودي | كرقم (مثل 100047007147)
   const gluedMatch = line.match(/(?:^|[^0-9])(100\d{7})\d{0,2}(?=[^0-9]|$)/);
   if (gluedMatch) {
-    return gluedMatch[1];
+    return { partNumber: gluedMatch[1], needsReview: false };
   }
 
   // فحص إذا انقسم رقم القطعة المكون من 10 أرقام بمسافة داخلية (مثل: 10010886 18)
-  const splitMatch = line.match(/\b(100\d{3,6})\s+(\d{1,4})\b/);
+  const splitMatch = line.match(/\b(100\d{2,6})\s+(\d{1,5})\b/);
   if (splitMatch && (splitMatch[1] + splitMatch[2]).length === 10) {
-    return splitMatch[1] + splitMatch[2];
+    return { partNumber: splitMatch[1] + splitMatch[2], needsReview: false };
   }
 
-  // فحص إذا كان السطر سطر جدول SAP حقيقي (يحتوي على C006/M016/002 أو موقع أو وحدة قياس) وابتلع خط الجدول الرقم 1 الأول فبقي 9 أرقام تبدأ بـ 000 أو 001
-  const isSapTableLine = /\b(?:C006|M016|002|EA|SET|PK|PAA|ZYD|KIT|N\d{2}[A-Z]{1,2}\d)\b/i.test(line);
+  const isSapTableLine = isLikelySapRowLine(line);
   if (isSapTableLine) {
     const nineDigitMatch = line.match(/(?:^|[^0-9])(00[01]\d{6})(?=[^0-9]|$)/);
     if (nineDigitMatch) {
-      return `1${nineDigitMatch[1]}`;
+      return { partNumber: `1${nineDigitMatch[1]}`, needsReview: false };
     }
   }
 
@@ -242,30 +254,80 @@ export function extractStrictMaterialNumber(line: string): string | null {
   const tokens = line.split(/[\s|;,\[\]{}()]+/);
   for (const token of tokens) {
     const cleaned = token.replace(/[^A-Za-z0-9]/g, '');
-    if (cleaned.length >= 9 && cleaned.length <= 12) {
+    if (cleaned.length >= 8 && cleaned.length <= 13) {
       const repaired = cleaned
-        .replace(/^[Il|!rRtTsS]/, '1')
+        .replace(/^[Il|!rRtTsS7]/, '1')
         .replace(/[OoQD]/g, '0')
-        .replace(/[Il|!t]/g, '1')
+        .replace(/[Il|!tTrR]/g, '1')
         .replace(/[Zz]/g, '2')
         .replace(/[Ss$]/g, '5')
         .replace(/[Gg]/g, '6')
-        .replace(/[Bb]/g, '8');
+        .replace(/[Bb]/g, '8')
+        .replace(/[q]/g, '9');
       if (/^100\d{7}$/.test(repaired)) {
-        return repaired;
+        return { partNumber: repaired, needsReview: false };
       }
-      if (isSapTableLine && /^100\d{7}\d{1,2}$/.test(repaired)) {
-        return repaired.slice(0, 10);
+      if (/^10\d{8}$/.test(repaired)) {
+        return { partNumber: repaired, needsReview: false };
       }
-      if (isSapTableLine && /^00[01]\d{6}$/.test(repaired)) {
-        return `1${repaired}`;
+      if (isSapTableLine && /^100\d{7}\d{1,3}$/.test(repaired)) {
+        return { partNumber: repaired.slice(0, 10), needsReview: false };
+      }
+      if (isSapTableLine && /^00\d{7}$/.test(repaired)) {
+        return { partNumber: `1${repaired}`, needsReview: false };
       }
     }
     const fallbackRepaired = repair10DigitMaterialCode(token);
-    if (fallbackRepaired) return fallbackRepaired;
+    if (fallbackRepaired) {
+      return { partNumber: fallbackRepaired, needsReview: false };
+    }
+  }
+
+  // إذا كان السطر سطر جدول SAP حقيقي وتأثر رقم المادة جزئياً بخطوط الشبكة (بقي منه 6 إلى 9 أرقام)، نرممه ونضعه في جدول المراجعة مع تنبيه
+  if (isSapTableLine) {
+    for (const token of tokens) {
+      const stripped = token
+        .replace(/(?:C006|M016|002)$/i, '')
+        .replace(/[OoQD]/g, '0')
+        .replace(/[Il|!tTrR]/g, '1')
+        .replace(/[Zz]/g, '2')
+        .replace(/[Ss$]/g, '5')
+        .replace(/[Gg]/g, '6')
+        .replace(/[Bb]/g, '8')
+        .replace(/[^0-9]/g, '');
+      if (stripped.length === 9) {
+        const code = stripped.startsWith('00')
+          ? `1${stripped}`
+          : stripped.startsWith('100')
+          ? `${stripped}0`
+          : `1${stripped}`;
+        return { partNumber: code, needsReview: true };
+      }
+      if (stripped.length === 8) {
+        const code = stripped.startsWith('00')
+          ? `10${stripped}`
+          : stripped.startsWith('100')
+          ? `${stripped}00`
+          : `10${stripped}`;
+        return { partNumber: code, needsReview: true };
+      }
+      if (stripped.length === 7 && (stripped.startsWith('0') || stripped.startsWith('1'))) {
+        const code = stripped.startsWith('100') ? `${stripped}000` : `100${stripped}`;
+        return { partNumber: code.slice(0, 10), needsReview: true };
+      }
+    }
   }
 
   return null;
+}
+
+/**
+ * استخراج رقم القطعة الصارم: 10 أرقام تبدأ بـ 100، مع دعم إصلاح الحروف المتشابهة بصرياً في مخرجات Tesseract
+ * وفصل الرقم حتى لو التصق بخط جدول عمودي (|) أو كود مصنع (M016 / C006) أو انقسم بمسافة.
+ */
+export function extractStrictMaterialNumber(line: string): string | null {
+  const res = extractMaterialWithRepairInfo(line);
+  return res ? res.partNumber : null;
 }
 
 /**
@@ -483,23 +545,25 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     part_number: string;
     location_code: string;
     location?: string;
+    needsReview?: boolean;
   }> = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
 
-    const partNumber = extractStrictMaterialNumber(line);
-    if (!partNumber) {
+    const matInfo = extractMaterialWithRepairInfo(line);
+    if (!matInfo) {
       continue;
     }
 
-    const storageBin = extractStrictStorageBin(line, partNumber);
+    const storageBin = extractStrictStorageBin(line, matInfo.partNumber);
     intermediateRows.push({
       rawLine: line,
-      part_number: partNumber,
+      part_number: matInfo.partNumber,
       location_code: storageBin,
       location: storageBin,
+      needsReview: matInfo.needsReview,
     });
   }
 
@@ -509,19 +573,26 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   // ثانياً: استخراج الكمية والملاحظات والوصف الكامل بعد معرفة الموقع الصحيح لكل سطر
   const finalResults: ExtractedSparePart[] = [];
   for (const row of locationResolved) {
-    const loc = row.location_code;
-    if (!isValidSpecificLocation(loc)) continue;
+    let loc = row.location_code;
+    if (!isValidSpecificLocation(loc)) {
+      if (locationResolved.length >= 4 && !row.rawLine.includes('عام')) {
+        loc = 'D1';
+      } else {
+        continue;
+      }
+    }
 
     const { total } = extractStrictQuantity(row.rawLine, row.part_number, loc);
     const { isMissing, remark, shortage } = extractCheckAndRemark(row.rawLine, loc);
     const { descEn, descAr, category } = extractStrictDescription(row.rawLine, row.part_number, loc);
     const out = isMissing ? 0 : Math.min(total, shortage);
+    const finalDescAr = row.needsReview ? `⚠️ راجع الرقم — ${descAr}` : descAr;
 
     finalResults.push({
       part_number: row.part_number,
       location_code: loc,
       description_en: descEn,
-      description_ar: descAr,
+      description_ar: finalDescAr,
       category,
       qty_total: total,
       qty_out: out,
@@ -529,7 +600,9 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
       is_missing: isMissing,
       remark: remark || undefined,
       status: isMissing ? 'غير موجودة' : 'غير مدقق',
-      confidence: 'اقتراح غير مؤكد: راجع رقم القطعة والكمية والعلامات مقابل الأصل',
+      confidence: row.needsReview
+        ? '⚠️ رقم المادة غير واضح جزئياً: يرجى مراجعته مقابل الورقة'
+        : 'اقتراح غير مؤكد: راجع رقم القطعة والكمية والعلامات مقابل الأصل',
     });
   }
 

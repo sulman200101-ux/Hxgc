@@ -58,16 +58,64 @@ function strict10DigitMaterialFilter(raw: any): string | null {
 
   const repaired = stripped
     .replace(/[OoQD]/g, '0')
-    .replace(/[Il|!]/g, '1')
+    .replace(/[Il|!tTrR]/g, '1')
     .replace(/[Zz]/g, '2')
     .replace(/[Ss$]/g, '5')
     .replace(/[Gg]/g, '6')
     .replace(/[Bb]/g, '8')
+    .replace(/[q]/g, '9')
     .replace(/[^0-9]/g, '');
   if (/^10\d{8}$/.test(repaired)) return repaired;
   if (/^00[01]\d{6}$/.test(repaired)) return `1${repaired}`;
   const m = repaired.match(/(100\d{7})/);
   return m ? m[1] : null;
+}
+
+function repairPartialMaterialForReview(raw: any): { code: string; needsReview: boolean } | null {
+  const exact = strict10DigitMaterialFilter(raw);
+  if (exact) return { code: exact, needsReview: false };
+
+  const str = String(raw ?? '')
+    .trim()
+    .replace(/[OoQD]/g, '0')
+    .replace(/[Il|!tTrR]/g, '1')
+    .replace(/[Zz]/g, '2')
+    .replace(/[Ss$]/g, '5')
+    .replace(/[Gg]/g, '6')
+    .replace(/[Bb]/g, '8')
+    .replace(/[q]/g, '9')
+    .replace(/[^0-9]/g, '');
+
+  if (!str || str.length < 6) return null;
+
+  if (str.length === 9) {
+    if (str.startsWith('00')) return { code: `1${str}`, needsReview: true };
+    if (str.startsWith('100')) return { code: `${str}0`, needsReview: true };
+    if (str.startsWith('10')) return { code: `100${str.slice(2)}`, needsReview: true };
+    return { code: `1${str}`, needsReview: true };
+  }
+
+  if (str.length === 8) {
+    if (str.startsWith('00')) return { code: `10${str}`, needsReview: true };
+    if (str.startsWith('100')) return { code: `${str}00`, needsReview: true };
+    return { code: `10${str}`, needsReview: true };
+  }
+
+  if (str.length === 7) {
+    return { code: `100${str}`, needsReview: true };
+  }
+
+  if (str.length === 6) {
+    return { code: `1000${str}`, needsReview: true };
+  }
+
+  if (str.length > 10) {
+    const sub100 = str.match(/(100\d{7})/);
+    if (sub100) return { code: sub100[1], needsReview: false };
+    return { code: str.slice(0, 10), needsReview: true };
+  }
+
+  return null;
 }
 
 function dynamicLocationNormalizer(rawLoc: any): string {
@@ -154,7 +202,12 @@ app.post('/api/gemini/parse-table', async (req, res) => {
     }
     cleanBase64 = cleanBase64.replace(/\s+/g, '');
 
-    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    const apiKey = (
+      process.env.GEMINI_API_KEY ||
+      process.env.VITE_GEMINI_API_KEY ||
+      process.env.API_KEY ||
+      ''
+    ).trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || isGeminiKeyUnsupported) {
       return res.status(200).json({
         success: false,
@@ -174,17 +227,24 @@ app.post('/api/gemini/parse-table', async (req, res) => {
       },
     });
 
-    const systemInstruction = `You are an industrial Document AI system specialized in reading dense, 37-row SAP Inventory Controller sheets (both upright and rotated 90/180/270 degrees).
+    const systemInstruction = `You are a high-speed industrial Document AI system specialized in reading dense 37-row SAP Inventory Controller sheets (upright or rotated 90/180/270 degrees).
 CRITICAL RULES:
-1. Read the entire table from top to bottom without skipping a single row (all ~37 rows).
-2. Extract each row into the JSON array: part_number (10 digits starting with 100 in Material column), location (Storage Bin column, e.g. N13B1, N16D1; if covered by a checkmark, infer from adjacent row), quantity (printed integer in QTY column, never 0), check_mark ("X" if handwritten X/×, "✓" if checked), is_missing (true only if handwritten X/×), remark (handwritten shortage like "-1" or "-4"), and description (full English Material Description).`;
+1. Read EVERY SINGLE ROW from the first row (#1) to the last row (#37) in order without skipping any row.
+2. For each row, extract:
+   - part_number: 10-digit Material code starting with 100. If partially obscured by a grid line, reconstruct the 10-digit code starting with 100.
+   - location: Storage Bin code (e.g. N13B1, N16D1, N11FL1). If covered by a pen mark, use the adjacent row's Storage Bin.
+   - quantity: Printed integer in QTY column (>= 1).
+   - check_mark: "X" if marked with X/×, "✓" if checked with a checkmark, "" otherwise.
+   - is_missing: true only if marked with X/×.
+   - remark: Handwritten shortage in Remark column like "-1" or "-4", or "" if none/F-mark.
+   - description: Full English Material Description.`;
 
     const prompt =
       typeof customPrompt === 'string' && customPrompt.trim()
         ? customPrompt.trim()
-        : `Read every single row of this SAP Inventory Controller table from top to bottom without skipping any row (all ~37 rows). Extract part_number (10 digits), location (Storage Bin), quantity (QTY integer), check_mark, is_missing, remark, and full English description.`;
+        : `Extract all rows (from row 1 to row 37 without skipping any row) from this SAP Inventory Controller table. Return the complete JSON array.`;
 
-    const candidateModels = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-flash-latest'];
     let response: any = null;
 
     for (const modelName of candidateModels) {
@@ -204,10 +264,15 @@ CRITICAL RULES:
           },
           config: {
             systemInstruction,
+            temperature: 0.1,
+            maxOutputTokens: 8192,
+            ...(modelName.startsWith('gemini-2.5')
+              ? { thinkingConfig: { thinkingBudget: 0 } }
+              : {}),
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.ARRAY,
-              description: 'قائمة بجميع صفوف جدول الجرد بالكامل دون تخطي أي سطر',
+              description: 'قائمة بجميع صفوف جدول الجرد بالكامل (جميع الـ 37 سطراً) دون تخطي أي سطر',
               items: {
                 type: Type.OBJECT,
                 required: ['part_number', 'location', 'quantity', 'description'],
@@ -215,7 +280,7 @@ CRITICAL RULES:
                   seq: { type: Type.INTEGER },
                   part_number: {
                     type: Type.STRING,
-                    description: 'Exact 10-digit Material code starting with 100.',
+                    description: '10-digit Material code starting with 100.',
                   },
                   location: {
                     type: Type.STRING,
@@ -232,7 +297,6 @@ CRITICAL RULES:
                     type: Type.STRING,
                     description: 'Full English Material Description.',
                   },
-                  description_ar: { type: Type.STRING },
                 },
               },
             },
@@ -334,8 +398,10 @@ CRITICAL RULES:
           ''
       ).trim();
 
-      const finalPartNumber = strict10DigitMaterialFilter(rawPart);
-      const normLocation = item._normLocation || '';
+      const repairedMat = repairPartialMaterialForReview(rawPart);
+      const finalPartNumber = repairedMat?.code || null;
+      const needsReview = repairedMat?.needsReview || false;
+      const normLocation = item._normLocation || 'D1';
       const rawQty = item.quantity ?? item.qty ?? item.total_qty ?? 1;
       const normQuantity = Math.max(1, charToDigitMapper(rawQty, 1));
       const isMissing = detectMissingFromCheckMark(item);
@@ -348,7 +414,7 @@ CRITICAL RULES:
       const rawRemark = item.remark ? String(item.remark).trim() : '';
       const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
       const remark = minusMatch ? `-${minusMatch[1] || minusMatch[2]}` : '';
-      const seqNum = item.seq ? Number(item.seq) : undefined;
+      const seqNum = item.seq ? Number(item.seq) : idx + 1;
       const rawDesc = String(item.description ?? item.description_en ?? item.desc ?? '').trim();
       const desc = rawDesc.length >= 2 ? rawDesc : 'SPARE PART ASMO';
       const descAr = item.description_ar ? String(item.description_ar).trim() : '';
@@ -370,6 +436,7 @@ CRITICAL RULES:
           description: desc,
           description_en: desc,
           description_ar: descAr,
+          needs_review: needsReview,
         });
       } else if (rawPart.replace(/[^0-9]/g, '').length > 0) {
         const cleanDigits = rawPart.replace(/[^0-9]/g, '');
@@ -419,7 +486,12 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
       .replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '')
       .replace(/\s+/g, '');
 
-    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    const apiKey = (
+      process.env.GEMINI_API_KEY ||
+      process.env.VITE_GEMINI_API_KEY ||
+      process.env.API_KEY ||
+      ''
+    ).trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
       return res.status(503).json({ error: 'مفتاح الخدمة السحابية غير متوفر' });
     }
@@ -472,13 +544,16 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
 يجب قراءة الجدول بالكامل من البداية للنهاية دون تخطي أي صف، ووضع قيم فارغة "" للحقول غير المقروءة.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       contents: [
         prompt,
         { inlineData: { data: cleanBase64, mimeType } },
       ],
       config: {
         systemInstruction,
+        temperature: 0.1,
+        maxOutputTokens: 8192,
+        thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
         responseSchema,
       },
@@ -502,7 +577,12 @@ app.post('/api/gemini/extract-part', async (req, res) => {
       .replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '')
       .replace(/\s+/g, '');
 
-    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    const apiKey = (
+      process.env.GEMINI_API_KEY ||
+      process.env.VITE_GEMINI_API_KEY ||
+      process.env.API_KEY ||
+      ''
+    ).trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
       return res.status(503).json({ error: 'مفتاح الخدمة السحابية غير متوفر' });
     }
@@ -521,12 +601,14 @@ app.post('/api/gemini/extract-part', async (req, res) => {
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       contents: [
         prompt,
         { inlineData: { data: cleanBase64, mimeType } },
       ],
       config: {
+        temperature: 0.1,
+        thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,

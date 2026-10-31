@@ -431,16 +431,29 @@ export function BatchDocumentsPanel({
               )}
 
               <div className="max-h-72 overflow-y-auto space-y-1.5 pr-1">
-                {sheet.lines.map((line, index) => (
+                {sheet.lines.map((line, index) => {
+                  const isRepairedRow = Boolean(line.description_ar?.startsWith('⚠️'));
+                  return (
                   <div
                     key={index}
-                    className="border border-stone-800 py-1.5 px-2 rounded-lg bg-stone-900/50 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    className={`border py-1.5 px-2 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs ${
+                      isRepairedRow
+                        ? 'border-amber-500/80 bg-amber-950/40'
+                        : 'border-stone-800 bg-stone-900/50'
+                    }`}
                   >
                     <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] font-mono text-neutral-400 w-5 text-center">
+                        {index + 1}
+                      </span>
                       <input
                         required
                         pattern="[0-9]{10}"
-                        className="bg-stone-800 px-1.5 py-1 w-28 rounded font-mono text-amber-300"
+                        className={`px-1.5 py-1 w-28 rounded font-mono ${
+                          isRepairedRow
+                            ? 'bg-amber-900/60 text-amber-200 border border-amber-400/60'
+                            : 'bg-stone-800 text-amber-300'
+                        }`}
                         value={line.part_number}
                         onChange={(e) =>
                           patchLine(sheet.key, index, {
@@ -513,7 +526,8 @@ export function BatchDocumentsPanel({
                       </button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           );

@@ -40,7 +40,8 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
         }
       }
 
-      const radius = Math.max(24, Math.round(Math.min(width, height) / 28));
+      const radius = Math.max(20, Math.round(Math.min(width, height) / 32));
+      const outGray = new Uint8ClampedArray(width * height);
 
       for (let y = 0; y < height; y++) {
         const y0 = Math.max(0, y - radius);
@@ -54,29 +55,54 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
             integral[y0 * intW + x1] -
             integral[y1 * intW + x0] +
             integral[y0 * intW + x0];
-          const localBg = Math.max(60, localSum / count);
+          const localBg = Math.max(65, localSum / count);
           const px = gray[y * width + x];
 
-          // تطبيع البكسل نسبةً لإضاءة الورقة المحيطة به بحيث تصبح الخلفية بيضاء نقية (250) والنص داكناً واضحاً دون مسح الحروف الباهتة
           const ratio = px / localBg;
-          let normalized = ratio * 248;
-          if (ratio < 0.88) {
-            // تقوية الحبر الرمادي والكتابة اليدوية ليظهر بوضوح تام في القراءة
-            normalized = Math.max(0, (ratio - 0.42) * 360);
+          let normalized: number;
+          if (ratio < 0.91) {
+            // تقوية الحروف والأرقام الرفيعة في الجداول الكثيفة (37 سطراً) دون طمسها
+            normalized = Math.max(0, (ratio - 0.54) * 340);
           } else {
-            normalized = Math.min(255, 225 + (ratio - 0.88) * 250);
+            normalized = 252;
           }
 
-          const finalVal = Math.min(255, Math.max(0, Math.round(normalized)));
-          const idx = (y * width + x) * 4;
-          data[idx] = finalVal;
-          data[idx + 1] = finalVal;
-          data[idx + 2] = finalVal;
+          outGray[y * width + x] = Math.min(255, Math.max(0, Math.round(normalized)));
         }
       }
 
+      // تخفيف خطوط الشبكة الأفقية الرفيعة (1-2 بكسل) التي تلتصق بأعلى أو أسفل الأرقام دون المساس بالحروف
+      const span = Math.max(28, Math.round(width / 35));
+      for (let y = 2; y < height - 2; y++) {
+        let runLen = 0;
+        for (let x = 0; x < width; x++) {
+          if (outGray[y * width + x] < 160) {
+            runLen++;
+          } else {
+            if (runLen >= span) {
+              for (let k = x - runLen; k < x; k++) {
+                const above = outGray[(y - 2) * width + k];
+                const below = outGray[(y + 2) * width + k];
+                if (above > 210 && below > 210) {
+                  outGray[y * width + k] = 245;
+                }
+              }
+            }
+            runLen = 0;
+          }
+        }
+      }
+
+      for (let j = 0; j < outGray.length; j++) {
+        const val = outGray[j];
+        const idx = j * 4;
+        data[idx] = val;
+        data[idx + 1] = val;
+        data[idx + 2] = val;
+      }
+
       ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL('image/jpeg', 0.92));
+      resolve(canvas.toDataURL('image/jpeg', 0.9));
     };
 
     img.onerror = (err) => reject(err);

@@ -125,8 +125,8 @@ export async function splitImageIntoOverlappingHalves(
         botCtx?.drawImage(img, 0, botY, w, botH, 0, 0, w, botH);
 
         resolve({
-          topHalf: topCanvas.toDataURL('image/jpeg', 0.92),
-          bottomHalf: botCanvas.toDataURL('image/jpeg', 0.92),
+          topHalf: topCanvas.toDataURL('image/jpeg', 0.9),
+          bottomHalf: botCanvas.toDataURL('image/jpeg', 0.9),
         });
       } catch {
         resolve({ topHalf: imageSource, bottomHalf: imageSource });
@@ -134,6 +134,52 @@ export async function splitImageIntoOverlappingHalves(
     };
 
     img.onerror = () => resolve({ topHalf: imageSource, bottomHalf: imageSource });
+    img.src = imageSource;
+  });
+}
+
+/**
+ * تقسيم الورقة الكثيفة (37 سطراً) إلى 3 شرائح أفقية متداخلة (علوية، وسطى، سفلية)
+ * لضمان قراءة الأسطر الوسطى والسفلية بالكامل دون ضياع أي سطر في المحرك المحلي
+ */
+export async function splitImageIntoThreeBands(
+  imageSource: string
+): Promise<{ topBand: string; midBand: string; botBand: string }> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (w < 300 || h < 300) {
+          return resolve({ topBand: imageSource, midBand: imageSource, botBand: imageSource });
+        }
+
+        const cropBand = (startRatio: number, endRatio: number): string => {
+          const sy = Math.round(h * startRatio);
+          const sh = Math.max(1, Math.round(h * endRatio) - sy);
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = sh;
+          const ctx = canvas.getContext('2d', { alpha: false });
+          ctx?.drawImage(img, 0, sy, w, sh, 0, 0, w, sh);
+          return canvas.toDataURL('image/jpeg', 0.9);
+        };
+
+        resolve({
+          topBand: cropBand(0, 0.42),
+          midBand: cropBand(0.29, 0.71),
+          botBand: cropBand(0.58, 1.0),
+        });
+      } catch {
+        resolve({ topBand: imageSource, midBand: imageSource, botBand: imageSource });
+      }
+    };
+
+    img.onerror = () =>
+      resolve({ topBand: imageSource, midBand: imageSource, botBand: imageSource });
     img.src = imageSource;
   });
 }
