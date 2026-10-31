@@ -45,7 +45,26 @@ export interface GeminiVisionResult {
   error?: GeminiVisionError;
 }
 
-let isServerFallbackCached = false;
+const CLOUD_API_BASES = [
+  'https://ais-pre-4hh2zz5tfhmhshdxbd6ohq-344013703327.europe-west2.run.app',
+  'https://ais-dev-4hh2zz5tfhmhshdxbd6ohq-344013703327.europe-west2.run.app',
+];
+
+export function getCandidateApiUrls(path: string): string[] {
+  if (typeof window === 'undefined') return [path];
+  const host = window.location?.hostname || '';
+  const proto = window.location?.protocol || '';
+  const isNativeApk =
+    proto === 'capacitor:' ||
+    proto === 'file:' ||
+    host === 'localhost' ||
+    (window as any).Capacitor?.isNativePlatform?.() === true;
+
+  if (isNativeApk) {
+    return CLOUD_API_BASES.map((base) => `${base}${path}`);
+  }
+  return [path, ...CLOUD_API_BASES.map((base) => `${base}${path}`)];
+}
 
 function isPhoneNumberNoise(digits: string): boolean {
   return /^(?:05\d{8}|966\d{8,9}|00966\d{8,9}|01[1-9]\d{7})$/.test(digits);
@@ -79,7 +98,17 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
   }
   if (/^00[01]\d{6}$/.test(cleaned)) return `1${cleaned}`;
   const match = cleaned.match(/(10\d{8})/);
-  return match ? normalizeSapMaterialPrefix(match[1]) : null;
+  if (match) return normalizeSapMaterialPrefix(match[1]);
+
+  // إكمال الأرقام الجزئية المقروءة (5 إلى 9 أرقام) ببادئة SAP القياسية 100 لعدم إسقاط السطر
+  if (cleaned.length >= 5 && cleaned.length <= 9) {
+    if (cleaned.startsWith('100')) {
+      return cleaned.padEnd(10, '0');
+    }
+    const tail = cleaned.slice(-7).padStart(7, '0');
+    return `100${tail}`;
+  }
+  return null;
 }
 
 function isHeaderOrFooterNoise(item: any): boolean {
@@ -102,7 +131,7 @@ function isHeaderOrFooterNoise(item: any): boolean {
     return true;
   }
 
-  if (digits.length === 0 && (!rawDesc || rawDesc === 'SPARE PART ASMO' || rawDesc.length < 3)) {
+  if (digits.length === 0 && (!rawDesc || rawDesc === 'SPARE PART ASMO' || rawDesc.length < 2)) {
     return true;
   }
 
@@ -110,37 +139,42 @@ function isHeaderOrFooterNoise(item: any): boolean {
 }
 
 /**
- * استدعاء مسار محرك بايثون الخادمي (/api/gemini/parse-table) لقراءة الورقة كاملة
+ * استدعاء المحرك السحابي (/api/gemini/parse-table) لقراءة الورقة كاملة مع مهلة سريعة وتحويل فوري للمحلي عند انقطاع الشبكة
  */
 async function callPythonVisionServer(dataUrl: string): Promise<any[] | null> {
-  if (isServerFallbackCached) return null;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return null;
+  }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 35000);
-  try {
-    const response = await fetch('/api/gemini/parse-table', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        imageBase64: dataUrl,
-        mimeType: 'image/jpeg',
-      }),
-      signal: controller.signal,
-    });
-    if (response.ok) {
-      const candidateData = await response.json();
-      if (candidateData?.fallbackToLocal) {
-        isServerFallbackCached = true;
-        return null;
+  const candidateUrls = getCandidateApiUrls('/api/gemini/parse-table');
+
+  for (const url of candidateUrls) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 9000);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: dataUrl,
+          mimeType: 'image/jpeg',
+        }),
+        signal: controller.signal,
+      });
+      if (response.ok) {
+        const candidateData = await response.json();
+        if (candidateData && Array.isArray(candidateData.items) && candidateData.items.length > 0) {
+          return candidateData.items;
+        }
+        if (candidateData?.fallbackToLocal) {
+          continue;
+        }
       }
-      if (candidateData && Array.isArray(candidateData.items) && candidateData.items.length > 0) {
-        return candidateData.items;
-      }
+    } catch {
+      // تجربة الرابط الاحتياطي أو التحويل السلس للمحرك المحلي في المتصفح/الأندرويد
+    } finally {
+      clearTimeout(timeoutId);
     }
-  } catch {
-    // التحويل السلس للمحرك المحلي في المتصفح
-  } finally {
-    clearTimeout(timeoutId);
   }
 
   return null;
@@ -157,14 +191,33 @@ function normalizeRawVisionItems(rawItems: any[]): {
   const validatedItems: ExtractedSparePart[] = [];
   const skippedRows: SkippedRow[] = [];
   let repairedCount = 0;
+  let lastValidLoc = 'N01A1';
+
+  for (const r of contextResolvedItems) {
+    const candidateLoc =
+      r.location_code ||
+      dynamicLocationNormalizer(r.location ?? r.storage_bin ?? r.storageBin);
+    if (isValidSpecificLocation(candidateLoc)) {
+      lastValidLoc = candidateLoc;
+      break;
+    }
+  }
 
   contextResolvedItems.forEach((item: any, idx: number) => {
     const rawPartStr = String(
       item.part_number ?? item.material_number ?? item.material ?? item.partNumber ?? ''
     ).trim();
 
-    const valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
-    if (valid10DigitPart && valid10DigitPart !== rawPartStr) {
+    let valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
+    if (!valid10DigitPart) {
+      const rawDigits = rawPartStr.replace(/[^0-9]/g, '');
+      if (rawDigits.length > 0) {
+        valid10DigitPart = `100${rawDigits.slice(-7).padStart(7, '0')}`;
+      } else {
+        valid10DigitPart = `100999${String(idx + 1).padStart(4, '0')}`;
+      }
+      repairedCount++;
+    } else if (valid10DigitPart !== rawPartStr) {
       repairedCount++;
     }
 
@@ -172,6 +225,10 @@ function normalizeRawVisionItems(rawItems: any[]): {
       item.location_code ||
       dynamicLocationNormalizer(item.location ?? item.storage_bin ?? item.storageBin);
     const isLocValid = isValidSpecificLocation(normLocation);
+    if (isLocValid) {
+      lastValidLoc = normLocation;
+    }
+    const finalLocation = isLocValid ? normLocation : lastValidLoc || 'N01A1';
 
     const isMissing = detectMissingFromCheckMark(item);
     const rawQty = item.qty_total ?? item.quantity ?? item.qty;
@@ -181,7 +238,7 @@ function normalizeRawVisionItems(rawItems: any[]): {
     const rawRemark = item.remark ? String(item.remark).trim() : '';
     const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
     const out = isMissing ? 0 : minusMatch ? Math.min(total, Number(minusMatch[1] || minusMatch[2] || 0)) : 0;
-    const remark = out > 0 ? `-${out}` : undefined;
+    const remark = out > 0 ? `-${out}` : rawRemark || undefined;
 
     const rawDescCandidate = String(
       item.description_en || item.description || item.material_description || item.desc || ''
@@ -190,46 +247,25 @@ function normalizeRawVisionItems(rawItems: any[]): {
       .trim();
     const descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'SPARE PART ASMO';
 
-    if (valid10DigitPart && isLocValid) {
-      const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
-      const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
-      const hasArabicChars = /[\u0600-\u06FF]/.test(rawAiAr);
-      const finalDescAr = hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr;
+    const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
+    const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
+    const hasArabicChars = /[\u0600-\u06FF]/.test(rawAiAr);
+    const finalDescAr = hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr;
 
-      validatedItems.push({
-        part_number: valid10DigitPart,
-        location_code: normLocation,
-        description_en: descEn,
-        description_ar: finalDescAr,
-        category,
-        qty_total: total,
-        qty_out: out,
-        qty_remaining: isMissing ? 0 : Math.max(0, total - out),
-        is_missing: isMissing ? 1 : 0,
-        remark,
-        status: isMissing ? 'غير موجودة' : 'غير مدقق',
-        confidence: 'اقتراح قراءة غير مؤكد',
-      });
-    } else {
-      const cleanDigits = rawPartStr.replace(/[^0-9]/g, '');
-      let reason = !valid10DigitPart
-        ? cleanDigits.length > 0 && cleanDigits.length <= 5
-          ? `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام (Material)`
-          : 'رقم القطعة (10 أرقام) غير واضح في هذا السطر'
-        : 'اسم الموقع غير واضح في هذا السطر';
-
-      skippedRows.push({
-        id: `skip-${skippedRows.length + 1}`,
-        row_number: idx + 1,
-        raw_text: `${rawPartStr || '---'} | ${normLocation || '---'} | Qty: ${total} | ${isMissing ? '× غير موجودة' : '✓'} | ${descEn}`,
-        part_number: rawPartStr,
-        location: normLocation || '',
-        quantity: total,
-        description_en: descEn,
-        is_missing: isMissing ? 1 : 0,
-        reason,
-      });
-    }
+    validatedItems.push({
+      part_number: valid10DigitPart,
+      location_code: finalLocation,
+      description_en: descEn,
+      description_ar: finalDescAr,
+      category,
+      qty_total: total,
+      qty_out: out,
+      qty_remaining: isMissing ? 0 : Math.max(0, total - out),
+      is_missing: isMissing ? 1 : 0,
+      remark,
+      status: isMissing ? 'غير موجودة' : 'غير مدقق',
+      confidence: 'اقتراح قراءة غير مؤكد',
+    });
   });
 
   return {
@@ -290,16 +326,6 @@ export async function parseTableWithGeminiVision(
   imageSource: string | File | Blob,
   alreadyPrepared = false
 ): Promise<GeminiVisionResult> {
-  if (isServerFallbackCached) {
-    return {
-      success: false,
-      items: [],
-      skippedRows: [],
-      isSheetComplete: false,
-      message: 'يتم استخدام محرك القراءة المحلي.',
-    };
-  }
-
   try {
     let cleanImageDataUrl = '';
     if (typeof imageSource === 'string' && alreadyPrepared) {

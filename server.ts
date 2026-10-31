@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 
 dotenv.config();
 
@@ -47,7 +48,92 @@ if (fs.existsSync(ocrStaticPath)) {
 let pythonEnvUnavailable = false;
 
 /**
- * تشغيل محرك بايثون الذكي (OpenCV + NumPy + C++ Tesseract Multi-Core) مباشرةً بدون الحاجة إلى Gemini API
+ * قراءة جدول الجرد السحابية السريعة عبر Gemini Vision (gemini-3.8-flash)
+ * تستخرج كافة السطور المقروءة حتى لو كان بعض النص باهتاً أو غير مكتمل
+ */
+async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'undefined' || apiKey.trim() === '') {
+    return null;
+  }
+
+  try {
+    const mimeMatch = imageBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,/i);
+    const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+    const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
+    if (!cleanBase64) return null;
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: [
+        {
+          inlineData: {
+            mimeType,
+            data: cleanBase64,
+          },
+        },
+        {
+          text: `اقرأ ورقة جرد SAP هذه بالكامل واستخرج جميع السطور الموجودة في الجدول من أول سطر حتى آخر سطر دون ترك أي سطر حتى لو كان رقم القطعة أو الموقع باهتاً أو غير مكتمل.
+لكل سطر في الجدول استخرج:
+- part_number: رقم القطعة في عمود Material (عادة 10 أرقام تبدأ بـ 100، أو اكتب الأرقام المقروءة كما هي إن كانت ناقصة).
+- location_code: رمز الموقع في عمود Storage Bin (مثل N01A1, N15BB2, N11C2, D1، أو اتركه فارغاً إن لم يظهر ليستنتجه النظام من السطور المجاورة).
+- qty_total: الكمية الرقمية في عمود QTY بعد وحدة القياس (EA, SET, PK, PAA, ZYD, SH, KIT).
+- is_missing: ضع 1 فقط إذا وجدت علامة خطأ (X أو ×) صريحة في عمود Check، وضع 0 إذا كانت علامة صح (✓) أو فارغة.
+- remark: الملاحظات المكتوبة باليد مثل -1 أو -4 أو F2 إن وجدت، وإلا نص فارغ.
+- description_en: الوصف الإنجليزي الكامل للقطعة في عمود Material Description.`,
+        },
+      ],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            items: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  part_number: { type: Type.STRING },
+                  location_code: { type: Type.STRING },
+                  qty_total: { type: Type.NUMBER },
+                  is_missing: { type: Type.NUMBER },
+                  remark: { type: Type.STRING },
+                  description_en: { type: Type.STRING },
+                },
+                required: ['part_number', 'location_code', 'qty_total', 'description_en'],
+              },
+            },
+          },
+          required: ['items'],
+        },
+      },
+    });
+
+    const text = response.text?.trim();
+    if (!text) return null;
+    const parsed = JSON.parse(text);
+    if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0) {
+      return {
+        success: true,
+        items: parsed.items,
+        skipped_rows: [],
+      };
+    }
+    return null;
+  } catch (err) {
+    console.warn('Gemini Vision OCR fallback notice:', err);
+    return null;
+  }
+}
+
+/**
+ * تشغيل محرك بايثون الذكي (OpenCV + NumPy + C++ Tesseract Multi-Core) كبديل خادمي
  */
 function runPythonTableOcr(imageBase64: string): Promise<any> {
   if (pythonEnvUnavailable) {
@@ -168,7 +254,7 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
   });
 }
 
-// مسار القراءة الرئيسي المعتمد كلياً على بايثون (OpenCV + OCR) مع الإبقاء على نفس الرابط لتوافق الواجهة
+// مسار القراءة السحابي الهجين (Gemini Vision السريع أولاً ثم بايثون ثم البديل المحلي التلقائي)
 app.post('/api/gemini/parse-table', async (req, res) => {
   try {
     const { imageBase64 } = req.body;
@@ -181,6 +267,11 @@ app.post('/api/gemini/parse-table', async (req, res) => {
       });
     }
 
+    const geminiResult = await runGeminiVisionTableOcr(String(imageBase64));
+    if (geminiResult && geminiResult.success && Array.isArray(geminiResult.items) && geminiResult.items.length > 0) {
+      return res.status(200).json(geminiResult);
+    }
+
     const result = await runPythonTableOcr(String(imageBase64));
     return res.status(200).json(result);
   } catch (error: any) {
@@ -189,7 +280,7 @@ app.post('/api/gemini/parse-table', async (req, res) => {
       fallbackToLocal: true,
       items: [],
       skipped_rows: [],
-      message: error?.message || 'حدث خطأ أثناء معالجة الصورة عبر محرك بايثون',
+      message: error?.message || 'حدث خطأ أثناء معالجة الصورة، يتم التحويل للمحرك المحلي',
     });
   }
 });
@@ -219,7 +310,8 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
     if (!imageBase64) {
       return res.status(400).json({ error: 'الصورة غير متوفرة' });
     }
-    const result = await runPythonTableOcr(String(imageBase64));
+    const geminiResult = await runGeminiVisionTableOcr(String(imageBase64));
+    const result = geminiResult?.success ? geminiResult : await runPythonTableOcr(String(imageBase64));
     if (result?.success && Array.isArray(result.items)) {
       return res.status(200).json(
         result.items.map((item: any) => ({
@@ -233,7 +325,7 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
     }
     return res.status(200).json([]);
   } catch {
-    return res.status(500).json({ error: 'تعذر قراءة الجدول عبر محرك بايثون.' });
+    return res.status(500).json({ error: 'تعذر قراءة الجدول.' });
   }
 });
 
@@ -243,7 +335,8 @@ app.post('/api/gemini/extract-part', async (req, res) => {
     if (!imageBase64) {
       return res.status(400).json({ error: 'الصورة غير متوفرة' });
     }
-    const result = await runPythonTableOcr(String(imageBase64));
+    const geminiResult = await runGeminiVisionTableOcr(String(imageBase64));
+    const result = geminiResult?.success ? geminiResult : await runPythonTableOcr(String(imageBase64));
     const first = result?.items?.[0];
     return res.status(200).json({
       part_number: first?.part_number || '',
@@ -256,20 +349,27 @@ app.post('/api/gemini/extract-part', async (req, res) => {
   }
 });
 
-const apkFilePath = path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk');
+const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v1.6.0.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.6.0.apk'),
+  path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
+];
 
 const handleApkDownload = (_req: express.Request, res: express.Response) => {
-  if (fs.existsSync(apkFilePath)) {
-    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-    res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-release.apk"');
-    return res.sendFile(apkFilePath);
+  for (const candidate of apkCandidates) {
+    if (fs.existsSync(candidate)) {
+      res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v1.6.0.apk"');
+      return res.sendFile(candidate);
+    }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.5.0/asmo-inventory-v1.5.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.6.0/asmo-inventory-v1.6.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
+app.get('/asmo-inventory-v1.6.0.apk', handleApkDownload);
 app.get('/api/download-apk', handleApkDownload);
 
 async function startServer() {

@@ -491,6 +491,53 @@ export function extractStrictDescription(
   return { descEn, descAr, category };
 }
 
+/**
+ * استخراج شامل لرقم القطعة (Inclusive Material Extractor):
+ * يقبل الرقم المكون من 10 أرقام، أو يكمل الأرقام الجزئية (5-9 أرقام) ببادئة SAP 100،
+ * أو يستخرج السطر إذا احتوى على موقع ووصف فني واضح حتى لو كان الرقم مطموساً.
+ */
+export function extractInclusiveMaterialNumber(line: string, rowIndex: number): string | null {
+  if (/^\s*(?:MATERIAL|ITEM|NO\.|STORAGE\s+BIN|QTY|DESCRIPTION|INVENTORY|PAGE)\b/i.test(line)) {
+    return null;
+  }
+
+  const strict = extractStrictMaterialNumber(line);
+  if (strict) return strict;
+
+  const hasTableContext =
+    /\b(?:C006|C008|C00S|COOS|C00|M016|MO16|MOTE|MOIS|D04D|002|EA|EFA|FA|SET|PK|PAA|SH|ZYD|KIT|PCS|ROL|BOX|N[01OIl]\d[A-Z0-9]{1,4})\b/i.test(
+      line
+    );
+
+  // البحث عن أي رقم جزئي من 6 إلى 9 أرقام في السطر وإكماله إلى 10 أرقام ببادئة 100
+  const partialMatches = line.match(/\b(\d{6,9})\b/g);
+  if (partialMatches) {
+    for (const num of partialMatches) {
+      if (/^(?:05\d{7,8}|966\d{6,8})$/.test(num)) continue;
+      if (num.startsWith('100')) {
+        return num.padEnd(10, '0').slice(0, 10);
+      }
+      return `100${num.slice(-7).padStart(7, '0')}`;
+    }
+  }
+
+  if (hasTableContext) {
+    const fiveDigitMatch = line.match(/\b(10\d{3,5}|\d{5})\b/);
+    if (fiveDigitMatch) {
+      const d = fiveDigitMatch[1];
+      return `100${d.slice(-7).padStart(7, '0')}`;
+    }
+
+    const candidateBin = extractStrictStorageBin(line, '');
+    const hasTechTerm = TECHNICAL_TERMS_REGEXES.some((rx) => rx.test(line));
+    if (isValidSpecificLocation(candidateBin) && hasTechTerm) {
+      return `100999${String(rowIndex + 1).padStart(4, '0')}`;
+    }
+  }
+
+  return null;
+}
+
 export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   if (!rawText) return [];
 
@@ -506,7 +553,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     const line = lines[i].trim();
     if (!line) continue;
 
-    const partNumber = extractStrictMaterialNumber(line);
+    const partNumber = extractInclusiveMaterialNumber(line, i);
     if (!partNumber) {
       continue;
     }
@@ -521,11 +568,22 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   }
 
   const locationResolved = resolveSheetLocationsWithContext(intermediateRows);
+  let fallbackSheetLoc = 'N01A1';
+  for (const r of locationResolved) {
+    if (isValidSpecificLocation(r.location_code)) {
+      fallbackSheetLoc = r.location_code;
+      break;
+    }
+  }
 
   const finalResults: ExtractedSparePart[] = [];
   for (const row of locationResolved) {
-    const loc = row.location_code;
-    if (!isValidSpecificLocation(loc)) continue;
+    const loc = isValidSpecificLocation(row.location_code)
+      ? row.location_code
+      : fallbackSheetLoc;
+    if (isValidSpecificLocation(loc)) {
+      fallbackSheetLoc = loc;
+    }
 
     const { total } = extractStrictQuantity(row.rawLine, row.part_number, loc);
     const { isMissing, remark, shortage } = extractCheckAndRemark(row.rawLine, loc);

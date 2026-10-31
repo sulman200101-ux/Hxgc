@@ -53,6 +53,63 @@ function applyFastUnsharpMask(imageData: ImageData, amount = 0.45): void {
 }
 
 /**
+ * معايرة تلقائية فائقة السرعة لاتجاه الورقة (<15ms) قبل بدء القراءة
+ * تقارن طاقة تدرج السطور الأفقية مقابل العمودية مع نسبة الأبعاد لتحديد ما إذا كانت الورقة مصورة بشكل طولي تحتاج تدوير 90° عكس عقارب الساعة
+ */
+function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
+  const origW = img.naturalWidth || img.width;
+  const origH = img.naturalHeight || img.height;
+  if (origH > origW * 1.06) {
+    return true;
+  }
+  if (origW > origH * 1.25) {
+    return false;
+  }
+
+  try {
+    const sampleSize = 180;
+    const c = document.createElement('canvas');
+    c.width = sampleSize;
+    c.height = sampleSize;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return origH > origW;
+    ctx.drawImage(img, 0, 0, sampleSize, sampleSize);
+    const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
+
+    let horizRowEnergy = 0;
+    let vertColEnergy = 0;
+
+    for (let y = 16; y < sampleSize - 16; y += 2) {
+      let rowDiffSum = 0;
+      for (let x = 16; x < sampleSize - 16; x += 2) {
+        const idx = (y * sampleSize + x) * 4;
+        const idxAbove = ((y - 1) * sampleSize + x) * 4;
+        const lum = data[idx] * 0.3 + data[idx + 1] * 0.59 + data[idx + 2] * 0.11;
+        const lumAbove = data[idxAbove] * 0.3 + data[idxAbove + 1] * 0.59 + data[idxAbove + 2] * 0.11;
+        rowDiffSum += Math.abs(lum - lumAbove);
+      }
+      horizRowEnergy += rowDiffSum;
+    }
+
+    for (let x = 16; x < sampleSize - 16; x += 2) {
+      let colDiffSum = 0;
+      for (let y = 16; y < sampleSize - 16; y += 2) {
+        const idx = (y * sampleSize + x) * 4;
+        const idxLeft = (y * sampleSize + (x - 1)) * 4;
+        const lum = data[idx] * 0.3 + data[idx + 1] * 0.59 + data[idx + 2] * 0.11;
+        const lumLeft = data[idxLeft] * 0.3 + data[idxLeft + 1] * 0.59 + data[idxLeft + 2] * 0.11;
+        colDiffSum += Math.abs(lum - lumLeft);
+      }
+      vertColEnergy += colDiffSum;
+    }
+
+    return vertColEnergy > horizRowEnergy * 1.22;
+  } catch {
+    return origH > origW;
+  }
+}
+
+/**
  * معايرة وتجهيز الصورة لـ Gemini Vision ومحرك القراءة بدقة وسرعة فائقة
  */
 export async function prepareImageForAi(
@@ -68,7 +125,11 @@ export async function prepareImageForAi(
         const origW = img.naturalWidth || img.width;
         const origH = img.naturalHeight || img.height;
 
-        const shouldRotateCcw = options.forceRotateCcw === true;
+        const shouldRotateCcw =
+          options.forceRotateCcw !== undefined
+            ? options.forceRotateCcw === true
+            : options.autoRotate !== false && detectSidewaysTableOrientation(img);
+
         // 1600px هو الحجم المثالي لبلاطات Gemini Vision (2x2 tiles) — أسرع بـ 2.5x من 2200px مع وضوح كامل للـ 37 سطراً
         const maxDim = options.maxDimension || 1650;
         const minDim = options.minDimension || 1350;
@@ -111,7 +172,7 @@ export async function prepareImageForAi(
           ctx.drawImage(img, 0, 0, targetW, targetH);
         }
 
-        if (options.sharpenText !== false && targetW >= 600 && targetH >= 400) {
+        if (options.sharpenText !== false && targetW >= 600 && targetH >= 300) {
           try {
             const imgData = ctx.getImageData(0, 0, targetW, targetH);
             applyFastUnsharpMask(imgData, 0.45);
@@ -121,7 +182,7 @@ export async function prepareImageForAi(
           }
         }
 
-        const resultUrl = canvas.toDataURL('image/jpeg', 0.88);
+        const resultUrl = canvas.toDataURL('image/jpeg', 0.9);
         resolve(resultUrl);
       } catch (err) {
         console.warn('Image calibration failed, using original:', err);

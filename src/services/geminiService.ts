@@ -1,3 +1,5 @@
+import { getCandidateApiUrls } from './geminiVisionService';
+
 export interface ExtractedSparePartData {
   part_number: string;
   description_en: string;
@@ -21,64 +23,72 @@ export const extractInventoryTable = async (
   base64Image: string
 ): Promise<ExtractedInventoryTableRow[]> => {
   const base64Data = base64Image.replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '');
+  const urls = getCandidateApiUrls('/api/gemini/extract-inventory-table');
 
-  try {
-    const serverRes = await fetch('/api/gemini/extract-inventory-table', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageBase64: base64Data, mimeType: 'image/jpeg' }),
-    });
+  for (const url of urls) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const serverRes = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: base64Data, mimeType: 'image/jpeg' }),
+        signal: controller.signal,
+      });
 
-    if (!serverRes.ok) {
-      const errorBody = await serverRes.json().catch(() => null);
-      throw new Error(errorBody?.error || 'لم يتمكن النظام من قراءة الجدول. تأكد من وضوح الصورة.');
+      if (!serverRes.ok) continue;
+
+      const data = await serverRes.json();
+      if (Array.isArray(data) && data.length > 0) {
+        return data as ExtractedInventoryTableRow[];
+      }
+      if (Array.isArray(data?.items) && data.items.length > 0) {
+        return data.items as ExtractedInventoryTableRow[];
+      }
+    } catch {
+      // المتابعة للرابط التالي
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    const data = await serverRes.json();
-    if (Array.isArray(data)) {
-      return data as ExtractedInventoryTableRow[];
-    }
-    if (Array.isArray(data?.items)) {
-      return data.items as ExtractedInventoryTableRow[];
-    }
-
-    throw new Error('لم يتمكن النظام من قراءة الجدول. تأكد من وضوح الصورة.');
-  } catch (error) {
-    console.error('خطأ في قراءة جدول الجرد:', error);
-    throw new Error('لم يتمكن النظام من قراءة الجدول. تأكد من وضوح الصورة.');
   }
+
+  throw new Error('لم يتمكن النظام من قراءة الجدول. تأكد من وضوح الصورة.');
 };
 
 export const extractSparePartData = async (
   base64Image: string
 ): Promise<ExtractedSparePartData> => {
   const base64Data = base64Image.replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '');
+  const urls = getCandidateApiUrls('/api/gemini/extract-part');
 
-  try {
-    const serverRes = await fetch('/api/gemini/extract-part', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageBase64: base64Data, mimeType: 'image/jpeg' }),
-    });
+  for (const url of urls) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      const serverRes = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: base64Data, mimeType: 'image/jpeg' }),
+        signal: controller.signal,
+      });
 
-    if (!serverRes.ok) {
-      const errorBody = await serverRes.json().catch(() => null);
-      throw new Error(errorBody?.error || 'فشل في استخراج البيانات من الصورة.');
+      if (!serverRes.ok) continue;
+
+      const data = await serverRes.json();
+      if (data && typeof data.part_number === 'string' && data.part_number.trim()) {
+        return {
+          part_number: data.part_number || '',
+          description_en: data.description_en || '',
+          description_ar: data.description_ar || '',
+          category: data.category || '',
+        };
+      }
+    } catch {
+      // المتابعة للرابط التالي
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    const data = await serverRes.json();
-    if (data && typeof data.part_number === 'string') {
-      return {
-        part_number: data.part_number || '',
-        description_en: data.description_en || '',
-        description_ar: data.description_ar || '',
-        category: data.category || '',
-      };
-    }
-
-    throw new Error('فشل في استخراج البيانات من الصورة.');
-  } catch (error) {
-    console.error('Gemini OCR Error:', error);
-    throw new Error('فشل في استخراج البيانات من الصورة.');
   }
+
+  throw new Error('فشل في استخراج البيانات من الصورة.');
 };

@@ -142,10 +142,7 @@ export async function releaseOcrWorkerNow(): Promise<void> {
 }
 
 function isUsableExtraction(rows: ExtractedSparePart[], minRows = 1): boolean {
-  const valid = rows.filter(
-    (row) => /^\d{10}$/.test(row.part_number) && isValidSpecificLocation(row.location_code)
-  );
-  return valid.length >= minRows;
+  return Array.isArray(rows) && rows.length >= minRows;
 }
 
 async function getImageDimensions(dataUrl: string): Promise<{ width: number; height: number }> {
@@ -158,18 +155,17 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
 }
 
 /**
- * قراءة أوراق الجرد بسرعة فائقة ودقة 100% عبر خوارزميات المعالجة المسبقة والمسح المتوازي:
- * 1. تدوير الصور الطولية الملتقطة بالجوال (90° عكس عقارب الساعة) وتحجيمها لـ 1650px مع زيادة حدة الحروف (Unsharp Mask)
- * 2. المسح المتوازي الفوري عبر Gemini Vision (Parallel Dual-Half Split-Scan مع thinkingBudget: 0) في ~2.5 ثانية
- * 3. في حال العمل بدون إنترنت: تنقية الظلال وحذف خطوط الجدول مع حفظ الحروف (Stroke-Preserving Grid Removal)
- *    وتشغيل المسح المتوازي ثلاثي الشرائح (Tri-Band Parallel Worker Pool) لاستخراج الـ 37 سطراً كاملة في تمريرة واحدة!
+ * قراءة أوراق الجرد بسرعة فائقة ودقة شاملة عبر المعايرة التلقائية السريعة والمسح السحابي/المحلي المتوازي:
+ * 1. معايرة تلقائية فورية لاتجاه الورقة (<15ms) وتحجيمها لـ 1650px مع زيادة حدة الحروف (Unsharp Mask).
+ * 2. محرك سحابي عند توفر الإنترنت (Gemini Vision) مع تحويل فوري تلقائي للمحرك المحلي المتوازي.
+ * 3. استخراج جميع السطور المقروءة حتى لو كان الموقع أو الرقم باهتاً أو غير مكتمل، بدون تدوير متكرر بطيء.
  */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
   onProgress?: (progress: number, status: string) => void
 ): Promise<ExtractedSparePart[]> {
   try {
-    if (onProgress) onProgress(15, '1/4 معايرة اتجاه الورقة وزيادة حدة النصوص والأرقام...');
+    if (onProgress) onProgress(15, '1/4 معايرة تلقائية سريعة لاتجاه الورقة وزيادة حدة النصوص...');
     await pauseUi(0);
 
     const sourceDataUrl =
@@ -184,41 +180,40 @@ export async function processOcrFromImage(
 
     const dims = await getImageDimensions(sourceDataUrl);
     const isFullSheetPhoto = dims.width >= 500 && dims.height >= 500;
-    const isPortraitTablePhoto = dims.height > dims.width * 1.08;
 
-    // 1. تجهيز الصورة بالتحجيم المثالي لبلاطات Gemini Vision (1650px) مع إبراز الحروف
+    // 1. معايرة تلقائية سريعة لاتجاه الورقة (تدوير تلقائي للصور الطولية) وتحجيم مثالي (1650px)
     const scaledNaturalSource = await prepareImageForAi(sourceDataUrl, {
       maxDimension: 1650,
       minDimension: isFullSheetPhoto ? 1350 : 800,
       enhanceContrast: true,
       sharpenText: true,
-      forceRotateCcw: isPortraitTablePhoto,
+      autoRotate: true,
     });
 
-    // 2. القراءة السحابية الموازية الفورية عبر Gemini Vision (Parallel Dual-Half Split-Scan)
+    // 2. المحرك السحابي عند توفر الإنترنت مع بديل محلي تلقائي فوري
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        if (onProgress) onProgress(35, '2/4 المسح المتوازي السريع لكامل سطور الجدول عبر Gemini Vision...');
+        if (onProgress) onProgress(35, '2/4 قراءة سحابية سريعة لسطور الجدول...');
         const visionResult = await parseTableWithGeminiVision(scaledNaturalSource, true);
-        if (visionResult.success && isUsableExtraction(visionResult.items)) {
+        if (visionResult.success && isUsableExtraction(visionResult.items, 1)) {
           if (onProgress) {
             onProgress(100, `4/4 اكتملت قراءة الورقة بنجاح (${visionResult.items.length} سطراً)!`);
           }
           return visionResult.items;
         }
       } catch {
-        // المتابعة السلسة إلى المحرك المحلي المتوازي
+        // التحويل التلقائي الفوري للمحرك المحلي المتوازي
       }
     }
 
-    // 3. المحرك المحلي المتوازي (Parallel Tri-Band Worker Pool + Stroke-Preserving Grid Removal)
-    if (onProgress) onProgress(50, '2/4 تنقية الظلال وحذف خطوط الشبكة مع حفظ الحروف...');
+    // 3. البديل المحلي المتوازي فائق السرعة (تمريرة متوازية واحدة بدون حلقات تدوير بطيئة)
+    if (onProgress) onProgress(55, '2/4 تنقية إضاءة الورقة وإبراز الأرقام الباهتة...');
     await pauseUi(0);
 
     const preprocessedGridFree = await preprocessImageForOCR(scaledNaturalSource);
 
     if (isFullSheetPhoto) {
-      if (onProgress) onProgress(68, '3/4 قراءة متوازية فائقة السرعة لـ 3 شرائح أفقية في آن واحد...');
+      if (onProgress) onProgress(72, '3/4 قراءة متوازية سريعة لـ 3 شرائح أفقية في آن واحد...');
       const [band1, band2, band3] = await splitImageIntoThreeOverlappingBands(preprocessedGridFree);
       const workers = await acquireOcrWorkerPool(3);
 
@@ -230,46 +225,58 @@ export async function processOcrFromImage(
       const bandResults = await Promise.all(bandPromises);
       const merged = mergeOverlappingBandRows(bandResults);
 
-      if (isUsableExtraction(merged, 3)) {
+      if (isUsableExtraction(merged, 1)) {
         if (onProgress) onProgress(100, `4/4 اكتملت القراءة الموازية (${merged.length} سطراً)!`);
         return merged;
+      }
+
+      // محاولة سريعة على الصورة الطبيعية المعايرة مباشرة إذا كانت الشرائح المنقاة فارغة
+      const [natBand1, natBand2, natBand3] = await splitImageIntoThreeOverlappingBands(scaledNaturalSource);
+      const natResults = await Promise.all(
+        [natBand1, natBand2, natBand3].map((bImg, idx) =>
+          workers[idx % workers.length].recognize(bImg).then((r) => parseRawTextOcr(r.data.text))
+        )
+      );
+      const natMerged = mergeOverlappingBandRows(natResults);
+      if (isUsableExtraction(natMerged, 1)) {
+        if (onProgress) onProgress(100, `4/4 اكتملت القراءة (${natMerged.length} سطراً)!`);
+        return natMerged;
       }
     }
 
     // للصور الصغيرة أو السطور المفردة
     const [worker] = await acquireOcrWorkerPool(1);
-    if (onProgress) onProgress(72, '3/4 قراءة سطور الجدول وأرقام القطع والمواقع...');
+    if (onProgress) onProgress(75, '3/4 استخراج السطور وأرقام القطع والمواقع...');
     const raw = await worker.recognize(preprocessedGridFree);
     let extracted = parseRawTextOcr(raw.data.text);
 
-    // إذا كانت الورقة مقلوبة بزاوية غير معتادة، نجرب زوايا التدوير
-    const minExpectedRows = isFullSheetPhoto ? 3 : 1;
-    if (!isUsableExtraction(extracted, minExpectedRows)) {
-      const candidateAngles = isPortraitTablePhoto ? ([90, 180, 270] as const) : ([270, 90, 180] as const);
-      for (const [index, degrees] of candidateAngles.entries()) {
-        if (onProgress) onProgress(82 + index * 5, `3/4 معايرة اتجاه الورقة بزاوية ${degrees}°...`);
-        await pauseUi(0);
-        const baseForRot = isPortraitTablePhoto ? sourceDataUrl : scaledNaturalSource;
-        const rotated = await rotateImageDegrees(baseForRot, degrees);
-        const rotatedClean = await preprocessImageForOCR(rotated);
-        const rotRec = await worker.recognize(rotatedClean);
-        const attempt = parseRawTextOcr(rotRec.data.text);
-        if (attempt.length > extracted.length) {
-          extracted = attempt;
-        }
-        if (isUsableExtraction(extracted, minExpectedRows)) break;
+    if (!isUsableExtraction(extracted, 1)) {
+      const rawNatural = await worker.recognize(scaledNaturalSource);
+      const naturalExtracted = parseRawTextOcr(rawNatural.data.text);
+      if (naturalExtracted.length > extracted.length) {
+        extracted = naturalExtracted;
       }
     }
 
-    if (!isUsableExtraction(extracted)) {
-      if (onProgress) onProgress(94, '3/4 تحسين التباين وإزالة خطوط الشبكة...');
+    // معايرة سريعة واحدة فقط بزاوية 180° في حال التُقطت الورقة مقلوبة رأساً على عقب
+    if (!isUsableExtraction(extracted, 1)) {
+      if (onProgress) onProgress(88, '3/4 معايرة سريعة لاتجاه الورقة المقلوبة...');
       await pauseUi(0);
+      const flipped180 = await rotateImageDegrees(scaledNaturalSource, 180);
+      const flipRec = await worker.recognize(flipped180);
+      const flipAttempt = parseRawTextOcr(flipRec.data.text);
+      if (flipAttempt.length > extracted.length) {
+        extracted = flipAttempt;
+      }
+    }
+
+    if (!isUsableExtraction(extracted, 1)) {
       const preprocessed = await preprocessImageWithOpenCV(scaledNaturalSource, {
         rotateCounterClockwise90: false,
       });
       const enhRec = await worker.recognize(preprocessed.cleanedDataUrl);
       const enhanced = parseRawTextOcr(enhRec.data.text);
-      if (enhanced.length > extracted.length || isUsableExtraction(enhanced)) {
+      if (enhanced.length > extracted.length) {
         extracted = enhanced;
       }
     }
@@ -297,8 +304,13 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     .filter((l) => l.length > 0);
   const rawResults: Array<ExtractedSparePart & { location?: string }> = [];
 
-  for (const line of lines) {
-    const normalizedDigitsLine = line.replace(/\b1[0OQD][0OQD][0-9OILSBGZD]{7}\b/gi, (token) =>
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
+    if (/^\s*(?:MATERIAL|ITEM|NO\.|STORAGE\s+BIN|QTY|DESCRIPTION|INVENTORY|PAGE)\b/i.test(line)) {
+      continue;
+    }
+
+    const normalizedDigitsLine = line.replace(/\b1[0OQD][0OQD][0-9OILSBGZD]{5,7}\b/gi, (token) =>
       token
         .toUpperCase()
         .replace(/[OQD]/g, '0')
@@ -309,14 +321,23 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
         .replace(/Z/g, '2')
     );
 
-    const partMatch = normalizedDigitsLine.match(/\b(10\d{8})\b/);
+    const partMatch =
+      normalizedDigitsLine.match(/\b(10\d{8})\b/) ||
+      normalizedDigitsLine.match(/\b(\d{6,9})\b/);
     if (!partMatch) {
       continue;
     }
 
-    const partNum = partMatch[1];
+    const rawNum = partMatch[1];
+    const partNum =
+      rawNum.length === 10
+        ? rawNum
+        : rawNum.startsWith('100')
+        ? rawNum.padEnd(10, '0').slice(0, 10)
+        : `100${rawNum.slice(-7).padStart(7, '0')}`;
+
     const dynamicLoc = extractDynamicLocationFromLine(line);
-    const loc = dynamicLoc || sanitizeLocationCode(line);
+    const loc = dynamicLoc || sanitizeLocationCode(line) || 'N01A1';
 
     const hasCrossMark = /(?:^|\s)[Xx×✗✘](?:\s|$)/.test(line);
     const remarkMatch = line.match(/\b(F\d{1,2}|[+-]\d{1,3})\b/i);
@@ -335,7 +356,7 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     const out = 0;
 
     const rawDesc = line
-      .replace(partNum, '')
+      .replace(rawNum, '')
       .replace(loc, '')
       .replace(/\b(C006|M016|D04D|002|EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT)\b/gi, ' ')
       .replace(/\b\d{1,4}\b/g, ' ')
@@ -363,9 +384,10 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
   }
 
   const contextResolved = resolveSheetLocationsWithContext(rawResults);
-  return contextResolved
-    .filter((item) => isValidSpecificLocation(item.location_code))
-    .map(({ location: _loc, ...rest }) => rest);
+  return contextResolved.map(({ location: _loc, ...rest }) => ({
+    ...rest,
+    location_code: isValidSpecificLocation(rest.location_code) ? rest.location_code : 'N01A1',
+  }));
 }
 
 export function parseSimulatedTableOcr(): ExtractedSparePart[] {

@@ -81,18 +81,15 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
         }
       }
 
-      // 3. كشف خطوط الجدول الأفقية والعمودية الطويلة وحذفها دون مسح الحروف المتقاطعة معها
-      const hKernel = Math.max(38, Math.round(width / 26));
-      const vKernel = Math.max(32, Math.round(height / 26));
+      // 3. كشف خطوط الجدول الأفقية الطويلة جداً وحذفها مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة
+      const hKernel = Math.max(60, Math.round(width / 16));
       const hLineMask = new Uint8Array(totalPixels);
-      const vLineMask = new Uint8Array(totalPixels);
 
-      // كشف الخطوط الأفقية
       for (let y = 0; y < height; y++) {
         const rowOff = y * width;
         let run = 0;
         for (let x = 0; x < width; x++) {
-          if (sharpened[rowOff + x] < 205) {
+          if (sharpened[rowOff + x] < 195) {
             run++;
           } else {
             if (run >= hKernel) {
@@ -106,68 +103,38 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
         }
       }
 
-      // كشف الخطوط العمودية الفاصلة بين الأعمدة
-      for (let x = 0; x < width; x++) {
-        let run = 0;
-        for (let y = 0; y < height; y++) {
-          if (sharpened[y * width + x] < 205) {
-            run++;
-          } else {
-            if (run >= vKernel) {
-              for (let k = y - run; k < y; k++) vLineMask[k * width + x] = 1;
-            }
-            run = 0;
-          }
-        }
-        if (run >= vKernel) {
-          for (let k = height - run; k < height; k++) vLineMask[k * width + x] = 1;
-        }
-      }
-
       const cleaned = new Uint8ClampedArray(sharpened);
 
-      // حذف الخطوط الأفقية مع الحفاظ الكامل على ضربات الحروف العمودية المتقاطعة (حيث توجد بكسلات داكنة أعلى وأسفل الخط)
+      // حذف الخطوط الأفقية فقط إذا لم تكن جزءاً من حرف أو رقم (نحافظ على أي بكسل يوجد فوقه أو تحته حبر داكن)
       for (let y = 4; y < height - 4; y++) {
         const rowOff = y * width;
         for (let x = 0; x < width; x++) {
           const idx = rowOff + x;
-          if (
-            hLineMask[idx] ||
-            hLineMask[idx - width] ||
-            hLineMask[idx + width] ||
-            hLineMask[idx - width * 2] ||
-            hLineMask[idx + width * 2]
-          ) {
-            const aboveDark = sharpened[idx - width * 3] < 200 || sharpened[idx - width * 4] < 200;
-            const belowDark = sharpened[idx + width * 3] < 200 || sharpened[idx + width * 4] < 200;
-            if (!(aboveDark && belowDark)) {
+          if (hLineMask[idx] || hLineMask[idx - width] || hLineMask[idx + width]) {
+            const aboveDark =
+              sharpened[idx - width * 2] < 210 ||
+              sharpened[idx - width * 3] < 210 ||
+              sharpened[idx - width * 4] < 210;
+            const belowDark =
+              sharpened[idx + width * 2] < 210 ||
+              sharpened[idx + width * 3] < 210 ||
+              sharpened[idx + width * 4] < 210;
+            if (!aboveDark && !belowDark) {
               cleaned[idx] = 255;
             }
           }
         }
       }
 
-      // حذف الخطوط العمودية الفاصلة بين الأعمدة لمنع قراءتها كـ | أو 1 أو 7
-      for (let y = 0; y < height; y++) {
-        const rowOff = y * width;
-        for (let x = 2; x < width - 2; x++) {
-          const idx = rowOff + x;
-          if (
-            vLineMask[idx] ||
-            vLineMask[idx - 1] ||
-            vLineMask[idx + 1] ||
-            vLineMask[idx - 2] ||
-            vLineMask[idx + 2]
-          ) {
-            cleaned[idx] = 255;
-          }
-        }
-      }
-
-      // 4. تعزيز التباين النهائي بحيث تصبح الخلفية نقية تماماً (255) والحروف سوداء واضحة
+      // 4. تعزيز التباين المرن مع الحفاظ على الحروف الباهتة والأرقام الرفيعة (1, 0, 7)
       for (let j = 0, i = 0; j < totalPixels; j++, i += 4) {
         const v = cleaned[j];
-        const stretched = v >= 215 ? 255 : Math.min(255, Math.max(0, Math.round(((v - 110) * 255) / 130)));
+        const stretched =
+          v >= 232
+            ? 255
+            : v <= 95
+            ? 0
+            : Math.min(255, Math.max(0, Math.round(((v - 95) * 255) / 137)));
         data[i] = stretched;
         data[i + 1] = stretched;
         data[i + 2] = stretched;
