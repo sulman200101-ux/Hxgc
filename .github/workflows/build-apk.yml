@@ -33,15 +33,11 @@ jobs:
       - name: Install Dependencies
         run: npm ci || npm install --legacy-peer-deps
 
-      - name: Verify Pre-Synced Simulator Web Assets
+      - name: Build and Sync Latest Web Assets to Android
         run: |
-          if [ ! -f android/app/src/main/assets/public/index.html ]; then
-            npm run build
-            npx cap sync android
-          else
-            echo "Using pre-synced simulator web assets in android/app/src/main/assets/public"
-            ls -la android/app/src/main/assets/public/
-          fi
+          npm run build
+          npx cap sync android
+          ls -la android/app/src/main/assets/public/
 
       - name: Build Android APK with Gradle
         run: |
@@ -55,6 +51,7 @@ jobs:
           if [ -f app-debug.apk ]; then
             cp -f app-debug.apk asmo-inventory-app.apk
             cp -f app-debug.apk asmo-inventory-v1.5.0.apk
+            cp -f app-debug.apk asmo-inventory-v1.6.0.apk
           fi
           cd ..
           echo "=== Generated Native APKs ==="
@@ -64,17 +61,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: v1.5.0
-          name: "ASMO Inventory App v1.5.0 (خوارزميات القراءة المساعدة السريعة + مطابقة المحاكي 100%)"
+          tag_name: v1.6.0
+          name: "ASMO Inventory App v1.6.0 (حفظ تلقائي فوري بدون رقم سري + محرك OCR المتوازي)"
           body: |
-            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار الجديد v1.5.0)
-            - **إصلاح جذري لمشاكل ما بعد البناء (APK vs Simulator)**: توحيد قارئ الألبوم والكاميرا مع المحاكي بدون قص مربع أو تدوير مزدوج، وتفعيل `thinkingLevel: MINIMAL` لتقليص زمن القراءة من 110 ثانية إلى **2–3 ثوانٍ فقط** ومنع انقطاع الاتصال.
-            - **خوارزميات مساعدة ذكية لقراءة كامل الورقة بأي عدد من الأصناف**:
-              1. ترميم ذكي لأرقام القطع الـ 10 (`Material`) حتى لو لامسها خط الجدول أو قلم الجرد.
-              2. استنتاج تلقائي لاسم الموقع الفعلي (`Storage Bin`) من السطور المجاورة إذا غطت علامة (`✓` أو `×`) خانة الموقع في أحد السطور.
-              3. تمييز مرن ودقيق لعلامات اليد (`✓` صح = موجودة | `×` خطأ = غير موجودة) بدون رفض الأوراق الميدانية.
-            - **أيقونة التطبيق باللون البرتقالي المزخرف** وسعة 100,000 قطعة.
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدث v1.6.0)
+            - **الحفظ والاعتماد التلقائي الفوري بعد انتهاء القراءة**: يتم حفظ واعتماد الأصناف المستخرجة مباشرة في قاعدة البيانات والمستندات فور انتهاء المسح الضوئي دون طلب أي رقم سري (PIN).
+            - **محرك القراءة المتوازي المحسن (3 Parallel Workers)**: معالجة 3 شرائح أفقية متداخلة بالتوازي مع تصحيح الأرقام الـ 10 (`1007->1001`, `1900->1000`) واستنتاج المواقع بالساندويتش السياقي.
+            - **توحيد الإضاءة وحذف خطوط الشبكة مع حفظ الحروف** (`Integral Image + Unsharp Mask`).
           files: |
+            output_apk/asmo-inventory-v1.6.0.apk
             output_apk/asmo-inventory-v1.5.0.apk
             output_apk/asmo-inventory-app.apk
             output_apk/app-debug.apk
