@@ -13,6 +13,7 @@ export interface PreProcessingOptions {
   minDimension?: number;
   enhanceContrast?: boolean;
   sharpen?: boolean;
+  sharpenText?: boolean;
 }
 
 /**
