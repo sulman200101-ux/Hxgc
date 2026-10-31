@@ -65,23 +65,43 @@ export function normalizeSapMaterialPrefix(raw: string | null | undefined): stri
     .replace(/(?:C006|M016|D04D|002)$/i, '');
 
   token = token
-    .replace(/^[Il|!tTrR7]([0OoQD]{2})/i, '1$1')
+    .replace(/^(?:aot|aoo|qop|roo|too|190|109)/i, '100')
+    .replace(/^[Il|!tTrR74]([0OoQD]{2})/i, '1$1')
     .replace(/^1[OoQD]([0OoQD])/i, '10$1')
     .replace(/^10[OoQD]/i, '100')
-    .replace(/[OoQD]/g, '0')
-    .replace(/[Il|!tTrR]/g, '1')
+    .replace(/[OoQD°]/g, '0')
+    .replace(/[Il|!t'"rR]/g, '1')
     .replace(/[Zz]/g, '2')
-    .replace(/[Ss$]/g, '5')
-    .replace(/[Gg]/g, '6')
-    .replace(/[Bb]/g, '8')
+    .replace(/[Ss$§]/g, '5')
+    .replace(/[Gg%]/g, '6')
+    .replace(/[BbeE]/g, '8')
+    .replace(/[aA]/g, '4')
+    .replace(/[dD]/g, '0')
+    .replace(/[¢cC]/g, '9')
     .replace(/[q]/g, '9');
 
-  const digits = token.replace(/[^0-9]/g, '');
+  let digits = token.replace(/[^0-9]/g, '');
   if (/^00[012]\d{6}$/.test(digits)) {
-    return `1${digits}`;
+    digits = `1${digits}`;
+  } else if (/^1001\d{5}$/.test(digits)) {
+    digits = `10011${digits.slice(4)}`;
+  } else if (/^1000\d{5}$/.test(digits)) {
+    digits = `${digits}1`;
   }
-  if (/^[47]00[012]\d{6}$/.test(digits)) {
-    return `1${digits.slice(1)}`;
+
+  if (/^\d{10}$/.test(digits)) {
+    if (/^100[743]\d{6}$/.test(digits)) {
+      return `1001${digits.slice(4)}`;
+    }
+    if (/^190[01]\d{6}$/.test(digits)) {
+      return `100${digits.slice(3)}`;
+    }
+    if (/^109[01]\d{6}$/.test(digits)) {
+      return `100${digits.slice(3)}`;
+    }
+    if (/^[74]00[01]\d{6}$/.test(digits)) {
+      return `1${digits.slice(1)}`;
+    }
   }
   return digits;
 }

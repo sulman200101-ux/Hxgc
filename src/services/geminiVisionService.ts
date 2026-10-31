@@ -359,24 +359,42 @@ export async function parseTableWithGeminiVision(
       });
     }
 
-    // تقسيم الورقة لنصفين متداخلين وإرسالهما بالتوازي في جولة شبكية واحدة (~2.5 ثانية) لضمان قراءة الـ 37 سطراً كاملة
-    const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(cleanImageDataUrl);
-    const isSingleSmallCrop = topHalf === bottomHalf;
+    // إرسال الورقة الكاملة أولاً لمحرك الخادم (الذي يشغل بايثون OpenCV + 3-Band Multi-Core Tesseract)
+    const fullRes = await callGeminiVisionRaw(cleanImageDataUrl);
+    if (fullRes?.fallbackToLocal) {
+      return {
+        success: false,
+        items: [],
+        skippedRows: [],
+        isSheetComplete: false,
+        message: 'يتم استخدام محرك القراءة المحلي السريع.',
+      };
+    }
 
-    if (isSingleSmallCrop) {
-      const singleRes = await callGeminiVisionRaw(cleanImageDataUrl);
-      if (!singleRes || singleRes.fallbackToLocal || singleRes.items.length === 0) {
-        return {
-          success: false,
-          items: [],
-          skippedRows: [],
-          isSheetComplete: false,
-          message: '⚠️ سيتم استخدام القارئ المحلي الذكي.',
-        };
+    if (fullRes && fullRes.items.length > 0) {
+      let { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(fullRes.items);
+
+      if (validatedItems.length >= 10 && validatedItems.length < 34) {
+        const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(cleanImageDataUrl);
+        if (topHalf !== bottomHalf) {
+          const [topRes, botRes] = await Promise.all([
+            callGeminiVisionRaw(topHalf),
+            callGeminiVisionRaw(bottomHalf),
+          ]);
+          const topNorm = topRes?.items?.length ? normalizeRawVisionItems(topRes.items) : null;
+          const botNorm = botRes?.items?.length ? normalizeRawVisionItems(botRes.items) : null;
+          if (topNorm || botNorm) {
+            const merged = mergeOverlappingBandRows([
+              topNorm?.validatedItems || [],
+              botNorm?.validatedItems || [],
+            ]);
+            if (merged.length > validatedItems.length) {
+              validatedItems = resolveSheetLocationsWithContext(merged);
+            }
+          }
+        }
       }
-      const { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(
-        singleRes.items
-      );
+
       return {
         success: validatedItems.length > 0,
         items: validatedItems,
@@ -387,55 +405,12 @@ export async function parseTableWithGeminiVision(
       };
     }
 
-    const [topRes, botRes] = await Promise.all([
-      callGeminiVisionRaw(
-        topHalf,
-        'Read EVERY SINGLE ROW in this top half of the SAP Inventory Controller table from the first row down to the bottom of this crop without skipping any row. Extract 10-digit part_number, location (Storage Bin), quantity, check_mark, remark, and full English description.'
-      ),
-      callGeminiVisionRaw(
-        bottomHalf,
-        'Read EVERY SINGLE ROW in this bottom half of the SAP Inventory Controller table down to the very last row (#37) without skipping any row. Extract 10-digit part_number, location (Storage Bin), quantity, check_mark, remark, and full English description.'
-      ),
-    ]);
-
-    if (topRes?.fallbackToLocal || botRes?.fallbackToLocal) {
-      return {
-        success: false,
-        items: [],
-        skippedRows: [],
-        isSheetComplete: false,
-        message: 'يتم استخدام محرك القراءة المحلي السريع.',
-      };
-    }
-
-    const topNorm = topRes?.items?.length ? normalizeRawVisionItems(topRes.items) : null;
-    const botNorm = botRes?.items?.length ? normalizeRawVisionItems(botRes.items) : null;
-
-    const mergedItems = mergeOverlappingBandRows([
-      topNorm?.validatedItems || [],
-      botNorm?.validatedItems || [],
-    ]);
-    const finalItems = resolveSheetLocationsWithContext(mergedItems);
-    const skippedRows = [...(topNorm?.skippedRows || []), ...(botNorm?.skippedRows || [])];
-    const repairedCount = (topNorm?.repairedCount || 0) + (botNorm?.repairedCount || 0);
-
-    if (finalItems.length === 0) {
-      return {
-        success: false,
-        items: [],
-        skippedRows: [],
-        isSheetComplete: false,
-        message: '⚠️ لم يتمكن الماسح السحابي من قراءة الورقة — سيتم استخدام القارئ المحلي الذكي.',
-      };
-    }
-
     return {
-      success: true,
-      items: finalItems,
-      skippedRows,
-      repairedCount,
-      totalDetectedRows: finalItems.length + skippedRows.length,
-      isSheetComplete: finalItems.length > 0 && skippedRows.length === 0,
+      success: false,
+      items: [],
+      skippedRows: [],
+      isSheetComplete: false,
+      message: '⚠️ سيتم استخدام القارئ المحلي الذكي.',
     };
   } catch {
     return {

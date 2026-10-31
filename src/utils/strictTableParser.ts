@@ -315,15 +315,25 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
     .replace(partNumber, ' ')
     .replace(/_/g, ' ')
     .replace(
-      /\b(?:[0Oo]{2}2[TI|l]?|C[0Oo]{2}[6bB]|M[0Oo][1Il|i][6bB]|coos|cove|coo6|coob|more|mote|mo16|mois)\b/gi,
+      /\b(?:[0Oo]{2}2[TI|l]?|C[0Oo]{2}[68bBsS]?|M[0Oo][1Il|itT][6bBsS]|D[0Oo]4D|coos|cove|coo6|coob|more|mote|mo16|mois)\b/gi,
       ' '
     );
 
   const normalizedBinsLine = withoutPart
+    .replace(/\bT?N[Oo0][Ili|!tT1]/gi, 'N01')
+    .replace(/\bT?N[Oo0]W/gi, 'N01')
+    .replace(/\bT?N[Ili|!tT1][Ss5]/gi, 'N15')
+    .replace(/\bT?N[Ili|!tT1][EeGg6]/gi, 'N16')
+    .replace(/\bT?N[Ili|!tT1MVNA][Ili|!tT1]/gi, 'N11')
+    .replace(/\bT?N[Ili|!tT1][Zz2]/gi, 'N12')
     .replace(/\bT?N[Oo](\d)/gi, 'N0$1')
     .replace(/\bT?N(\d)[Oo]/gi, 'N$10')
     .replace(/\bT?N[Ili|!](\d)/gi, 'N1$1')
     .replace(/\bT?N(\d)[Ili|!]/gi, 'N$11')
+    .replace(/\b(N\d{2})(?:8B|B8|88|8BR|BR|BBR)([12Il|!tT])\b/gi, (_m, p1, p2) => `${p1.toUpperCase()}BB${/[2]/.test(p2) ? '2' : '1'}`)
+    .replace(/\b(N\d{2})0([12])\b/gi, '$1D$2')
+    .replace(/\b(N\d{2})F[LI1][Ili|!tTY41]\b/gi, '$1FL1')
+    .replace(/\b(N\d{2})F[LI1][ZzQRe2]\b/gi, '$1FL2')
     .replace(/\bT?(N[0Oo1Il|i\d][0Oo1Il|i\d][A-Za-z]{1,2}[12Il|i])\b/gi, (_m, bin) =>
       bin
         .toUpperCase()
@@ -334,9 +344,10 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
         .replace(/[IL|]$/, '1')
     )
     .replace(/\b(N\d{2})8([12])\b/gi, '$1B$2')
-    .replace(/\b(N\d{2})V?A[TRIl|!y1]\b/gi, '$1A1')
-    .replace(/\b(N\d{2})[EB8]1\b/gi, '$1B1')
-    .replace(/\b(N\d{2})[EB8]2\b/gi, '$1B2')
+    .replace(/\b(N\d{2})V?A[TRIl|!yLD1]\b/gi, '$1A1')
+    .replace(/\b(N\d{2})V?A[ZzR2]\b/gi, '$1A2')
+    .replace(/\b(N\d{2})[EB8][TRIl|!y1]\b/gi, '$1B1')
+    .replace(/\b(N\d{2})[EB8][Zz2]\b/gi, '$1B2')
     .replace(/\bN[1Il|i]s[oO0dD]([12])\b/gi, 'N16D$1')
     .replace(/\b(N\d{2}[A-Z]{1,2})[TRIl|!y]\b/gi, '$11');
 
