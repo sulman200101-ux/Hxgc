@@ -227,58 +227,18 @@ def ocr_band(img_slice: np.ndarray) -> str:
 def process_sheet_with_python(input_source: str) -> dict:
     img_gray = decode_image_from_input(input_source)
     cleaned = preprocess_table_image_opencv(img_gray)
-    h = cleaned.shape[0]
 
-    bands_img = [
-        cleaned[0 : int(h * 0.38), :],
-        cleaned[int(h * 0.32) : int(h * 0.70), :],
-        cleaned[int(h * 0.64) : h, :],
-    ]
-
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        band_texts = list(executor.map(ocr_band, bands_img))
-
-    band_rows = []
-    for txt in band_texts:
-        rows = []
-        for raw_line in txt.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            mat = extract_material_number(line)
-            if not mat:
-                continue
-            loc = normalize_storage_bin(line, mat)
-            rows.append({"rawLine": line, "part_number": mat, "location_code": loc})
-        band_rows.append(rows)
-
-    # Contiguous overlap sequence alignment across the 3 bands
-    def match_boundary(r1, r2):
-        m1, m2 = r1["part_number"], r2["part_number"]
-        if m1 == m2:
-            return True
-        if m1[-2:] == m2[-2:] and sum(1 for a, b in zip(m1, m2) if a == b) >= 8:
-            return True
-        return False
-
-    merged = list(band_rows[0]) if band_rows else []
-    for next_b in band_rows[1:]:
-        if not next_b:
+    full_text = ocr_band(cleaned)
+    merged = []
+    for raw_line in full_text.splitlines():
+        line = raw_line.strip()
+        if not line:
             continue
-        tail_start = max(0, len(merged) - 5)
-        cut_at = len(merged)
-        start_at = 0
-        found = False
-        for ti in range(tail_start, len(merged)):
-            for ni in range(min(3, len(next_b))):
-                if match_boundary(merged[ti], next_b[ni]):
-                    cut_at = ti
-                    start_at = ni
-                    found = True
-                    break
-            if found:
-                break
-        merged = merged[:cut_at] + next_b[start_at:]
+        mat = extract_material_number(line)
+        if not mat:
+            continue
+        loc = normalize_storage_bin(line, mat)
+        merged.append({"rawLine": line, "part_number": mat, "location_code": loc})
 
     # Forward fill, backward fill, and Sandwich Context Smoothing for Storage Bins
     last_loc = ""

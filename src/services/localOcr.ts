@@ -1,7 +1,6 @@
 import {
   rotateImageDegrees,
   prepareImageForAi,
-  splitImageIntoThreeOverlappingBands,
 } from '../utils/imagePreprocessor';
 import { preprocessImageForOCR } from '../utils/imagePreprocess';
 import { createWorker } from 'tesseract.js';
@@ -9,7 +8,6 @@ import { categorizeAndTranslate } from '../utils/translator';
 import { preprocessImageWithOpenCV } from '../utils/imagePreprocessing';
 import {
   parseStrictAsmoTable,
-  mergeOverlappingBandRows,
 } from '../utils/strictTableParser';
 import { parseTableWithGeminiVision } from './geminiVisionService';
 export {
@@ -155,10 +153,10 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
 }
 
 /**
- * قراءة أوراق الجرد بسرعة فائقة ودقة شاملة عبر المعايرة التلقائية السريعة والمسح السحابي/المحلي المتوازي:
+ * قراءة أوراق الجرد الشاملة دفعة واحدة لكامل الورقة بدون تقسيم (Full-Sheet Single-Pass OCR):
  * 1. معايرة تلقائية فورية لاتجاه الورقة (<15ms) وتحجيمها لـ 1650px مع زيادة حدة الحروف (Unsharp Mask).
- * 2. محرك سحابي عند توفر الإنترنت (Gemini Vision) مع تحويل فوري تلقائي للمحرك المحلي المتوازي.
- * 3. استخراج جميع السطور المقروءة حتى لو كان الموقع أو الرقم باهتاً أو غير مكتمل، بدون تدوير متكرر بطيء.
+ * 2. محرك سحابي عند توفر الإنترنت (Gemini Vision لكامل الورقة دفعة واحدة) مع بديل محلي تلقائي فوري.
+ * 3. قراءة الورقة كاملةً دفعة واحدة من أول سطر إلى آخر سطر دون تقطيع أو تقسيم إلى شرائح، مع استخراج كافة السطور المقروءة.
  */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
@@ -181,76 +179,44 @@ export async function processOcrFromImage(
     const dims = await getImageDimensions(sourceDataUrl);
     const isFullSheetPhoto = dims.width >= 500 && dims.height >= 500;
 
-    // 1. معايرة تلقائية سريعة لاتجاه الورقة (تدوير تلقائي للصور الطولية) وتحجيم مثالي (1650px)
+    // 1. معايرة تلقائية سريعة لاتجاه الورقة (تدوير تلقائي للصور الطولية) وتحجيم مثالي لكامل الورقة دفعة واحدة
     const scaledNaturalSource = await prepareImageForAi(sourceDataUrl, {
-      maxDimension: 1650,
-      minDimension: isFullSheetPhoto ? 1350 : 800,
+      maxDimension: 1800,
+      minDimension: isFullSheetPhoto ? 1400 : 800,
       enhanceContrast: true,
       sharpenText: true,
       autoRotate: true,
     });
 
-    // 2. المحرك السحابي عند توفر الإنترنت مع بديل محلي تلقائي فوري
+    // 2. المحرك السحابي لقراءة الورقة كاملة دفعة واحدة عند توفر الإنترنت مع بديل محلي تلقائي فوري
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        if (onProgress) onProgress(35, '2/4 قراءة سحابية سريعة لسطور الجدول...');
+        if (onProgress) onProgress(35, '2/4 القراءة الشاملة لكامل الورقة دفعة واحدة...');
         const visionResult = await parseTableWithGeminiVision(scaledNaturalSource, true);
         if (visionResult.success && isUsableExtraction(visionResult.items, 1)) {
           if (onProgress) {
-            onProgress(100, `4/4 اكتملت قراءة الورقة بنجاح (${visionResult.items.length} سطراً)!`);
+            onProgress(100, `4/4 اكتملت القراءة الشاملة للورقة بنجاح (${visionResult.items.length} سطراً)!`);
           }
           return visionResult.items;
         }
       } catch {
-        // التحويل التلقائي الفوري للمحرك المحلي المتوازي
+        // التحويل التلقائي الفوري للمحرك المحلي الشامل
       }
     }
 
-    // 3. البديل المحلي المتوازي فائق السرعة (تمريرة متوازية واحدة بدون حلقات تدوير بطيئة)
-    if (onProgress) onProgress(55, '2/4 تنقية إضاءة الورقة وإبراز الأرقام الباهتة...');
+    // 3. القراءة المحلية الشاملة لكامل الورقة دفعة واحدة بدون تقسيمها إلى شرائح
+    if (onProgress) onProgress(55, '2/4 تنقية إضاءة الورقة كاملةً وإبراز الأرقام الباهتة...');
     await pauseUi(0);
 
     const preprocessedGridFree = await preprocessImageForOCR(scaledNaturalSource);
-
-    if (isFullSheetPhoto) {
-      if (onProgress) onProgress(72, '3/4 قراءة متوازية سريعة لـ 3 شرائح أفقية في آن واحد...');
-      const [band1, band2, band3] = await splitImageIntoThreeOverlappingBands(preprocessedGridFree);
-      const workers = await acquireOcrWorkerPool(3);
-
-      const bandPromises = [band1, band2, band3].map((bandImg, idx) => {
-        const w = workers[idx % workers.length];
-        return w.recognize(bandImg).then((res) => parseRawTextOcr(res.data.text));
-      });
-
-      const bandResults = await Promise.all(bandPromises);
-      const merged = mergeOverlappingBandRows(bandResults);
-
-      if (isUsableExtraction(merged, 1)) {
-        if (onProgress) onProgress(100, `4/4 اكتملت القراءة الموازية (${merged.length} سطراً)!`);
-        return merged;
-      }
-
-      // محاولة سريعة على الصورة الطبيعية المعايرة مباشرة إذا كانت الشرائح المنقاة فارغة
-      const [natBand1, natBand2, natBand3] = await splitImageIntoThreeOverlappingBands(scaledNaturalSource);
-      const natResults = await Promise.all(
-        [natBand1, natBand2, natBand3].map((bImg, idx) =>
-          workers[idx % workers.length].recognize(bImg).then((r) => parseRawTextOcr(r.data.text))
-        )
-      );
-      const natMerged = mergeOverlappingBandRows(natResults);
-      if (isUsableExtraction(natMerged, 1)) {
-        if (onProgress) onProgress(100, `4/4 اكتملت القراءة (${natMerged.length} سطراً)!`);
-        return natMerged;
-      }
-    }
-
-    // للصور الصغيرة أو السطور المفردة
     const [worker] = await acquireOcrWorkerPool(1);
-    if (onProgress) onProgress(75, '3/4 استخراج السطور وأرقام القطع والمواقع...');
+
+    if (onProgress) onProgress(75, '3/4 القراءة الشاملة لكامل سطور الورقة دفعة واحدة...');
     const raw = await worker.recognize(preprocessedGridFree);
     let extracted = parseRawTextOcr(raw.data.text);
 
-    if (!isUsableExtraction(extracted, 1)) {
+    // إذا كانت الصورة الأصلية أوضح قبل فلتر الشبكة، نقرأ الورقة الكاملة مباشرة ونختار القراءة الأشمل
+    if (!isUsableExtraction(extracted, isFullSheetPhoto ? 3 : 1)) {
       const rawNatural = await worker.recognize(scaledNaturalSource);
       const naturalExtracted = parseRawTextOcr(rawNatural.data.text);
       if (naturalExtracted.length > extracted.length) {
@@ -258,7 +224,7 @@ export async function processOcrFromImage(
       }
     }
 
-    // معايرة سريعة واحدة فقط بزاوية 180° في حال التُقطت الورقة مقلوبة رأساً على عقب
+    // معايرة سريعة واحدة فقط بزاوية 180° لكامل الورقة إذا التُقطت مقلوبة رأساً على عقب
     if (!isUsableExtraction(extracted, 1)) {
       if (onProgress) onProgress(88, '3/4 معايرة سريعة لاتجاه الورقة المقلوبة...');
       await pauseUi(0);
@@ -281,7 +247,7 @@ export async function processOcrFromImage(
       }
     }
 
-    if (onProgress) onProgress(100, `4/4 اكتملت القراءة (${extracted.length} سطراً)!`);
+    if (onProgress) onProgress(100, `4/4 اكتملت القراءة الشاملة للورقة (${extracted.length} سطراً)!`);
     return extracted;
   } catch (err) {
     console.warn('Local OCR notice:', err);
