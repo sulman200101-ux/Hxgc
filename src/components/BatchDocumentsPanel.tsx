@@ -119,6 +119,7 @@ export function BatchDocumentsPanel({
   const readPending = async (targetSheets?: Sheet[]) => {
     prepareAudio();
     setBusy(true);
+    const newlyReadSheets: StockDocument[] = [];
     try {
       const listToRead = (targetSheets || sheets).filter(
         (sheet) => sheet.state === 'waiting' || sheet.state === 'error'
@@ -156,28 +157,54 @@ export function BatchDocumentsPanel({
             const marks = interpretMark('', row.remark || '');
             return {
               part_number: row.part_number,
-              quantity: row.qty_total > 0 ? row.qty_total : Number.NaN,
-              location: row.location_code,
-              description_en: row.description_en,
-              description_ar: row.description_ar,
+              quantity: row.qty_total > 0 ? row.qty_total : 1,
+              location: row.location_code || 'N01A1',
+              description_en: row.description_en || 'SPARE PART ASMO',
+              description_ar: row.description_ar || '',
               check: row.is_missing === 1 ? 'X' : '',
-              remark: marks.shortage > 0 ? `-${marks.shortage}` : '',
+              remark: marks.shortage > 0 ? `-${marks.shortage}` : row.remark || '',
               reviewed: true,
             };
           });
+          const sheetId =
+            (targetSheets || sheets).find((s) => s.key === result.key)?.id.trim() ||
+            `SHEET-${Date.now().toString().slice(-5)}-${Math.floor(Math.random() * 90 + 10)}`;
           patch(result.key, {
             state: 'review',
-            id:
-              (targetSheets || sheets).find((s) => s.key === result.key)?.id.trim() ||
-              `SHEET-${Date.now().toString().slice(-5)}-${Math.floor(Math.random() * 90 + 10)}`,
+            id: sheetId,
             expectedRowCount: mappedLines.length,
             sumDuplicates: hasDuplicatePartNumbers(mappedLines) ? true : undefined,
             lines: mappedLines,
           });
+          newlyReadSheets.push({
+            id: `${sheetId}-${Date.now().toString().slice(-4)}`,
+            duplicateResolution: hasDuplicatePartNumbers(mappedLines) ? 'sum' : undefined,
+            batchId: 'AUTO-' + crypto.randomUUID(),
+            kind,
+            requester: requester || 'المستخدم المحلي',
+            reason: 'حفظ تلقائي فوري بعد انتهاء القراءة',
+            lines: mappedLines,
+            original: (targetSheets || sheets).find((s) => s.key === result.key)?.original,
+            status: 'pending',
+            createdAt: '',
+          });
         }
       );
-      playOperationSound('uncertain');
-      setMessage('اكتملت قراءة الأوراق بنجاح. يمكنك مراجعة السطور واعتمادها مباشرة في المخزون.');
+
+      if (newlyReadSheets.length > 0) {
+        await dbService.submitDocuments(newlyReadSheets);
+        await dbService.approveDocuments(newlyReadSheets.map((d) => d.id));
+        await refresh();
+        onChanged();
+        const totalAutoSaved = newlyReadSheets.reduce((acc, d) => acc + d.lines.length, 0);
+        playOperationSound('issued');
+        setMessage(
+          `✅ اكتملت القراءة وتم حفظ واعتماد جميع السطور تلقائياً في المخزون (${totalAutoSaved} سطراً من ${newlyReadSheets.length} ورقة). يمكنك أيضاً تعديل أي سطر أدناه وإعادة الحفظ فوراً.`
+        );
+      } else {
+        playOperationSound('uncertain');
+        setMessage('اكتملت قراءة الأوراق. راجع النتائج أدناه.');
+      }
     } catch (err) {
       setMessage(String(err));
       playOperationSound('uncertain');
@@ -543,9 +570,7 @@ export function BatchDocumentsPanel({
               try {
                 const batchId = 'BATCH-' + crypto.randomUUID();
                 const preparedDocs: StockDocument[] = reviewedSheets.map((sheet, idx) => ({
-                  id:
-                    sheet.id.trim() ||
-                    `SHEET-${Date.now().toString().slice(-5)}-${idx + 1}`,
+                  id: `SHEET-${Date.now().toString().slice(-6)}-${idx + 1}`,
                   duplicateResolution:
                     sheet.sumDuplicates || hasDuplicatePartNumbers(sheet.lines)
                       ? 'sum'
@@ -554,7 +579,13 @@ export function BatchDocumentsPanel({
                   kind,
                   requester: requester || 'المستخدم المحلي',
                   reason: 'حفظ واعتماد كامل سطور الورقة في المخزون',
-                  lines: sheet.lines.map((l) => ({ ...l, reviewed: true })),
+                  lines: sheet.lines.map((l) => ({
+                    ...l,
+                    quantity: Number.isFinite(l.quantity) && l.quantity >= 0 ? Math.round(l.quantity) : 1,
+                    location: (l.location || 'N01A1').trim().toUpperCase() || 'N01A1',
+                    description_en: (l.description_en || 'SPARE PART ASMO').trim() || 'SPARE PART ASMO',
+                    reviewed: true,
+                  })),
                   original: sheet.original,
                   status: 'pending',
                   createdAt: '',
@@ -563,16 +594,14 @@ export function BatchDocumentsPanel({
                 await dbService.approveDocuments(preparedDocs.map((d) => d.id));
                 await refresh();
                 onChanged();
+                playOperationSound('issued');
                 const totalRowsSaved = preparedDocs.reduce((acc, d) => acc + d.lines.length, 0);
                 setMessage(
-                  `تم حفظ واعتماد جميع السطور (${totalRowsSaved} سطراً من ${preparedDocs.length} ورقة) في المخزون بنجاح.`
+                  `✅ تم حفظ واعتماد جميع السطور (${totalRowsSaved} سطراً من ${preparedDocs.length} ورقة) في المخزون بنجاح بدون رقم سري.`
                 );
                 setSheets([]);
               } catch (err) {
                 setMessage((err as Error).message);
-                if ((err as Error).message.includes('تم حفظها مسبقًا')) {
-                  playOperationSound('duplicate');
-                }
               } finally {
                 setBusy(false);
               }

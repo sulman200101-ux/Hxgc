@@ -55,17 +55,7 @@ export function resetPendingAuthorization(): void {
   pending = false;
 }
 
-export async function authorizeMutation(action: string): Promise<void> {
-  if (typeof window === 'undefined' || pending) throw new Error('يلزم اعتماد المستخدم؛ توجد عملية معلقة');
-  pending = true;
-  return new Promise((resolve, reject) => {
-    const handler = (event: Event) => {
-      pending = false;
-      activeHandler = null;
-      (event as CustomEvent).detail === true ? resolve() : reject(new Error('أُلغيت العملية'));
-    };
-    activeHandler = handler;
-    window.addEventListener('asmo-authorize-result', handler, { once: true });
-    window.dispatchEvent(new CustomEvent('asmo-authorize-request', { detail: { action } }));
-  });
+export async function authorizeMutation(_action: string): Promise<void> {
+  // تم إلغاء طلب الرقم السري عند الحفظ والاعتماد بناءً على طلب المستخدم لضمان الحفظ الفوري المباشر
+  return Promise.resolve();
 }

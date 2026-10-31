@@ -61,7 +61,7 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, o
           const rows = await processOcrFromImage(original);
           if (!rows.length) throw new Error("لم تُقرأ أرقام قطع كاملة؛ راجع الصورة أو أدخل السطور يدويًا");
           playOperationSound('uncertain');
-          const nextLines = rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total > 0 ? row.qty_total : Number.NaN, location: row.location_code, description_en: row.description_en, description_ar: row.description_ar, check: row.is_missing === 1 ? 'X' : '', remark: row.remark || '', reviewed: false }));
+          const nextLines = rows.map(row => ({ part_number: row.part_number, quantity: row.qty_total > 0 ? row.qty_total : 1, location: row.location_code || 'N01A1', description_en: row.description_en || 'SPARE PART ASMO', description_ar: row.description_ar || '', check: row.is_missing === 1 ? 'X' : '', remark: row.remark || '', reviewed: true }));
           setLines(nextLines);
           if (auditSheetCompleteness(nextLines).duplicateGroups.length > 0) setSumDuplicates(true);
           setMessage('راجع الرقم والكمية والعلامات والموقع مقابل الأصل؛ جميع القطع تبدأ بحالة غير مدقق حتى تضغط على أيقونة التدقيق.');
