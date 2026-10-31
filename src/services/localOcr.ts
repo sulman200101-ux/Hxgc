@@ -19,11 +19,6 @@ import {
   isValidSpecificLocation,
   resolveSheetLocationsWithContext,
 } from '../utils/regexSanitizer';
-import {
-  matchVerifiedSheetByMetadata,
-  matchVerifiedSheetByVisualSignature,
-  recoverFullVerifiedSheetIfMatched,
-} from './sapVerifiedSheets';
 import type { ItemStatus } from '../types';
 
 export interface ExtractedSparePart {
@@ -130,8 +125,8 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
 }
 
 /**
- * قراءة أوراق الجرد بدمج المطابقة البصرية الفورية (للأوراق الميدانية المرفقة)
- * مع المحرك السحابي والمحلي غير المتصل (Offline Tesseract Engine) وتدوير أوراق الجوال العمودية تلقائياً.
+ * قراءة أوراق الجرد عبر المحرك السحابي والمحلي غير المتصل (Offline Tesseract Engine)
+ * مع تدوير أوراق الجوال العمودية وتنقية الصورة تلقائياً.
  */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
@@ -140,15 +135,6 @@ export async function processOcrFromImage(
   try {
     if (onProgress) onProgress(15, '1/4 تجهيز وتنقية صورة الورقة بسرعة فائقة...');
     await pauseUi(0);
-
-    // 1. فحص فوري ببيانات الملف (الحجم بالبايت أو الاسم) قبل فك تشفير الصورة
-    if (typeof imageSource !== 'string') {
-      const quickVerified = matchVerifiedSheetByMetadata(imageSource);
-      if (quickVerified) {
-        if (onProgress) onProgress(100, `4/4 اكتملت قراءة كامل الورقة بدقة 100% (${quickVerified.length} صنفاً)`);
-        return quickVerified;
-      }
-    }
 
     const sourceDataUrl =
       typeof imageSource === 'string'
@@ -161,21 +147,9 @@ export async function processOcrFromImage(
           });
 
     const dims = await getImageDimensions(sourceDataUrl);
-    const verifiedMatch = matchVerifiedSheetByMetadata(imageSource, dims.width, dims.height);
-    if (verifiedMatch) {
-      if (onProgress) onProgress(100, `4/4 اكتملت قراءة كامل الورقة بدقة 100% (${verifiedMatch.length} صنفاً)`);
-      return verifiedMatch;
-    }
-
-    // 2. فحص البصمة البصرية للصورة (12x12 Visual Signature) للتعرف الفوري على أوراق الجرد المصورة بالجوال حتى لو تغير اسمها أو حجمها
-    const visualMatch = await matchVerifiedSheetByVisualSignature(sourceDataUrl);
-    if (visualMatch) {
-      if (onProgress) onProgress(100, `4/4 اكتملت قراءة كامل الورقة بدقة 100% (${visualMatch.length} صنفاً)`);
-      return visualMatch;
-    }
 
     // تحجيم الصورة أولاً لمنع تعليق الذاكرة أو المتصفح مع صور الكاميرا الكبيرة
-    // إذا كانت الصورة ملتقطة بشكل عمودي (Portrait: height > width * 1.15 كما في صور كاميرا HONOR 400)، نقوم بتدويرها 90° عكس عقارب الساعة تلقائياً لتصبح أفقية معتدلة!
+    // إذا كانت الصورة ملتقطة بشكل عمودي (Portrait: height > width * 1.15)، نقوم بتدويرها 90° عكس عقارب الساعة تلقائياً لتصبح أفقية معتدلة
     const isPortraitTablePhoto = dims.height > dims.width * 1.15;
     const scaledSource = await prepareImageForAi(sourceDataUrl, {
       maxDimension: 1600,
@@ -186,25 +160,23 @@ export async function processOcrFromImage(
     // تنقية الصورة (Grayscale & Contrast) عبر Canvas مرة واحدة فقط
     const preprocessedGrayscale = await preprocessImageForOCR(scaledSource);
 
-    // 3. محاولة القراءة السريعة عبر الخادم الذكي (Gemini Vision) إذا كان الاتصال متاحاً
+    // 1. محاولة القراءة السريعة عبر الخادم الذكي (Gemini Vision) إذا كان الاتصال متاحاً
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
         if (onProgress) onProgress(35, '2/4 تحليل جدول الجرد واستخراج جميع السطور...');
         const visionResult = await parseTableWithGeminiVision(preprocessedGrayscale, true);
         if (visionResult.success && isUsableExtraction(visionResult.items)) {
-          const recovered = recoverFullVerifiedSheetIfMatched(visionResult.items);
-          const finalVisionItems = recovered || visionResult.items;
           if (onProgress) {
-            onProgress(100, `4/4 اكتملت قراءة الورقة بنجاح (${finalVisionItems.length} صنفاً)!`);
+            onProgress(100, `4/4 اكتملت قراءة الورقة بنجاح (${visionResult.items.length} صنفاً)!`);
           }
-          return finalVisionItems;
+          return visionResult.items;
         }
       } catch {
         // المتابعة تلقائياً إلى القارئ المحلي عند عدم توفر الخادم أو حجب الشبكة
       }
     }
 
-    // 4. المحرك المحلي المعاد استخدامه (Offline Tesseract WASM Pool)
+    // 2. المحرك المحلي المعاد استخدامه (Offline Tesseract WASM Pool)
     if (onProgress) onProgress(45, '2/4 تشغيل محرك القراءة الضوئي المحلي السريع...');
     await pauseUi(0);
 
@@ -213,11 +185,6 @@ export async function processOcrFromImage(
     if (onProgress) onProgress(60, '3/4 قراءة سطور الجدول وأرقام القطع والمواقع...');
     const raw = await worker.recognize(preprocessedGrayscale);
     let extracted = parseRawTextOcr(raw.data.text);
-    const recoveredDirect = recoverFullVerifiedSheetIfMatched(extracted, raw.data.text);
-    if (recoveredDirect) {
-      if (onProgress) onProgress(100, `4/4 اكتملت قراءة كامل الورقة (${recoveredDirect.length} صنفاً)!`);
-      return recoveredDirect;
-    }
 
     // إذا كانت الورقة تحتاج تدوير إضافي، نجرب زوايا التدوير مع تنقية الصورة
     const minExpectedRows = dims.height > 400 && dims.width > 400 ? 3 : 1;
@@ -231,11 +198,6 @@ export async function processOcrFromImage(
         const rotatedGray = await preprocessImageForOCR(rotated);
         const rotRec = await worker.recognize(rotatedGray);
         const attempt = parseRawTextOcr(rotRec.data.text);
-        const recoveredRot = recoverFullVerifiedSheetIfMatched(attempt, rotRec.data.text);
-        if (recoveredRot) {
-          if (onProgress) onProgress(100, `4/4 اكتملت قراءة كامل الورقة (${recoveredRot.length} صنفاً)!`);
-          return recoveredRot;
-        }
         if (attempt.length > extracted.length) {
           extracted = attempt;
         }
@@ -252,11 +214,6 @@ export async function processOcrFromImage(
       });
       const enhRec = await worker.recognize(preprocessed.cleanedDataUrl);
       const enhanced = parseRawTextOcr(enhRec.data.text);
-      const recoveredEnh = recoverFullVerifiedSheetIfMatched(enhanced, enhRec.data.text);
-      if (recoveredEnh) {
-        if (onProgress) onProgress(100, `4/4 اكتملت قراءة كامل الورقة (${recoveredEnh.length} صنفاً)!`);
-        return recoveredEnh;
-      }
       if (enhanced.length > extracted.length || isUsableExtraction(enhanced)) {
         extracted = enhanced;
       }
