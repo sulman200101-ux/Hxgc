@@ -137,7 +137,7 @@ function detectMissingFromCheckMark(item: any): boolean {
 
 app.post('/api/gemini/parse-table', async (req, res) => {
   try {
-    const { imageBase64, mimeType = 'image/jpeg' } = req.body;
+    const { imageBase64, mimeType = 'image/jpeg', customPrompt } = req.body;
 
     if (!imageBase64) {
       return res.status(200).json({
@@ -154,12 +154,7 @@ app.post('/api/gemini/parse-table', async (req, res) => {
     }
     cleanBase64 = cleanBase64.replace(/\s+/g, '');
 
-    const apiKey = (
-      process.env.GEMINI_API_KEY ||
-      process.env.VITE_GEMINI_API_KEY ||
-      process.env.API_KEY ||
-      ''
-    ).trim();
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY' || isGeminiKeyUnsupported) {
       return res.status(200).json({
         success: false,
@@ -184,9 +179,12 @@ CRITICAL RULES:
 1. Read the entire table from top to bottom without skipping a single row (all ~37 rows).
 2. Extract each row into the JSON array: part_number (10 digits starting with 100 in Material column), location (Storage Bin column, e.g. N13B1, N16D1; if covered by a checkmark, infer from adjacent row), quantity (printed integer in QTY column, never 0), check_mark ("X" if handwritten X/×, "✓" if checked), is_missing (true only if handwritten X/×), remark (handwritten shortage like "-1" or "-4"), and description (full English Material Description).`;
 
-    const prompt = `Read every single row of this SAP Inventory Controller table from top to bottom without skipping any row (all ~37 rows). Extract part_number (10 digits), location (Storage Bin), quantity (QTY integer), check_mark, is_missing, remark, and full English description.`;
+    const prompt =
+      typeof customPrompt === 'string' && customPrompt.trim()
+        ? customPrompt.trim()
+        : `Read every single row of this SAP Inventory Controller table from top to bottom without skipping any row (all ~37 rows). Extract part_number (10 digits), location (Storage Bin), quantity (QTY integer), check_mark, is_missing, remark, and full English description.`;
 
-    const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-flash-latest'];
     let response: any = null;
 
     for (const modelName of candidateModels) {
@@ -207,8 +205,6 @@ CRITICAL RULES:
           config: {
             systemInstruction,
             responseMimeType: 'application/json',
-            maxOutputTokens: 8192,
-            temperature: 0.05,
             responseSchema: {
               type: Type.ARRAY,
               description: 'قائمة بجميع صفوف جدول الجرد بالكامل دون تخطي أي سطر',
@@ -423,12 +419,7 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
       .replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '')
       .replace(/\s+/g, '');
 
-    const apiKey = (
-      process.env.GEMINI_API_KEY ||
-      process.env.VITE_GEMINI_API_KEY ||
-      process.env.API_KEY ||
-      ''
-    ).trim();
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
       return res.status(503).json({ error: 'مفتاح الخدمة السحابية غير متوفر' });
     }
@@ -481,7 +472,7 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
 يجب قراءة الجدول بالكامل من البداية للنهاية دون تخطي أي صف، ووضع قيم فارغة "" للحقول غير المقروءة.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       contents: [
         prompt,
         { inlineData: { data: cleanBase64, mimeType } },
@@ -490,8 +481,6 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
         systemInstruction,
         responseMimeType: 'application/json',
         responseSchema,
-        maxOutputTokens: 8192,
-        temperature: 0.05,
       },
     });
 
@@ -513,12 +502,7 @@ app.post('/api/gemini/extract-part', async (req, res) => {
       .replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '')
       .replace(/\s+/g, '');
 
-    const apiKey = (
-      process.env.GEMINI_API_KEY ||
-      process.env.VITE_GEMINI_API_KEY ||
-      process.env.API_KEY ||
-      ''
-    ).trim();
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
       return res.status(503).json({ error: 'مفتاح الخدمة السحابية غير متوفر' });
     }
@@ -537,7 +521,7 @@ app.post('/api/gemini/extract-part', async (req, res) => {
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       contents: [
         prompt,
         { inlineData: { data: cleanBase64, mimeType } },

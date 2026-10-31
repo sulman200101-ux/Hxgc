@@ -1,13 +1,12 @@
 /**
- * خدمة قراءة ومعالجة أوراق جرد أسمو (SAP Inventory Controller) بالذكاء الاصطناعي البصري
+ * خدمة قراءة ومعالجة أوراق جرد أسمو (SAP Inventory Controller) عبر المسار الخادمي (/api/gemini/parse-table)
  * تدعم:
- * 1. القراءة المباشرة من متصفح Google AI Studio عبر @google/genai أو عبر المسار الخادمي (/api/gemini/parse-table)
+ * 1. القراءة الخادمية الآمنة لجميع سطور الورقة عبر (/api/gemini/parse-table)
  * 2. إرسال الصورة الطبيعية الواضحة بعد تدوير الصور الطولية 90° عكس عقارب الساعة (دون طمس السطور بفلتر التباين الحاد)
  * 3. القراءة المزدوجة التلقائية للنصف العلوي والسفلي (Split-Table Halves) إذا رجعت الورقة الكاملة بأقل من 34 سطراً لضمان قراءة الـ 37 سطراً كاملة
  * 4. استخراج الكمية الصحيحة دائماً (>= 1) والوصف الإنجليزي الكامل والموقع الفعلي مع استنتاج المواقع المطموسة بعلامة اليد
  */
 
-import { GoogleGenAI, Type, type Schema } from '@google/genai';
 import type { ExtractedSparePart } from './localOcr';
 import { categorizeAndTranslate } from '../utils/translator';
 import {
@@ -107,129 +106,10 @@ function isHeaderOrFooterNoise(item: any): boolean {
   return false;
 }
 
-function getBrowserGeminiApiKey(): string {
-  try {
-    const metaEnv = (import.meta as unknown as { env?: Record<string, string> })?.env;
-    if (metaEnv?.VITE_GEMINI_API_KEY && metaEnv.VITE_GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') {
-      return metaEnv.VITE_GEMINI_API_KEY.trim();
-    }
-  } catch {}
-  try {
-    const procEnv = (globalThis as any)?.process?.env;
-    const candidate = procEnv?.GEMINI_API_KEY || procEnv?.VITE_GEMINI_API_KEY || procEnv?.API_KEY || '';
-    if (candidate && candidate !== 'MY_GEMINI_API_KEY') {
-      return String(candidate).trim();
-    }
-  } catch {}
-  return '';
-}
-
-const TABLE_RESPONSE_SCHEMA: Schema = {
-  type: Type.ARRAY,
-  description: 'قائمة بجميع صفوف جدول الجرد من أول سطر في الأعلى إلى آخر سطر في الأسفل دون تخطي أي سطر',
-  items: {
-    type: Type.OBJECT,
-    required: ['part_number', 'location', 'quantity', 'description'],
-    properties: {
-      seq: {
-        type: Type.INTEGER,
-        description: 'رقم التسلسل في العمود الأول (#) إن وجد',
-      },
-      part_number: {
-        type: Type.STRING,
-        description: 'رقم المادة المكون من 10 أرقام والذي يبدأ بـ 100 في عمود Material (مثل 1000955242)',
-      },
-      location: {
-        type: Type.STRING,
-        description: 'رمز الموقع في عمود Storage Bin (مثل N13B1 أو N16D1 أو N01A1). إذا غطت علامة اليد الموقع فاستنتجه من السطر المجاور له.',
-      },
-      quantity: {
-        type: Type.INTEGER,
-        description: 'الكمية المطبوعة في عمود QTY كرقم صحيح (مثل 1 أو 2 أو 6). لا تضع 0 إذا كان هناك رقم مطبوع.',
-      },
-      check_mark: {
-        type: Type.STRING,
-        description: 'علامة الفحص في عمود Check: ضع "X" فقط إذا كانت هناك علامة خطأ X أو × مكتوبة بخط اليد، وضع "✓" إذا كانت علامة صح.',
-      },
-      is_missing: {
-        type: Type.BOOLEAN,
-        description: 'true فقط إذا كان السطر معلماً بعلامة X أو × (غير موجودة)',
-      },
-      remark: {
-        type: Type.STRING,
-        description: 'أي نقص مكتوب بخط اليد في عمود Remark مثل "-1" أو "-4" أو "F2"، أو "" إذا كان فارغاً',
-      },
-      description: {
-        type: Type.STRING,
-        description: 'الوصف الإنجليزي الكامل للقطعة في عمود Material Description كما هو مطبوع في السطر (مثل RING, SEAL أو VALVE BALL)',
-      },
-    },
-  },
-};
-
-const TABLE_SYSTEM_INSTRUCTION = `أنت محرك Document AI صناعي فائق الدقة متخصص في قراءة جداول الجرد الكثيفة (SAP Inventory Controller) التي تحتوي عادةً على 37 سطراً في الورقة الواحدة.
-القواعد الإلزامية:
-1. اقرأ الجدول بالكامل سطراً بسطر من أول صف في الأعلى إلى آخر صف في الأسفل دون تخطي أو دمج أي سطر مطلقاً (حتى لو تكرر رقم القطعة في سطرين مختلفين).
-2. إذا كانت الصورة مائلة أو مدورة بزاوية 90 أو 180 أو 270 درجة، اقرأها بالاتجاه الصحيح.
-3. لكل سطر استخرج بدقة:
-   - part_number: رقم القطعة المكون من 10 أرقام في عمود Material (يبدأ بـ 100).
-   - location: رمز الرف في عمود Storage Bin (مثل N13B1, N13B2, N16D1). إذا غطت علامة القلم (✓ أو ×) خانة الموقع، خذ نفس رمز الموقع من السطر الذي فوقه أو تحته مباشرة.
-   - quantity: الرقم الصحيح المطبوع في عمود QTY بعد وحدة القياس (EA, PAA, SET, PK, KIT, ZYD).
-   - check_mark & is_missing: إذا وجدت علامة X أو × بخط اليد في عمود Check فاجعل check_mark="X" و is_missing=true، وإذا كانت علامة صح ✓ فاجعل is_missing=false.
-   - remark: إذا وجدت رقم ناقص مثل -1 أو -4 فاكتبه في remark.
-   - description: اقرأ النص الإنجليزي الكامل في عمود Material Description بدقة ولا تتركه فارغاً أبداً.`;
-
 /**
- * استدعاء Gemini Vision لقراءة صورة واحدة (مباشرة من المتصفح أولاً ثم عبر الخادم الاحتياطي)
+ * استدعاء مسار الخادم (/api/gemini/parse-table) لقراءة صورة واحدة
  */
 async function callGeminiVisionRaw(dataUrl: string, customPrompt?: string): Promise<any[] | null> {
-  const cleanBase64 = dataUrl.includes(',') ? dataUrl.split(',')[1].replace(/\s+/g, '') : dataUrl.replace(/\s+/g, '');
-  const promptText =
-    customPrompt ||
-    `اقرأ جدول الجرد المرفق بالكامل من أول سطر حتى آخر سطر دون ترك أي صف (الورقة تحتوي على حوالي 37 سطراً). استخرج كل سطر بدقة كاملة (part_number من 10 أرقام، location، quantity، check_mark، is_missing، remark، description).`;
-
-  // 1. المحاولة المباشرة عبر @google/genai في المتصفح (تعمل فوراً في Google AI Studio)
-  const browserKey = getBrowserGeminiApiKey();
-  if (browserKey) {
-    const ai = new GoogleGenAI({ apiKey: browserKey });
-    const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-    for (const modelName of models) {
-      try {
-        const response = await ai.models.generateContent({
-          model: modelName,
-          contents: [
-            promptText,
-            {
-              inlineData: {
-                mimeType: 'image/jpeg',
-                data: cleanBase64,
-              },
-            },
-          ],
-          config: {
-            systemInstruction: TABLE_SYSTEM_INSTRUCTION,
-            responseMimeType: 'application/json',
-            responseSchema: TABLE_RESPONSE_SCHEMA,
-            maxOutputTokens: 8192,
-            temperature: 0.05,
-          },
-        });
-        const text = (response.text || '').trim();
-        if (text) {
-          const cleaned = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-          const parsed = JSON.parse(cleaned);
-          const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : null;
-          if (arr && arr.length > 0) {
-            return arr;
-          }
-        }
-      } catch {
-        // جرب النموذج التالي أو الخادم
-      }
-    }
-  }
-
-  // 2. المحاولة عبر المسار الخادمي (/api/gemini/parse-table) بمهلة 45 ثانية كافية لـ 37 سطراً
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 45000);
   try {
@@ -239,6 +119,7 @@ async function callGeminiVisionRaw(dataUrl: string, customPrompt?: string): Prom
       body: JSON.stringify({
         imageBase64: dataUrl,
         mimeType: 'image/jpeg',
+        customPrompt,
       }),
       signal: controller.signal,
     });
@@ -290,7 +171,6 @@ function normalizeRawVisionItems(rawItems: any[]): {
     const isMissing = detectMissingFromCheckMark(item);
     const rawQty = item.qty_total ?? item.quantity ?? item.qty;
     const parsedQty = charToDigitMapper(rawQty, 1);
-    // ضمان عدم إرجاع كمية 0 أو فارغة (NaN) عندما يكون الحقل غير واضح، بل اعتماد 1 كقيمة افتراضية آمنة
     const total = parsedQty > 0 ? parsedQty : 1;
 
     const rawRemark = item.remark ? String(item.remark).trim() : '';
@@ -369,8 +249,6 @@ export function mergeOverlappingSheetRows(
     ? [...topRows, ...bottomRows]
     : baseRows;
 
-  // لبناء قائمة كاملة بدون فقدان التكرار الحقيقي (مثل قطعتين بنفس الرقم في C006 و M016) وبدون تكرار منطقة التداخل:
-  // ندمج topRows ثم نضيف من bottomRows العناصر التي لم تظهر في آخر 8 أسطر من topRows بنفس (part_number + location_code + qty_total)
   if (topRows.length > 0 && bottomRows.length > 0) {
     const merged: ExtractedSparePart[] = [...topRows];
     const overlapTail = topRows.slice(-10);
@@ -385,7 +263,6 @@ export function mergeOverlappingSheetRows(
       );
       if (matchIdx !== -1) {
         usedOverlapIndices.add(matchIdx);
-        // إذا كان الوصف في النصف السفلي أوضح (ليس SPARE PART ASMO)، نحدّث السطر الموجود
         const targetIdxInMerged = topRows.length - overlapTail.length + matchIdx;
         if (
           merged[targetIdxInMerged] &&
@@ -399,7 +276,6 @@ export function mergeOverlappingSheetRows(
       }
     }
 
-    // نضيف أيضاً أي سطر استخرجه المسح الكامل (baseRows) ولم يظهر في الجزأين
     for (const baseRow of baseRows) {
       const exists = merged.some(
         (m) => m.part_number === baseRow.part_number && m.location_code === baseRow.location_code
@@ -407,7 +283,6 @@ export function mergeOverlappingSheetRows(
       if (!exists) {
         merged.push(baseRow);
       } else {
-        // تحسين الوصف إذا كان في baseRow أوضح
         const idx = merged.findIndex(
           (m) =>
             m.part_number === baseRow.part_number &&
@@ -428,7 +303,7 @@ export function mergeOverlappingSheetRows(
 }
 
 /**
- * قراءة ورقة الجرد بالكامل عبر Gemini Vision (المتصفح المباشر أو الخادم)
+ * قراءة ورقة الجرد بالكامل عبر المسار الخادمي (/api/gemini/parse-table)
  * مع التفعيل التلقائي للقراءة المقسمة (Top/Bottom Split Scan) إذا كانت الورقة كثيفة ورجعت بأقل من 34 سطراً
  */
 export async function parseTableWithGeminiVision(
@@ -470,8 +345,6 @@ export async function parseTableWithGeminiVision(
 
     let { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(rawItems);
 
-    // إذا كانت الورقة كاملة ولكن تم استخراج أقل من 34 سطراً (مثلاً 28 سطراً كما يحدث في الجداول الكثيفة)،
-    // نقوم فوراً بتقسيم الورقة إلى نصف علوي ونصف سفلي وقراءتهما لاسترجاع السطور الـ 9 المتبقية بالكامل!
     if (validatedItems.length >= 10 && validatedItems.length < 35) {
       try {
         const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(cleanImageDataUrl);
