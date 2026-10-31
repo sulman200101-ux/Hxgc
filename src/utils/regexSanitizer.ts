@@ -1,11 +1,12 @@
 /**
  * وحدة الخوارزميات المساعدة الذكية لقراءة وتصحيح أوراق جرد أسمو (SAP Inventory Controller Assistive Engine)
  * 1. خوارزمية الإصلاح الذكي لرقم القطعة (Smart 10-Digit Material Auto-Repair):
- *    - استخراج الـ 10 أرقام الكاملة حتى لو التصق بها رقم التسلسل (#) أو رمز الوحدة (EA/PK)
- *    - تصحيح الحروف المتشابهة بصرياً (O->0, I/l/|->1, Z->2, S->5, G->6, B->8)
+ *    - استخراج الـ 10 أرقام الكاملة حتى لو التصق بها رقم التسلسل (#) أو رمز الوحدة (EA/PK) أو خط الجدول (|)
+ *    - تصحيح الحروف المتشابهة بصرياً (O->0, I/l->1, Z->2, S->5, G->6, B->8)
  *    - ترميم ذكي للأرقام المكونة من 9 خانات إذا طمست حدود الجدول الرقم الأول (1) أو أحد أصفار البادئة (1000)
  * 2. خوارزمية التصحيح والاستنتاج السياقي للمواقع (Smart Storage Bin Normalizer & Neighbor Context Resolver):
- *    - تصحيح الأخطاء الشائعة في رموز المواقع مثل (NO1B2 -> N01B2) و (N01FLI -> N01FL1)
+ *    - تصحيح الأخطاء الشائعة في رموز المواقع مثل (NO1B2 -> N01B2) و (N01FLI -> N01FL1) و (N11DI -> N11D1)
+ *    - دعم موقع القطع الثقيلة (D / D1 / D2 / N11D1 / N16D1) بشكل مباشر
  *    - استنتاج رمز الموقع تلقائياً من السطر المجاور في نفس الورقة إذا غطت علامة اليد (✓ أو ×) خانة الموقع
  *    - منع إدخال موقع "عام" نهائياً
  * 3. خوارزمية التمييز المرن لعلامات اليد (✓ صح = موجودة | × خطأ = غير موجودة) بدون رفض الأوراق
@@ -22,6 +23,8 @@ export interface SanitizedPartData {
   remark?: string;
   isValid: boolean;
 }
+
+const LOCATION_CACHE = new Map<string, string>();
 
 /**
  * تحويل الحروف المشوهة في الأرقام (Char-to-Digit Mapper)
@@ -51,10 +54,7 @@ export function charToDigitMapper(raw: string | number | null | undefined, defau
 }
 
 /**
- * 1. خوارزمية الإصلاح والمطابقة الذكية لرقم القطعة (Smart 10-Digit SAP Material Filter & Repair)
- * - تستخرج 10 أرقام كاملة من عمود Material
- * - تتجاهل أرقام العمود التسلسلي (#) القصيرة (3-5 خانات مثل 654، 8428)
- * - تصلح الأخطاء البصرية الناتجة عن خط اليد أو خطوط الجدول
+ * 1. خوارزمية المطابقة الصارمة لرقم القطعة (Strict 10-Digit SAP Material Filter)
  */
 export function strict10DigitRegexFilter(raw: string | null | undefined): string | null {
   const value = String(raw ?? '').trim();
@@ -62,57 +62,113 @@ export function strict10DigitRegexFilter(raw: string | null | undefined): string
 }
 
 /**
+ * إصلاح ذكي لرقم القطعة المكون من 10 أرقام يبدأ بـ 100 من مخرجات القراءة البصرية
+ */
+export function repair10DigitMaterialCode(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  if (/^\d{10}$/.test(trimmed)) return trimmed;
+
+  // 1. فحص وجود 10 أرقام صحيحة تبدأ بـ 100 حتى لو التصقت بخط جدول (|) أو كود مصنع (مثل |1001023714M016)
+  const directGlued = trimmed.match(/(?:^|[^0-9])(100\d{7})(?=[^0-9]|$)/);
+  if (directGlued) return directGlued[1];
+
+  // 2. إزالة خطوط الجدول الطرفية (|) قبل تحويل الحروف البصرية المتشابهة
+  const strippedPipes = trimmed.replace(/^[|\s]+|[|\s]+$/g, '');
+  const mapped = strippedPipes
+    .toUpperCase()
+    .replace(/[OQD]/g, '0')
+    .replace(/[IL!]/g, '1')
+    .replace(/[Z]/g, '2')
+    .replace(/[S$]/g, '5')
+    .replace(/[G]/g, '6')
+    .replace(/[B]/g, '8');
+
+  const exact10 = mapped.match(/(?:^|[^0-9])(100\d{7})(?=[^0-9]|$)/);
+  if (exact10) return exact10[1];
+
+  const digitsOnly = mapped.replace(/[^0-9]/g, '');
+  if (/^100\d{7}$/.test(digitsOnly)) return digitsOnly;
+  // ترميم إذا سقط الرقم الأول (1) وبقي 00xxxxxxx (9 أرقام تبدأ بـ 00)
+  if (/^00\d{7}$/.test(digitsOnly)) return `1${digitsOnly}`;
+
+  return null;
+}
+
+const FORBIDDEN_LOCATIONS = new Set([
+  'عام',
+  'موقع عام',
+  'بدون موقع',
+  'غير محدد',
+  'GENERAL',
+  'UNKNOWN',
+  'NONE',
+  'N/A',
+  'NULL',
+  'UNDEFINED',
+  '002',
+  '001',
+  'C006',
+  'M016',
+  'D04D',
+  'EA',
+  'SET',
+  'PK',
+  'SH',
+  'CO',
+  'AY',
+  'KG',
+  'M',
+  'L',
+  'PAA',
+  'ZYD',
+  'KIT',
+]);
+
+/**
  * فحص هل الموقع حقيقي ومحدد وليس موقعاً عاماً أو فارغاً أو كود مصنع
+ * يدعم الموقع D للقطع الثقيلة (مثل D, D1, D2, N11D1, N11D2, N16D1) وكافة مواقع SAP
  */
 export function isValidSpecificLocation(loc: string | null | undefined): boolean {
   if (!loc) return false;
   const trimmed = String(loc).trim().toUpperCase();
+  if (!trimmed) return false;
+
+  // السماح الصريح بموقع القطع الثقيلة "D" أو "D1" أو "D2" إلخ
+  if (trimmed === 'D' || /^D\d{1,3}$/.test(trimmed)) {
+    return true;
+  }
+
   if (trimmed.length < 2) return false;
-
-  const forbiddenLocations = new Set([
-    'عام',
-    'موقع عام',
-    'بدون موقع',
-    'غير محدد',
-    'GENERAL',
-    'UNKNOWN',
-    'NONE',
-    'N/A',
-    'NULL',
-    'UNDEFINED',
-    '002',
-    '001',
-    'C006',
-    'M016',
-    'D04D',
-    'EA',
-    'SET',
-    'PK',
-    'SH',
-    'CO',
-    'AY',
-    'KG',
-    'M',
-    'L',
-  ]);
-
-  if (forbiddenLocations.has(trimmed)) return false;
+  if (FORBIDDEN_LOCATIONS.has(trimmed)) return false;
   if (trimmed.includes('عام')) return false;
 
-  // قبول كافة رموز المواقع الصناعية الحقيقية (سواء بدأت بحرف أو رقم مثل N01B2, N01BB1, N11FL2, 01A1, RACK-1)
+  // قبول كافة رموز المواقع الصناعية الحقيقية (سواء بدأت بحرف أو رقم مثل N01B2, N01BB1, N11FL2, N11D1, D1, 01A1, RACK-1)
   return /^[A-Z0-9][A-Z0-9\s\/._-]{1,18}$/i.test(trimmed) && /[A-Z]/i.test(trimmed);
 }
 
 /**
  * 2. خوارزمية التصحيح الذكي لأسماء المواقع (Smart SAP Storage Bin Normalizer)
  * - تصلح الأخطاء البصرية الشائعة في رموز المواقع مثل:
- *   NO1B2 -> N01B2 | N01BI -> N01B1 | N01FLI -> N01FL1 | N01 B2 -> N01B2
+ *   NO1B2 -> N01B2 | N01BI -> N01B1 | N01FLI -> N01FL1 | N11DI -> N11D1 | N01 B2 -> N01B2
+ * - تدعم موقع D للقطع الثقيلة
  * - تمنع إدخال موقع "عام" تحت أي ظرف
  */
 export function dynamicLocationNormalizer(raw: string | null | undefined): string {
   if (!raw) return '';
+  const rawStr = String(raw).trim();
+  if (!rawStr) return '';
 
-  let cleaned = String(raw).trim().toUpperCase();
+  const cached = LOCATION_CACHE.get(rawStr);
+  if (cached !== undefined) return cached;
+
+  let cleaned = rawStr.toUpperCase();
+
+  // إذا كان الإدخال المباشر هو موقع القطع الثقيلة D أو D1 أو D2
+  if (cleaned === 'D' || /^D\d{1,3}$/.test(cleaned)) {
+    LOCATION_CACHE.set(rawStr, cleaned);
+    return cleaned;
+  }
 
   // إزالة الكلمات العربية أو كلمة عام أو أكواد المصنع (Plant/Area)
   cleaned = cleaned
@@ -123,10 +179,18 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     .replace(/\s+/g, ' ')
     .trim();
 
-  if (!cleaned) return '';
+  if (!cleaned) {
+    LOCATION_CACHE.set(rawStr, '');
+    return '';
+  }
+
+  if (cleaned === 'D' || /^D\d{1,3}$/.test(cleaned)) {
+    LOCATION_CACHE.set(rawStr, cleaned);
+    return cleaned;
+  }
 
   // إصلاح ذكي لرموز SAP التي يُقرأ فيها الصفر حرف O أو الواحد حرف I/L
-  // مثل: NO1B2 -> N01B2, N0IBO1 -> N01B01, N01FLI -> N01FL1, N01BBI -> N01BB1
+  // مثل: NO1B2 -> N01B2, N0IBO1 -> N01B01, N01FLI -> N01FL1, N01BBI -> N01BB1, N11DI -> N11D1
   let sapFixed = cleaned
     .replace(/\b([A-Z])[Oo](\d)/g, '$10$2')
     .replace(/\b([A-Z]\d)[Oo]/g, '$10')
@@ -135,17 +199,18 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     .replace(/([A-Z]{1,3})[Il|]\b/g, '$11')
     .replace(/([A-Z]{1,3})[Oo]\b/g, '$10');
 
-  // دمج المسافات داخل رمز الرف الواحد في SAP مثل "N01 B2" -> "N01B2" أو "N01 BB1" -> "N01BB1" أو "N01 FL1" -> "N01FL1"
+  // دمج المسافات داخل رمز الرف الواحد في SAP مثل "N01 B2" -> "N01B2" أو "N11 D1" -> "N11D1"
   const splitSapMatch = sapFixed.match(/^([A-Z]\d{2})\s+([A-Z]{1,3}\d{0,2})$/);
   if (splitSapMatch) {
     sapFixed = `${splitSapMatch[1]}${splitSapMatch[2]}`;
   }
 
-  // 1. نمط SAP Storage Bin المتصل (مثل N01B1, N01B2, N01BB1, N01BB2, N01C1, N01C2, N01D1, N01D2, N01FL1, N06C)
+  // 1. نمط SAP Storage Bin المتصل (مثل N01B1, N01B2, N01BB1, N11D1, N11D2, N16D1, N01FL1, N06C)
   const compactBinMatch = sapFixed.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{0,2})\b/);
   if (compactBinMatch) {
     const candidate = compactBinMatch[1].toUpperCase();
     if (!['C006', 'M016', 'D04D'].includes(candidate)) {
+      LOCATION_CACHE.set(rawStr, candidate);
       return candidate;
     }
   }
@@ -153,20 +218,26 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
   // 2. نمط SAP المركب ذو 3 مقاطع (مثل N02 FL1 2 أو P01 FL1 1)
   const spacedBinMatch3 = sapFixed.match(/\b([A-Z]\d{2}\s+[A-Z0-9]+\s+[A-Z0-9]+)\b/);
   if (spacedBinMatch3) {
-    return spacedBinMatch3[1].replace(/\s+/g, ' ').trim();
+    const res = spacedBinMatch3[1].replace(/\s+/g, ' ').trim();
+    LOCATION_CACHE.set(rawStr, res);
+    return res;
   }
 
   // 3. نمط SAP ذو مقطعين
   const spacedBinMatch2 = sapFixed.match(/\b([A-Z]\d{2}\s+[A-Z0-9]+)\b/);
   if (spacedBinMatch2) {
-    return spacedBinMatch2[1].replace(/\s+/g, ' ').trim();
+    const res = spacedBinMatch2[1].replace(/\s+/g, ' ').trim();
+    LOCATION_CACHE.set(rawStr, res);
+    return res;
   }
 
   // 4. أي رمز موقع صناعي صالح آخر
   if (isValidSpecificLocation(sapFixed)) {
+    LOCATION_CACHE.set(rawStr, sapFixed);
     return sapFixed;
   }
 
+  LOCATION_CACHE.set(rawStr, '');
   return '';
 }
 
@@ -283,7 +354,7 @@ export function applyPostProcessingPipeline(rawItem: {
   rejectedReason?: string;
 } {
   const rawPart = rawItem.part_number;
-  const cleanPart = strict10DigitRegexFilter(rawPart);
+  const cleanPart = strict10DigitRegexFilter(rawPart) || repair10DigitMaterialCode(rawPart);
   const cleanLocation = dynamicLocationNormalizer(rawItem.location || rawItem.location_code);
   const isMissing = detectMissingFromCheckMark(rawItem) ? 1 : 0;
   const qtyTotal = Math.max(0, charToDigitMapper(rawItem.quantity ?? rawItem.qty_total, 1));

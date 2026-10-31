@@ -1,16 +1,21 @@
 /**
- * محلل جدول أسمو الصارم والموسع (Strict & Resilient SAP Table Parser)
- * يدعم استخراج جميع الأعمدة من أوراق SAP Inventory Controller:
- * 1. رقم القطعة (Material): 10 أرقام تبدأ بـ 100 مع تصحيح الأخطاء البصرية البسيطة للـ OCR (مثل O->0, I/l->1) داخل سياق رقم الـ Material.
- * 2. الموقع (Storage Bin): مثل N11C2, N11FL1, N11FL2, N12A1, N12A2, N16D1, N16D2, N17A1, N17A2, N17B1 مع استنتاج السياق المجاور.
- * 3. الكمية (QTY): أرقام صحيحة بعد وحدة القياس (EA, SET, PK, SH, CO, AY, KG, PAA, ZYD).
- * 4. العلامات والملاحظات (Check & Remark): استخراج علامة × (غير موجودة) والملاحظات مثل F1, F2, F3, F5, F20, -4, SET.
- * 5. الوصف الكامل (Material Description): قراءة الوصف الفني الكامل دون بتر.
+ * محلل جدول أسمو الصارم والموسع فائق السرعة (Strict & Resilient High-Speed SAP Table Parser)
+ * يدعم استخراج جميع الأعمدة من أوراق SAP Inventory Controller بسرعة ودقة عالية:
+ * 1. رقم القطعة (Material): 10 أرقام تبدأ بـ 100 مع تصحيح الأخطاء البصرية للـ OCR (مثل O->0, I/l/|->1, S->5, B->8, G->6, Z->2) وفصل الأرقام الملتصقة برقم التسلسل أو كود المصنع.
+ * 2. الموقع (Storage Bin): مثل D, D1, D2, N11D1, N11D2, N11C2, N11FL1, N11FL2, N12A1, N12A2, N16D1, N16D2, N17A1, N17A2, N17B1 مع استنتاج السياق المجاور.
+ * 3. الكمية (QTY): أرقام صحيحة بعد وحدة القياس (EA, SET, PK, SH, CO, AY, KG, PAA, ZYD, PCS, ROL, BOX).
+ * 4. العلامات والملاحظات (Check & Remark): استخراج علامة × (غير موجودة) والملاحظات مثل -1, -4 واستبعاد الزيادات (F1, F2, F4).
+ * 5. الوصف الكامل (Material Description): قراءة الوصف الفني الكامل مع الحفاظ على كافة المقاسات واللاحقات الهندسية (مثل M16, SS316).
  */
 
 import { ExtractedSparePart } from '../services/localOcr';
 import { categorizeAndTranslate } from './translator';
-import { sanitizeLocationCode, isValidSpecificLocation, resolveSheetLocationsWithContext } from './regexSanitizer';
+import {
+  sanitizeLocationCode,
+  isValidSpecificLocation,
+  resolveSheetLocationsWithContext,
+  repair10DigitMaterialCode,
+} from './regexSanitizer';
 
 const TECHNICAL_TERMS_DICTIONARY = [
   'GASKET SPIRAL WOUND',
@@ -90,6 +95,12 @@ const TECHNICAL_TERMS_DICTIONARY = [
   'PIPE FITTING',
   'COUPLING',
   'PUMP IMPELLER',
+  'IMPELLER',
+  'ACTUATOR',
+  'TRANSFORMER',
+  'MOTOR',
+  'GEARBOX',
+  'COMPRESSOR',
 ];
 
 export function isRandomNoiseOrGibberish(text: string): boolean {
@@ -112,6 +123,7 @@ export function isRandomNoiseOrGibberish(text: string): boolean {
 
 /**
  * استخراج رقم القطعة الصارم: 10 أرقام تبدأ بـ 100، مع دعم إصلاح الحروف المتشابهة بصرياً في مخرجات Tesseract
+ * وفصل الرقم حتى لو التصق بخط جدول عمودي (|) أو كود مصنع (M016 / C006).
  */
 export function extractStrictMaterialNumber(line: string): string | null {
   const exactMatch = line.match(/\b(100\d{7})\b/);
@@ -119,34 +131,43 @@ export function extractStrictMaterialNumber(line: string): string | null {
     return exactMatch[1];
   }
 
-  // فحص الرموز التي تبدو كرقم قطعة من 10 خانات مع تداخل حرف بصري مثل O أو I أو l
-  const tokens = line.split(/[\s|]+/);
+  // فحص إذا التصق رقم الـ Material بحدود جدول أو حروف مجاورة مثل |1001023714M016
+  const gluedMatch = line.match(/(?:^|[^0-9])(100\d{7})(?=[^0-9]|$)/);
+  if (gluedMatch) {
+    return gluedMatch[1];
+  }
+
+  // فحص الرموز التي تبدو كرقم قطعة من 10 خانات مع تداخل حرف بصري مثل O أو I أو l أو S أو B أو G
+  const tokens = line.split(/[\s|;,:]+/);
   for (const token of tokens) {
     const cleaned = token.replace(/[^A-Za-z0-9]/g, '');
-    if (cleaned.length === 10 && /^[1Il|][0OoQD]{2}[0-9OoQDIl|ZzSsBb]{7}$/.test(cleaned)) {
+    if (cleaned.length === 10 && /^[1Il|!][0OoQD]{2}[0-9OoQDIl|!ZzSsBbGg]{7}$/.test(cleaned)) {
       const repaired = cleaned
-        .replace(/^[Il|]/, '1')
+        .replace(/^[Il|!]/, '1')
         .replace(/[OoQD]/g, '0')
-        .replace(/[Il|]/g, '1')
+        .replace(/[Il|!]/g, '1')
         .replace(/[Zz]/g, '2')
         .replace(/[Ss]/g, '5')
+        .replace(/[Gg]/g, '6')
         .replace(/[Bb]/g, '8');
       if (/^100\d{7}$/.test(repaired)) {
         return repaired;
       }
     }
+    const fallbackRepaired = repair10DigitMaterialCode(token);
+    if (fallbackRepaired) return fallbackRepaired;
   }
 
   return null;
 }
 
 /**
- * استخراج رمز الموقع (Storage Bin): N11C2, N11FL1, N11FL2, N12A1, N16D1, N17A1, K01A1...
+ * استخراج رمز الموقع (Storage Bin): N11C2, N11FL1, N11FL2, N11D1, N11D2, N12A1, N16D1, N17A1, D1, D2...
  */
 export function extractStrictStorageBin(line: string, partNumber: string): string {
   const withoutPart = line.replace(partNumber, '');
 
-  // 1. نمط SAP القياسي مثل N11C2, N11FL1, N11FL2, N01BB1, N16D1, N17A2
+  // 1. نمط SAP القياسي مثل N11C2, N11FL1, N11FL2, N01BB1, N11D1, N16D1, N17A2
   const sapBinMatch = withoutPart.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{1,2})\b/i);
   if (sapBinMatch) {
     const candidate = sapBinMatch[1].toUpperCase();
@@ -161,13 +182,19 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
     return compoundMatch[1].replace(/\s+/g, ' ').trim().toUpperCase();
   }
 
-  // 3. نمط الرف الثنائي مثل N03 A01 أو P01 FL1
+  // 3. نمط الرف الثنائي مثل N03 A01 أو P01 FL1 أو N11 D1
   const twoPartMatch = withoutPart.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]{2,4})\b/i);
   if (twoPartMatch) {
-    return twoPartMatch[1].replace(/\s+/g, ' ').trim().toUpperCase();
+    return sanitizeLocationCode(twoPartMatch[1]) || twoPartMatch[1].replace(/\s+/g, ' ').trim().toUpperCase();
   }
 
-  // 4. نمط LOC-A1-04
+  // 4. نمط موقع القطع الثقيلة المباشر D أو D1 أو D2
+  const dBinMatch = withoutPart.match(/\b(D\d{1,2})\b/i);
+  if (dBinMatch && dBinMatch[1].toUpperCase() !== 'D04D') {
+    return dBinMatch[1].toUpperCase();
+  }
+
+  // 5. نمط LOC-A1-04
   const locMatch = withoutPart.match(/\b(LOC-[A-Z0-9-]{3,10})\b/i);
   if (locMatch) {
     return locMatch[1].toUpperCase();
@@ -189,7 +216,7 @@ function textAfterStorageBin(line: string, storageBin: string): string | null {
   return null;
 }
 
-const QTY_FIELD = /^\s*(?:\|\s*)?(?:(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD)\s+)?(\d{1,9})(?=\s|\||$)/i;
+const QTY_FIELD = /^\s*(?:\|\s*)?(?:(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|PCS|ROL|BOX)\s+)?(\d{1,9})(?=\s|\||$)/i;
 
 export function extractStrictQuantity(line: string, _partNumber: string, storageBin: string): { total: number; out: number } {
   const afterBin = textAfterStorageBin(line, storageBin);
@@ -198,7 +225,7 @@ export function extractStrictQuantity(line: string, _partNumber: string, storage
     return { total: Number(match[1]), out: 0 };
   }
   // بحث احتياطي بعد وحدة القياس مباشرة إذا لم يتطابق نص الموقع حرفياً
-  const unitQtyMatch = line.match(/\b(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD)\s+(\d{1,6})\b/i);
+  const unitQtyMatch = line.match(/\b(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|PCS|ROL|BOX)\s+(\d{1,6})\b/i);
   if (unitQtyMatch) {
     return { total: Number(unitQtyMatch[1]), out: 0 };
   }
@@ -236,13 +263,19 @@ export function extractStrictDescription(
   storageBin: string
 ): { descEn: string; descAr: string; category: string } {
   const upper = line.toUpperCase();
-  const starts = TECHNICAL_TERMS_DICTIONARY.map(term => upper.indexOf(term)).filter(index => index >= 0);
+  let minStart = -1;
+  for (let i = 0; i < TECHNICAL_TERMS_DICTIONARY.length; i++) {
+    const idx = upper.indexOf(TECHNICAL_TERMS_DICTIONARY[i]);
+    if (idx >= 0 && (minStart === -1 || idx < minStart)) {
+      minStart = idx;
+    }
+  }
   const tail = textAfterStorageBin(line, storageBin);
   const quantity = tail?.match(QTY_FIELD);
   let remaining = quantity && tail ? tail.slice(quantity[0].length).replace(/^\s*[|✓✔×Xx\/]+\s*/, '').trim() : '';
   remaining = remaining.replace(/^(?:F\d{1,3}|-\s*\d{1,3}|\+\s*\d{1,3})\s+/i, '').trim();
 
-  const descEn = (starts.length ? line.slice(Math.min(...starts)).trim() : remaining) || 'SPARE PART ASMO';
+  const descEn = (minStart >= 0 ? line.slice(minStart).trim() : remaining) || 'SPARE PART ASMO';
   const { category, descAr } = categorizeAndTranslate(descEn);
   return { descEn, descAr, category };
 }
@@ -250,10 +283,13 @@ export function extractStrictDescription(
 export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   if (!rawText) return [];
 
-  const lines = rawText.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+  const lines = rawText.split(/\r?\n/);
   const rawResults: ExtractedSparePart[] = [];
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
     const partNumber = extractStrictMaterialNumber(line);
     if (!partNumber) {
       continue;
@@ -283,5 +319,5 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
 
   // استنتاج الموقع من السطور المجاورة إذا طمست علامة القلم موقع أحد السطور في نفس الورقة
   const resolved = resolveSheetLocationsWithContext(rawResults);
-  return resolved.filter(row => isValidSpecificLocation(row.location_code));
+  return resolved.filter((row) => isValidSpecificLocation(row.location_code));
 }

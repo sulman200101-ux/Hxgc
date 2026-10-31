@@ -110,7 +110,8 @@ function isHeaderOrFooterNoise(item: any): boolean {
  * إرسال الصورة للمسار الخادمي الآمن `/api/gemini/parse-table` بعد تنقيتها بـ Canvas (Grayscale & Contrast)
  */
 export async function parseTableWithGeminiVision(
-  imageSource: string | File | Blob
+  imageSource: string | File | Blob,
+  alreadyPreprocessed = false
 ): Promise<GeminiVisionResult> {
   try {
     let base64String = '';
@@ -125,13 +126,15 @@ export async function parseTableWithGeminiVision(
       });
     }
 
-    const preprocessedDataUrl = await preprocessImageForOCR(base64String);
-
-    // ضغط وتحسين الصورة لتسريع الإرسال ومنع التعليق
-    const optimizedDataUrl = await prepareImageForAi(preprocessedDataUrl, {
-      maxDimension: 1600,
-      enhanceContrast: true,
-    });
+    let optimizedDataUrl = base64String;
+    if (!alreadyPreprocessed) {
+      const preprocessedDataUrl = await preprocessImageForOCR(base64String);
+      // ضغط وتحسين الصورة لتسريع الإرسال ومنع التعليق
+      optimizedDataUrl = await prepareImageForAi(preprocessedDataUrl, {
+        maxDimension: 1600,
+        enhanceContrast: true,
+      });
+    }
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 25000);
