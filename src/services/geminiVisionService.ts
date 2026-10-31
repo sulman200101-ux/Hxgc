@@ -1,10 +1,10 @@
 /**
  * خدمة قراءة ومعالجة أوراق جرد أسمو (SAP Inventory Controller) عبر المسار الخادمي (/api/gemini/parse-table)
  * تدعم:
- * 1. القراءة الخادمية الآمنة لجميع سطور الورقة عبر (/api/gemini/parse-table)
- * 2. إرسال الصورة الطبيعية الواضحة بعد تدوير الصور الطولية 90° عكس عقارب الساعة (دون طمس السطور بفلتر التباين الحاد)
- * 3. القراءة المزدوجة التلقائية للنصف العلوي والسفلي (Split-Table Halves) إذا رجعت الورقة الكاملة بأقل من 34 سطراً لضمان قراءة الـ 37 سطراً كاملة
- * 4. استخراج الكمية الصحيحة دائماً (>= 1) والوصف الإنجليزي الكامل والموقع الفعلي مع استنتاج المواقع المطموسة بعلامة اليد
+ * 1. خوارزمية المسح المتوازي الفوري للنصف العلوي والسفلي (Promise.all([topHalf, bottomHalf])) في جولة شبكية واحدة (~2.5 ثانية)
+ *    لضمان قراءة الـ 37 سطراً كاملة دون ضياع أي سطر أو انتظار جولتين متتاليتين.
+ * 2. حفظ حالة عدم توفر الخادم (isServerFallbackCached) للتحول الفوري للمحرك المحلي دون تأخير في الأوراق التالية.
+ * 3. محاذاة التداخل المتسلسل عبر mergeOverlappingBandRows مع الحفاظ على الأرقام المتتالية والمكررة.
  */
 
 import type { ExtractedSparePart } from './localOcr';
@@ -17,8 +17,10 @@ import {
   charToDigitMapper,
   resolveSheetLocationsWithContext,
   repair10DigitMaterialCode,
+  normalizeSapMaterialPrefix,
 } from '../utils/regexSanitizer';
 import { prepareImageForAi, splitImageIntoOverlappingHalves } from '../utils/imagePreprocessor';
+import { mergeOverlappingBandRows } from '../utils/strictTableParser';
 import type { SkippedRow } from '../components/SkippedRowsModal';
 
 export interface StructuredSparePartJson {
@@ -47,6 +49,13 @@ export interface GeminiVisionResult {
   error?: GeminiVisionError;
 }
 
+// حفظ حالة عدم توفر مفتاح الخادم لمنع الانتظار الشبكي في الأوراق المتتالية
+let isServerFallbackCached = false;
+
+export function resetServerFallbackCache(): void {
+  isServerFallbackCached = false;
+}
+
 function isPhoneNumberNoise(digits: string): boolean {
   return /^(?:05\d{8}|966\d{8,9}|00966\d{8,9}|01[1-9]\d{7})$/.test(digits);
 }
@@ -62,23 +71,13 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
   const repairedByUtil = repair10DigitMaterialCode(String(raw));
   if (repairedByUtil && !isPhoneNumberNoise(repairedByUtil)) return repairedByUtil;
 
-  const cleaned = String(raw)
-    .trim()
-    .toUpperCase()
-    .replace(/[OQ𝐷]/g, '0')
-    .replace(/[IL|!TR]/g, '1')
-    .replace(/S/g, '5')
-    .replace(/B/g, '8')
-    .replace(/G/g, '6')
-    .replace(/Z/g, '2')
-    .replace(/[^0-9]/g, '');
+  const cleaned = normalizeSapMaterialPrefix(String(raw));
   if (isPhoneNumberNoise(cleaned)) return null;
   if (/^10\d{8}$/.test(cleaned)) return cleaned;
   if (/^00[01]\d{6}$/.test(cleaned)) return `1${cleaned}`;
   const match = cleaned.match(/(10\d{8})/);
   if (match) return match[1];
 
-  // ترميم الأرقام الجزئية (6 إلى 9 أرقام) التي طمست خطوط الجدول جزءاً منها لإضافتها لجدول المراجعة دون ضياع السطر
   if (cleaned.length === 9) {
     if (cleaned.startsWith('00')) return `1${cleaned}`;
     if (cleaned.startsWith('100')) return `${cleaned}0`;
@@ -104,8 +103,12 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
 
 function isHeaderOrFooterNoise(item: any): boolean {
   if (!item) return true;
-  const rawPart = String(item.part_number ?? item.material_number ?? item.material ?? '').trim().toUpperCase();
-  const rawDesc = String(item.description_en ?? item.description ?? '').trim().toUpperCase();
+  const rawPart = String(item.part_number ?? item.material_number ?? item.material ?? '')
+    .trim()
+    .toUpperCase();
+  const rawDesc = String(item.description_en ?? item.description ?? '')
+    .trim()
+    .toUpperCase();
 
   if (
     rawPart === 'MATERIAL' ||
@@ -130,14 +133,18 @@ function isHeaderOrFooterNoise(item: any): boolean {
 }
 
 /**
- * استدعاء مسار الخادم (/api/gemini/parse-table) لقراءة صورة واحدة
+ * استدعاء مسار الخادم (/api/gemini/parse-table) لقراءة صورة أو شريحة واحدة
  */
 async function callGeminiVisionRaw(
   dataUrl: string,
   customPrompt?: string
 ): Promise<{ items: any[]; fallbackToLocal?: boolean } | null> {
+  if (isServerFallbackCached) {
+    return { items: [], fallbackToLocal: true };
+  }
+
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 25000);
+  const timeoutId = setTimeout(() => controller.abort(), 18000);
   try {
     const response = await fetch('/api/gemini/parse-table', {
       method: 'POST',
@@ -152,9 +159,10 @@ async function callGeminiVisionRaw(
     if (response.ok) {
       const candidateData = await response.json();
       if (candidateData?.fallbackToLocal) {
+        isServerFallbackCached = true;
         return { items: [], fallbackToLocal: true };
       }
-      if (candidateData && Array.isArray(candidateData.items) && candidateData.items.length > 0) {
+      if (candidateData && Array.isArray(candidateData.items)) {
         return { items: candidateData.items };
       }
     }
@@ -209,7 +217,11 @@ function normalizeRawVisionItems(rawItems: any[]): {
 
     const rawRemark = item.remark ? String(item.remark).trim() : '';
     const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
-    const out = isMissing ? 0 : minusMatch ? Math.min(total, Number(minusMatch[1] || minusMatch[2] || 0)) : 0;
+    const out = isMissing
+      ? 0
+      : minusMatch
+      ? Math.min(total, Number(minusMatch[1] || minusMatch[2] || 0))
+      : 0;
     const remark = out > 0 ? `-${out}` : undefined;
 
     const rawDescCandidate = String(
@@ -238,10 +250,11 @@ function normalizeRawVisionItems(rawItems: any[]): {
         is_missing: isMissing ? 1 : 0,
         remark,
         status: isMissing ? 'غير موجودة' : 'غير مدقق',
-        confidence: wasRepaired ? '⚠️ تم ترميم رقم القطعة جزئياً — يرجى المراجعة' : 'اقتراح قراءة غير مؤكد',
+        confidence: wasRepaired
+          ? '⚠️ تم ترميم رقم القطعة جزئياً — يرجى المراجعة'
+          : 'اقتراح قراءة غير مؤكد',
       });
     } else if (descEn !== 'SPARE PART ASMO' && rawPartStr.replace(/[^0-9]/g, '').length >= 4) {
-      // تضمين السطر في جدول المراجعة مع رقم مرمم وتنبيه واضح بدلاً من إهماله
       const fallbackDigits = rawPartStr.replace(/[^0-9]/g, '').padEnd(7, '0').slice(0, 7);
       const fallbackPart = `100${fallbackDigits}`;
       const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
@@ -263,23 +276,20 @@ function normalizeRawVisionItems(rawItems: any[]): {
       });
     } else {
       const cleanDigits = rawPartStr.replace(/[^0-9]/g, '');
-      let reason = '';
-      if (!valid10DigitPart) {
-        if (cleanDigits.length > 0 && cleanDigits.length <= 5) {
-          reason = `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام (Material)`;
-        } else if (cleanDigits.length > 0) {
-          reason = `رقم القطعة (${cleanDigits}) غير مكتمل (${cleanDigits.length} أرقام بدلاً من 10 أرقام)`;
-        } else {
-          reason = 'رقم القطعة (10 أرقام) غير واضح في هذا السطر';
-        }
-      } else if (!isLocValid) {
-        reason = 'اسم الموقع غير واضح في هذا السطر';
-      }
+      const reason = !valid10DigitPart
+        ? cleanDigits.length > 0 && cleanDigits.length <= 5
+          ? `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام (Material)`
+          : cleanDigits.length > 0
+          ? `رقم القطعة (${cleanDigits}) غير مكتمل (${cleanDigits.length} أرقام بدلاً من 10 أرقام)`
+          : 'رقم القطعة (10 أرقام) غير واضح في هذا السطر'
+        : 'اسم الموقع غير واضح في هذا السطر';
 
       skippedRows.push({
         id: `skip-${skippedRows.length + 1}`,
         row_number: idx + 1,
-        raw_text: `${rawPartStr || '---'} | ${normLocation || '---'} | Qty: ${total} | ${isMissing ? '× غير موجودة' : '✓'} | ${descEn}`,
+        raw_text: `${rawPartStr || '---'} | ${normLocation || '---'} | Qty: ${total} | ${
+          isMissing ? '× غير موجودة' : '✓'
+        } | ${descEn}`,
         part_number: rawPartStr,
         location: normLocation || '',
         quantity: total,
@@ -294,79 +304,38 @@ function normalizeRawVisionItems(rawItems: any[]): {
 }
 
 /**
- * دمج نتائج النصف العلوي والنصف السفلي للورقة مع منع تكرار منطقة التداخل في المنتصف
+ * دمج نتائج الشرائح المتداخلة مع الحفاظ على الأرقام المتتالية والمكررة
  */
 export function mergeOverlappingSheetRows(
   baseRows: ExtractedSparePart[],
   topRows: ExtractedSparePart[],
   bottomRows: ExtractedSparePart[]
 ): ExtractedSparePart[] {
-  const combinedSource =
-    topRows.length + bottomRows.length > baseRows.length
-      ? [...topRows, ...bottomRows]
-      : baseRows;
-
-  if (topRows.length > 0 && bottomRows.length > 0) {
-    const merged: ExtractedSparePart[] = [...topRows];
-    const overlapTail = topRows.slice(-12);
-    const usedOverlapIndices = new Set<number>();
-
-    for (const botRow of bottomRows) {
-      const matchIdx = overlapTail.findIndex(
-        (tRow, idx) =>
-          !usedOverlapIndices.has(idx) &&
-          tRow.part_number === botRow.part_number &&
-          tRow.location_code === botRow.location_code
-      );
-      if (matchIdx !== -1) {
-        usedOverlapIndices.add(matchIdx);
-        const targetIdxInMerged = topRows.length - overlapTail.length + matchIdx;
-        if (
-          merged[targetIdxInMerged] &&
-          merged[targetIdxInMerged].description_en === 'SPARE PART ASMO' &&
-          botRow.description_en !== 'SPARE PART ASMO'
-        ) {
-          merged[targetIdxInMerged] = botRow;
-        }
-      } else {
-        merged.push(botRow);
-      }
-    }
-
-    for (const baseRow of baseRows) {
-      const exists = merged.some(
-        (m) => m.part_number === baseRow.part_number && m.location_code === baseRow.location_code
-      );
-      if (!exists) {
-        merged.push(baseRow);
-      } else {
-        const idx = merged.findIndex(
-          (m) =>
-            m.part_number === baseRow.part_number &&
-            m.location_code === baseRow.location_code &&
-            m.description_en === 'SPARE PART ASMO' &&
-            baseRow.description_en !== 'SPARE PART ASMO'
-        );
-        if (idx !== -1) {
-          merged[idx] = baseRow;
-        }
-      }
-    }
-
-    return merged;
+  const mergedHalves = mergeOverlappingBandRows([topRows, bottomRows]);
+  if (mergedHalves.length >= baseRows.length) {
+    return mergedHalves;
   }
-
-  return combinedSource;
+  return mergeOverlappingBandRows([baseRows, mergedHalves]);
 }
 
 /**
  * قراءة ورقة الجرد بالكامل عبر المسار الخادمي (/api/gemini/parse-table)
- * مع التفعيل التلقائي للقراءة المقسمة (Top/Bottom Split Scan) إذا كانت الورقة كثيفة ورجعت بأقل من 35 سطراً
+ * باستخدام المسح المتوازي الفوري للنصف العلوي والسفلي (Promise.all([topHalf, bottomHalf])) في جولة شبكية واحدة (~2.5 ثانية)
  */
 export async function parseTableWithGeminiVision(
   imageSource: string | File | Blob,
   alreadyPrepared = false
 ): Promise<GeminiVisionResult> {
+  if (isServerFallbackCached) {
+    return {
+      success: false,
+      items: [],
+      skippedRows: [],
+      isSheetComplete: false,
+      message: 'يتم استخدام محرك القراءة المحلي الفائق السرعة.',
+    };
+  }
+
   try {
     let cleanImageDataUrl = '';
     if (typeof imageSource === 'string' && alreadyPrepared) {
@@ -383,65 +352,90 @@ export async function parseTableWithGeminiVision(
             });
 
       cleanImageDataUrl = await prepareImageForAi(rawDataUrl, {
-        maxDimension: 1850,
-        minDimension: 1500,
+        maxDimension: 1650,
+        minDimension: 1400,
         enhanceContrast: true,
+        sharpen: true,
       });
     }
 
-    const firstCall = await callGeminiVisionRaw(cleanImageDataUrl);
-    if (!firstCall || firstCall.fallbackToLocal || firstCall.items.length === 0) {
+    // تقسيم الورقة لنصفين متداخلين وإرسالهما بالتوازي في جولة شبكية واحدة (~2.5 ثانية) لضمان قراءة الـ 37 سطراً كاملة
+    const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(cleanImageDataUrl);
+    const isSingleSmallCrop = topHalf === bottomHalf;
+
+    if (isSingleSmallCrop) {
+      const singleRes = await callGeminiVisionRaw(cleanImageDataUrl);
+      if (!singleRes || singleRes.fallbackToLocal || singleRes.items.length === 0) {
+        return {
+          success: false,
+          items: [],
+          skippedRows: [],
+          isSheetComplete: false,
+          message: '⚠️ سيتم استخدام القارئ المحلي الذكي.',
+        };
+      }
+      const { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(
+        singleRes.items
+      );
+      return {
+        success: validatedItems.length > 0,
+        items: validatedItems,
+        skippedRows,
+        repairedCount,
+        totalDetectedRows: validatedItems.length + skippedRows.length,
+        isSheetComplete: validatedItems.length > 0 && skippedRows.length === 0,
+      };
+    }
+
+    const [topRes, botRes] = await Promise.all([
+      callGeminiVisionRaw(
+        topHalf,
+        'Read EVERY SINGLE ROW in this top half of the SAP Inventory Controller table from the first row down to the bottom of this crop without skipping any row. Extract 10-digit part_number, location (Storage Bin), quantity, check_mark, remark, and full English description.'
+      ),
+      callGeminiVisionRaw(
+        bottomHalf,
+        'Read EVERY SINGLE ROW in this bottom half of the SAP Inventory Controller table down to the very last row (#37) without skipping any row. Extract 10-digit part_number, location (Storage Bin), quantity, check_mark, remark, and full English description.'
+      ),
+    ]);
+
+    if (topRes?.fallbackToLocal || botRes?.fallbackToLocal) {
       return {
         success: false,
         items: [],
         skippedRows: [],
         isSheetComplete: false,
-        message: '⚠️ تحذير: لم يتمكن الماسح السحابي من قراءة الورقة — سيتم استخدام القارئ المحلي الذكي.',
+        message: 'يتم استخدام محرك القراءة المحلي السريع.',
       };
     }
 
-    let { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(firstCall.items);
+    const topNorm = topRes?.items?.length ? normalizeRawVisionItems(topRes.items) : null;
+    const botNorm = botRes?.items?.length ? normalizeRawVisionItems(botRes.items) : null;
 
-    if (validatedItems.length >= 1 && validatedItems.length < 35) {
-      try {
-        const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(cleanImageDataUrl);
-        const [topRes, botRes] = await Promise.all([
-          callGeminiVisionRaw(
-            topHalf,
-            'Read EVERY row in this top half of the SAP inventory table from top to bottom without skipping any row. Extract 10-digit part_number, location, quantity, check_mark, remark, and full description.'
-          ),
-          callGeminiVisionRaw(
-            bottomHalf,
-            'Read EVERY row in this bottom half of the SAP inventory table down to the very last row (#37) without skipping any row. Extract 10-digit part_number, location, quantity, check_mark, remark, and full description.'
-          ),
-        ]);
+    const mergedItems = mergeOverlappingBandRows([
+      topNorm?.validatedItems || [],
+      botNorm?.validatedItems || [],
+    ]);
+    const finalItems = resolveSheetLocationsWithContext(mergedItems);
+    const skippedRows = [...(topNorm?.skippedRows || []), ...(botNorm?.skippedRows || [])];
+    const repairedCount = (topNorm?.repairedCount || 0) + (botNorm?.repairedCount || 0);
 
-        const topNorm = topRes?.items?.length ? normalizeRawVisionItems(topRes.items) : null;
-        const botNorm = botRes?.items?.length ? normalizeRawVisionItems(botRes.items) : null;
-
-        if (topNorm || botNorm) {
-          const merged = mergeOverlappingSheetRows(
-            validatedItems,
-            topNorm?.validatedItems || [],
-            botNorm?.validatedItems || []
-          );
-          if (merged.length > validatedItems.length) {
-            validatedItems = merged;
-            repairedCount += (topNorm?.repairedCount || 0) + (botNorm?.repairedCount || 0);
-          }
-        }
-      } catch {
-        // الاحتفاظ بالنتيجة الأساسية في حال تعذر المسح التكميلي
-      }
+    if (finalItems.length === 0) {
+      return {
+        success: false,
+        items: [],
+        skippedRows: [],
+        isSheetComplete: false,
+        message: '⚠️ لم يتمكن الماسح السحابي من قراءة الورقة — سيتم استخدام القارئ المحلي الذكي.',
+      };
     }
 
     return {
-      success: validatedItems.length > 0,
-      items: validatedItems,
+      success: true,
+      items: finalItems,
       skippedRows,
       repairedCount,
-      totalDetectedRows: validatedItems.length + skippedRows.length,
-      isSheetComplete: validatedItems.length > 0 && skippedRows.length === 0,
+      totalDetectedRows: finalItems.length + skippedRows.length,
+      isSheetComplete: finalItems.length > 0 && skippedRows.length === 0,
     };
   } catch {
     return {

@@ -1,7 +1,8 @@
-import { mkdir, copyFile } from 'node:fs/promises';
+import { mkdir, copyFile, access } from 'node:fs/promises';
 
 const root = new URL('../', import.meta.url);
-const files = [
+
+const requiredFiles = [
   ['node_modules/tesseract.js/dist/worker.min.js', 'public/ocr/worker.min.js'],
   ['node_modules/tesseract.js-core/tesseract-core-lstm.wasm.js', 'public/ocr/tesseract-core-lstm.wasm.js'],
   ['node_modules/tesseract.js-core/tesseract-core-lstm.wasm', 'public/ocr/tesseract-core-lstm.wasm'],
@@ -9,8 +10,25 @@ const files = [
   ['node_modules/@tesseract.js-data/ara/4.0.0_best_int/ara.traineddata.gz', 'public/ocr/lang/ara.traineddata.gz'],
 ];
 
+const optionalSimdFiles = [
+  ['node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm.js', 'public/ocr/tesseract-core-simd-lstm.wasm.js'],
+  ['node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm', 'public/ocr/tesseract-core-simd-lstm.wasm'],
+];
+
 await mkdir(new URL('public/ocr/lang/', root), { recursive: true });
-for (const [source, target] of files) {
+
+for (const [source, target] of requiredFiles) {
   await copyFile(new URL(source, root), new URL(target, root));
 }
-console.log('Packaged local OCR worker, WASM, and English + Arabic language data');
+
+for (const [source, target] of optionalSimdFiles) {
+  try {
+    const srcUrl = new URL(source, root);
+    await access(srcUrl);
+    await copyFile(srcUrl, new URL(target, root));
+  } catch {
+    // تجاهل في حال عدم توفر نسخة SIMD في الحزمة الحالية
+  }
+}
+
+console.log('Packaged local OCR worker, WASM (including SIMD when available), and language data');

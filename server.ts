@@ -244,7 +244,7 @@ CRITICAL RULES:
         ? customPrompt.trim()
         : `Extract all rows (from row 1 to row 37 without skipping any row) from this SAP Inventory Controller table. Return the complete JSON array.`;
 
-    const candidateModels = ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-2.5-flash', 'gemini-flash-latest'];
     let response: any = null;
 
     for (const modelName of candidateModels) {
@@ -264,11 +264,9 @@ CRITICAL RULES:
           },
           config: {
             systemInstruction,
-            temperature: 0.1,
+            temperature: 0,
             maxOutputTokens: 8192,
-            ...(modelName.startsWith('gemini-2.5')
-              ? { thinkingConfig: { thinkingBudget: 0 } }
-              : {}),
+            thinkingConfig: { thinkingBudget: 0 },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.ARRAY,
@@ -551,7 +549,7 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
       ],
       config: {
         systemInstruction,
-        temperature: 0.1,
+        temperature: 0,
         maxOutputTokens: 8192,
         thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
@@ -607,7 +605,7 @@ app.post('/api/gemini/extract-part', async (req, res) => {
         { inlineData: { data: cleanBase64, mimeType } },
       ],
       config: {
-        temperature: 0.1,
+        temperature: 0,
         thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
         responseSchema: {

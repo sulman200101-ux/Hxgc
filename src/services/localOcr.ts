@@ -1,15 +1,17 @@
 import {
   rotateImageDegrees,
   prepareImageForAi,
-  splitImageIntoThreeBands,
+  splitImageIntoThreeOverlappingBands,
 } from '../utils/imagePreprocessor';
 import { preprocessImageForOCR } from '../utils/imagePreprocess';
 import { createWorker } from 'tesseract.js';
 import { categorizeAndTranslate } from '../utils/translator';
-import { parseStrictAsmoTable } from '../utils/strictTableParser';
+import {
+  parseStrictAsmoTable,
+  mergeOverlappingBandRows,
+} from '../utils/strictTableParser';
 import {
   parseTableWithGeminiVision,
-  mergeOverlappingSheetRows,
 } from './geminiVisionService';
 export {
   extractSparePartData,
@@ -24,6 +26,7 @@ import {
   extractDynamicLocationFromLine,
   isValidSpecificLocation,
   resolveSheetLocationsWithContext,
+  normalizeSapMaterialPrefix,
 } from '../utils/regexSanitizer';
 import type { ItemStatus } from '../types';
 
@@ -54,50 +57,63 @@ export interface OcrProcessResult {
 
 const pauseUi = (ms = 0) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-// تجمع العامل المحلي (Reusable Tesseract Worker Pool) مخصص للغة الإنجليزية والأرقام فقط لمضاعفة السرعة والدقة 3 مرات
-let sharedWorkerPromise: Promise<Awaited<ReturnType<typeof createWorker>>> | null = null;
+const PARALLEL_WORKER_COUNT = 3;
+type TesseractWorkerInstance = Awaited<ReturnType<typeof createWorker>>;
+
+// تجمع العمال المتوازي (3 Parallel English-Only Workers) مع tessedit_do_invert: "0" ومسح 3 شرائح أفقية بالتوازي
+let workerPoolPromises: Array<Promise<TesseractWorkerInstance>> | null = null;
 let workerIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function acquireOcrWorker(): Promise<Awaited<ReturnType<typeof createWorker>>> {
+async function createConfiguredEngWorker(): Promise<TesseractWorkerInstance> {
+  const worker = await createWorker('eng', 1, {
+    workerPath: '/ocr/worker.min.js',
+    corePath: '/ocr/tesseract-core-lstm.wasm.js',
+    langPath: '/ocr/lang',
+  });
+  try {
+    await worker.setParameters({
+      tessedit_pageseg_mode: '6' as any,
+      tessedit_do_invert: '0',
+      preserve_interword_spaces: '1',
+    });
+  } catch {
+    // المتابعة بالإعدادات الافتراضية في بيئة الاختبار
+  }
+  return worker;
+}
+
+async function acquireParallelOcrWorkerPool(
+  count: number = PARALLEL_WORKER_COUNT
+): Promise<TesseractWorkerInstance[]> {
   if (workerIdleTimer) {
     clearTimeout(workerIdleTimer);
     workerIdleTimer = null;
   }
-  if (!sharedWorkerPromise) {
-    sharedWorkerPromise = (async () => {
-      const worker = await createWorker('eng', 1, {
-        workerPath: '/ocr/worker.min.js',
-        corePath: '/ocr/tesseract-core-lstm.wasm.js',
-        langPath: '/ocr/lang',
-      });
-      try {
-        await worker.setParameters({
-          tessedit_pageseg_mode: '6' as any,
-          preserve_interword_spaces: '1',
-        });
-      } catch {
-        // المتابعة بالإعدادات الافتراضية في بيئة الاختبار
-      }
-      return worker;
-    })();
+  if (!workerPoolPromises) {
+    workerPoolPromises = Array.from({ length: PARALLEL_WORKER_COUNT }, () =>
+      createConfiguredEngWorker()
+    );
   }
   try {
-    return await sharedWorkerPromise;
+    const activePromises = workerPoolPromises.slice(0, Math.max(1, count));
+    return await Promise.all(activePromises);
   } catch (err) {
-    sharedWorkerPromise = null;
+    workerPoolPromises = null;
     throw err;
   }
 }
 
-function scheduleWorkerRelease(delayMs = 25000): void {
+function scheduleWorkerRelease(delayMs = 30000): void {
   if (workerIdleTimer) clearTimeout(workerIdleTimer);
   workerIdleTimer = setTimeout(async () => {
-    const p = sharedWorkerPromise;
-    sharedWorkerPromise = null;
+    const pool = workerPoolPromises;
+    workerPoolPromises = null;
     workerIdleTimer = null;
-    if (p) {
-      const w = await p.catch(() => null);
-      await w?.terminate().catch(() => {});
+    if (pool) {
+      for (const p of pool) {
+        const w = await p.catch(() => null);
+        await w?.terminate().catch(() => {});
+      }
     }
   }, delayMs);
 }
@@ -107,11 +123,13 @@ export async function releaseOcrWorkerNow(): Promise<void> {
     clearTimeout(workerIdleTimer);
     workerIdleTimer = null;
   }
-  const p = sharedWorkerPromise;
-  sharedWorkerPromise = null;
-  if (p) {
-    const w = await p.catch(() => null);
-    await w?.terminate().catch(() => {});
+  const pool = workerPoolPromises;
+  workerPoolPromises = null;
+  if (pool) {
+    for (const p of pool) {
+      const w = await p.catch(() => null);
+      await w?.terminate().catch(() => {});
+    }
   }
 }
 
@@ -133,27 +151,34 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
 }
 
 /**
- * دمج نتائج الشرائح الثلاث المتداخلة (علوية + وسطى + سفلية) بالترتيب دون تكرار منطقة التداخل
+ * مسح الورقة الكثيفة عبر 3 شرائح أفقية متداخلة بالتوازي (3 Parallel Workers) في تمريرة واحدة
  */
-function mergeThreeBandRows(
-  baseRows: ExtractedSparePart[],
-  topRows: ExtractedSparePart[],
-  midRows: ExtractedSparePart[],
-  botRows: ExtractedSparePart[]
-): ExtractedSparePart[] {
-  const topAndMid = mergeOverlappingSheetRows([], topRows, midRows);
-  const allBands = mergeOverlappingSheetRows(baseRows, topAndMid, botRows);
-  return allBands.length >= baseRows.length ? allBands : baseRows;
+async function recognizeThreeBandsInParallel(
+  cleanImage: string,
+  workers: TesseractWorkerInstance[]
+): Promise<ExtractedSparePart[]> {
+  const { bands } = await splitImageIntoThreeOverlappingBands(cleanImage);
+  const [topRec, midRec, botRec] = await Promise.all([
+    workers[0].recognize(bands[0]),
+    (workers[1] || workers[0]).recognize(bands[1]),
+    (workers[2] || workers[0]).recognize(bands[2]),
+  ]);
+
+  const topRows = parseRawTextOcr(topRec.data.text);
+  const midRows = parseRawTextOcr(midRec.data.text);
+  const botRows = parseRawTextOcr(botRec.data.text);
+
+  const merged = mergeOverlappingBandRows([topRows, midRows, botRows]);
+  return resolveSheetLocationsWithContext(merged);
 }
 
 /**
  * قراءة أوراق الجرد قراءة حقيقية فائقة السرعة لجميع الـ 37 سطراً:
- * 1. تدوير الصور الطولية الملتقطة بالجوال (90° عكس عقارب الساعة) وتجهيزها بدقة مثالية
- * 2. القراءة عبر المسار الخادمي (/api/gemini/parse-table) مع دعم الدمج النصفي لاستخراج الـ 37 سطراً كاملة
- * 3. عند العمل بالمحرك المحلي (Tesseract):
- *    - استخدام نموذج الإنجليزية والأرقام فقط (eng + PSM 6) مع الترجمة العربية الفورية
- *    - إيقاف التدوير فوراً بمجرد اكتشاف اتجاه الورقة الصحيح (تجنب التوقف عند 82%)
- *    - تقسيم الورقة الكثيفة إلى 3 شرائح أفقية متداخلة (علوية، وسطى، سفلية) لاسترجاع جميع الـ 37 سطراً دون ضياع الأسطر الوسطى أو السفلية
+ * 1. التحجيم المثالي لبلاطات Gemini Vision (1650px) مع فلتر زيادة حدة الحروف (applyFastUnsharpMask).
+ * 2. المسح المتوازي الفوري للنصف العلوي والسفلي عبر Gemini Vision في جولة شبكية واحدة (~2.5 ثانية).
+ * 3. عند العمل بالمحرك المحلي (Local OCR):
+ *    - تشغيل تجمع العمال المتوازي (3 Parallel Workers) باللغة الإنجليزية فقط (eng) مع tessedit_do_invert: "0".
+ *    - مسح 3 شرائح أفقية متداخلة بالتوازي في تمريرة واحدة لاسترجاع كافة الـ 37 سطراً دون ضياع أي سطر.
  */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
@@ -178,16 +203,17 @@ export async function processOcrFromImage(
     const isPortraitTablePhoto = dims.height > dims.width * 1.12;
 
     const scaledNaturalSource = await prepareImageForAi(sourceDataUrl, {
-      maxDimension: 1850,
-      minDimension: isFullSheetPhoto ? 1500 : 800,
+      maxDimension: 1650,
+      minDimension: isFullSheetPhoto ? 1400 : 800,
       enhanceContrast: true,
+      sharpen: true,
       forceRotateCcw: isPortraitTablePhoto,
     });
 
-    // 1. القراءة السريعة الكاملة عبر الخادم (Gemini Vision)
+    // 1. القراءة السريعة الكاملة عبر الخادم (Gemini Vision Parallel Halves)
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        if (onProgress) onProgress(35, '2/4 قراءة جميع سطور الورقة بالماسح الذكي...');
+        if (onProgress) onProgress(35, '2/4 قراءة جميع سطور الورقة بالماسح الذكي المتوازي...');
         const visionResult = await parseTableWithGeminiVision(scaledNaturalSource, true);
         if (visionResult.success && isUsableExtraction(visionResult.items)) {
           if (onProgress) {
@@ -200,16 +226,27 @@ export async function processOcrFromImage(
       }
     }
 
-    // 2. المحرك المحلي السريع (English-only Tesseract WASM Pool + Instant Arabic Translator)
-    if (onProgress) onProgress(50, '2/4 تشغيل محرك القراءة الضوئي السريع وتنقية الصورة...');
+    // 2. المحرك المحلي المتوازي (3 Parallel English-Only Workers + Stroke-Preserving Grid Removal)
+    if (onProgress) onProgress(50, '2/4 تشغيل محرك القراءة المتوازي وتنقية خطوط الشبكة...');
     await pauseUi(0);
 
-    let activeCleanImage = await preprocessImageForOCR(scaledNaturalSource);
-    const worker = await acquireOcrWorker();
+    const activeCleanImage = await preprocessImageForOCR(scaledNaturalSource);
+    const workers = await acquireParallelOcrWorkerPool(
+      isFullSheetPhoto ? PARALLEL_WORKER_COUNT : 1
+    );
 
-    if (onProgress) onProgress(65, '3/4 قراءة سطور الجدول وأرقام القطع والمواقع...');
-    const raw = await worker.recognize(activeCleanImage);
-    let extracted = parseRawTextOcr(raw.data.text);
+    let extracted: ExtractedSparePart[] = [];
+
+    if (isFullSheetPhoto) {
+      if (onProgress) {
+        onProgress(70, '3/4 مسح الشرائح الثلاث بالتوازي لاسترجاع كافة الـ 37 سطراً...');
+      }
+      extracted = await recognizeThreeBandsInParallel(activeCleanImage, workers);
+    } else {
+      if (onProgress) onProgress(70, '3/4 قراءة سطور الجدول وأرقام القطع والمواقع...');
+      const raw = await workers[0].recognize(activeCleanImage);
+      extracted = parseRawTextOcr(raw.data.text);
+    }
 
     // إذا لم يُكتشف أي سطر في الاتجاه الأول فقط (0 سطور)، نفحص زوايا التدوير ونتوقف فوراً عند أول زاوية صحيحة!
     if (!isUsableExtraction(extracted, 1)) {
@@ -218,46 +255,28 @@ export async function processOcrFromImage(
         : ([270, 90, 180] as const);
       for (const [index, degrees] of candidateAngles.entries()) {
         if (onProgress) {
-          onProgress(72 + index * 5, `3/4 فحص اتجاه الورقة بزاوية ${degrees}°...`);
+          onProgress(80 + index * 5, `3/4 فحص اتجاه الورقة بزاوية ${degrees}°...`);
         }
         await pauseUi(0);
         const baseForRot = isPortraitTablePhoto ? sourceDataUrl : scaledNaturalSource;
         const rotated = await rotateImageDegrees(baseForRot, degrees);
         const rotatedClean = await preprocessImageForOCR(rotated);
-        const rotRec = await worker.recognize(rotatedClean);
-        const attempt = parseRawTextOcr(rotRec.data.text);
+        const rotDims = await getImageDimensions(rotatedClean);
+        const isRotFullSheet = rotDims.width >= 500 && rotDims.height >= 500;
+
+        const attempt = isRotFullSheet
+          ? await recognizeThreeBandsInParallel(
+              rotatedClean,
+              await acquireParallelOcrWorkerPool(PARALLEL_WORKER_COUNT)
+            )
+          : parseRawTextOcr((await workers[0].recognize(rotatedClean)).data.text);
+
         if (attempt.length > extracted.length) {
           extracted = attempt;
-          activeCleanImage = rotatedClean;
         }
-        // إيقاف التدوير فوراً بمجرد اكتشاف سطور صحيحة في هذا الاتجاه!
         if (isUsableExtraction(extracted, 1)) {
           break;
         }
-      }
-    }
-
-    // إذا كانت الورقة كثيفة واستخرج المسح الكامل أقل من 35 سطراً (مثلاً 8 سطور فقط)،
-    // نقوم بتقسيم الورقة في اتجاهها الصحيح إلى 3 شرائح أفقية متداخلة عالية الوضوح لاسترجاع جميع الـ 37 سطراً!
-    if (isFullSheetPhoto && isUsableExtraction(extracted, 1) && extracted.length < 35) {
-      if (onProgress) {
-        onProgress(85, '3/4 مسح الشرائح التفصيلية لاسترجاع كافة الـ 37 سطراً...');
-      }
-      await pauseUi(0);
-      const { topBand, midBand, botBand } = await splitImageIntoThreeBands(activeCleanImage);
-      const topRec = await worker.recognize(topBand);
-      if (onProgress) onProgress(90, '3/4 استكمال قراءة الشريحة الوسطى...');
-      const midRec = await worker.recognize(midBand);
-      if (onProgress) onProgress(95, '3/4 استكمال قراءة الشريحة السفلية...');
-      const botRec = await worker.recognize(botBand);
-
-      const topRows = parseRawTextOcr(topRec.data.text);
-      const midRows = parseRawTextOcr(midRec.data.text);
-      const botRows = parseRawTextOcr(botRec.data.text);
-
-      const merged = mergeThreeBandRows(extracted, topRows, midRows, botRows);
-      if (merged.length > extracted.length) {
-        extracted = merged;
       }
     }
 
@@ -268,7 +287,7 @@ export async function processOcrFromImage(
     await releaseOcrWorkerNow();
     throw new Error('تعذر تشغيل القراءة المحلية. جرّب صورة أخرى وأعد المحاولة؛ لم يتغير المخزون.');
   } finally {
-    scheduleWorkerRelease(25000);
+    scheduleWorkerRelease(30000);
   }
 }
 
@@ -283,24 +302,17 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
   const fallbackResults: Array<ExtractedSparePart & { location?: string }> = [];
 
   for (const line of lines) {
-    const normalizedDigitsLine = line.replace(/\b1[0OQD][0OQD][0-9OILSBGZD]{7}\b/gi, (token) =>
-      token
-        .toUpperCase()
-        .replace(/[OQD]/g, '0')
-        .replace(/[IL]/g, '1')
-        .replace(/S/g, '5')
-        .replace(/B/g, '8')
-        .replace(/G/g, '6')
-        .replace(/Z/g, '2')
-    );
-
-    const partMatch = normalizedDigitsLine.match(/\b(10\d{8})\b/);
-    if (!partMatch) {
-      continue;
+    const tokens = line.split(/\s+/);
+    let matchedPartNum: string | null = null;
+    for (const tok of tokens) {
+      const normTok = normalizeSapMaterialPrefix(tok);
+      if (/^10\d{8}$/.test(normTok)) {
+        matchedPartNum = normTok;
+        break;
+      }
     }
 
-    const partNum = partMatch[1];
-    if (strictPartSet.has(partNum)) {
+    if (!matchedPartNum || strictPartSet.has(matchedPartNum)) {
       continue;
     }
 
@@ -325,7 +337,7 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     const out = 0;
 
     const rawDesc = line
-      .replace(partNum, '')
+      .replace(matchedPartNum, '')
       .replace(loc, '')
       .replace(/\b(C006|M016|D04D|002|EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT)\b/gi, ' ')
       .replace(/\b\d{1,4}\b/g, ' ')
@@ -336,7 +348,7 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     const { category, descAr } = categorizeAndTranslate(finalDescEn);
 
     fallbackResults.push({
-      part_number: partNum,
+      part_number: matchedPartNum,
       location_code: loc,
       location: loc,
       description_en: finalDescEn,

@@ -1,8 +1,9 @@
 /**
  * وحدة المعالجة والتكبير الذكي لصور جداول الجرد (High-Clarity Table Image Preprocessor)
+ * - التحجيم المثالي لبلاطات Gemini Vision (1650px) لتقليص زمن الإرسال والمعالجة مع وضوح كامل للـ 37 سطراً
+ * - فلتر زيادة حدة الحروف والأرقام (applyFastUnsharpMask) لإبراز الحواف الدقيقة للأرقام
  * - تدوير تلقائي للصور الطولية الملتقطة بالجوال (90° عكس عقارب الساعة)
- * - تكبير الصور المضغوطة (مثل 1000×750) إلى دقة 2200px لضمان وضوح كافة الـ 37 سطراً والكميات والأوصاف
- * - تقسيم الورقة إلى نصف علوي ونصف سفلي بتداخل آمن (Split-Table Halves) لضمان عدم سقوط أي سطر في الجداول الكثيفة
+ * - تقسيم الشرائح المتداخلة (splitImageIntoOverlappingHalves و splitImageIntoThreeOverlappingBands)
  */
 
 export interface PreProcessingOptions {
@@ -11,10 +12,54 @@ export interface PreProcessingOptions {
   maxDimension?: number;
   minDimension?: number;
   enhanceContrast?: boolean;
+  sharpen?: boolean;
 }
 
 /**
- * معايرة وتجهيز الصورة لـ Gemini Vision ومحرك القراءة بدقة عالية
+ * فلتر زيادة حدة الحروف والأرقام فائق السرعة (Fast Luminance Unsharp Mask)
+ * يقوّي حواف الأرقام والحروف المطبوعة في الجداول الكثيفة (37 سطراً) دون إبطاء المتصفح
+ */
+export function applyFastUnsharpMask(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  amount: number = 0.38
+): void {
+  if (width < 60 || height < 60) return;
+  try {
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const data = imgData.data;
+    const copy = new Uint8ClampedArray(data);
+    const stride = width * 4;
+
+    for (let y = 1; y < height - 1; y++) {
+      const rowOffset = y * stride;
+      for (let x = 1; x < width - 1; x++) {
+        const idx = rowOffset + x * 4;
+        for (let c = 0; c < 3; c++) {
+          const center = copy[idx + c];
+          const neighbors =
+            (copy[idx - 4 + c] +
+              copy[idx + 4 + c] +
+              copy[idx - stride + c] +
+              copy[idx + stride + c]) *
+            0.25;
+          const diff = center - neighbors;
+          if (Math.abs(diff) > 3) {
+            data[idx + c] = Math.min(255, Math.max(0, Math.round(center + diff * amount)));
+          }
+        }
+      }
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+  } catch {
+    // تجاهل في حال قيود CORS على الـ Canvas
+  }
+}
+
+/**
+ * معايرة وتجهيز الصورة لبلاطات Gemini Vision ومحرك القراءة بدقة مثالية (1650px)
  */
 export async function prepareImageForAi(
   imageSource: string,
@@ -30,8 +75,8 @@ export async function prepareImageForAi(
         const origH = img.naturalHeight || img.height;
 
         const shouldRotateCcw = options.forceRotateCcw === true;
-        const maxDim = options.maxDimension || 2200;
-        const minDim = options.minDimension || 1800;
+        const maxDim = options.maxDimension || 1650;
+        const minDim = options.minDimension || 1400;
 
         let targetW = shouldRotateCcw ? origH : origW;
         let targetH = shouldRotateCcw ? origW : origH;
@@ -42,7 +87,6 @@ export async function prepareImageForAi(
           targetW = Math.round(targetW * scale);
           targetH = Math.round(targetH * scale);
         } else if (longestSide > 450 && longestSide < minDim) {
-          // تكبير الصور المضغوطة (مثل صور الجوال أو واتساب 1000×750) ليصبح ارتفاع كل سطر ~35 بكسل
           const scale = minDim / longestSide;
           targetW = Math.round(targetW * scale);
           targetH = Math.round(targetH * scale);
@@ -51,7 +95,7 @@ export async function prepareImageForAi(
         const canvas = document.createElement('canvas');
         canvas.width = targetW;
         canvas.height = targetH;
-        const ctx = canvas.getContext('2d', { alpha: false });
+        const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
         if (!ctx) {
           return resolve(imageSource);
@@ -61,18 +105,25 @@ export async function prepareImageForAi(
         ctx.imageSmoothingQuality = 'high';
 
         if (options.enhanceContrast !== false) {
-          ctx.filter = 'contrast(1.12) brightness(1.02)';
+          ctx.filter = 'contrast(1.14) brightness(1.02)';
         }
 
         if (shouldRotateCcw) {
+          ctx.save();
           ctx.translate(0, targetH);
           ctx.rotate(-Math.PI / 2);
           ctx.drawImage(img, 0, 0, targetH, targetW);
+          ctx.restore();
         } else {
           ctx.drawImage(img, 0, 0, targetW, targetH);
         }
 
-        const resultUrl = canvas.toDataURL('image/jpeg', 0.92);
+        ctx.filter = 'none';
+        if (options.sharpen !== false) {
+          applyFastUnsharpMask(ctx, targetW, targetH, 0.35);
+        }
+
+        const resultUrl = canvas.toDataURL('image/jpeg', 0.88);
         resolve(resultUrl);
       } catch (err) {
         console.warn('Image calibration failed, using original:', err);
@@ -89,8 +140,8 @@ export async function prepareImageForAi(
 }
 
 /**
- * تقسيم صورة الورقة الأفقية الكثيفة (37+ سطراً) إلى نصفين متداخلين (نصف علوي + نصف سفلي)
- * لضمان قراءة كافة السطور بوضوح تام دون ضياع أي سطر في المنتصف أو الأطراف
+ * تقسيم صورة الورقة الأفقية الكثيفة (37 سطراً) إلى نصفين متداخلين (نصف علوي + نصف سفلي)
+ * للمسح المتوازي الفوري (Promise.all) عبر Gemini Vision
  */
 export async function splitImageIntoOverlappingHalves(
   imageSource: string
@@ -107,16 +158,16 @@ export async function splitImageIntoOverlappingHalves(
           return resolve({ topHalf: imageSource, bottomHalf: imageSource });
         }
 
-        // النصف العلوي: من 0% إلى 58% من الارتفاع
-        const topH = Math.round(h * 0.58);
+        // النصف العلوي: من 0% إلى 56% من الارتفاع
+        const topH = Math.round(h * 0.56);
         const topCanvas = document.createElement('canvas');
         topCanvas.width = w;
         topCanvas.height = topH;
         const topCtx = topCanvas.getContext('2d', { alpha: false });
         topCtx?.drawImage(img, 0, 0, w, topH, 0, 0, w, topH);
 
-        // النصف السفلي: من 42% إلى 100% من الارتفاع (تداخل 16% لضمان عدم قطع أي سطر)
-        const botY = Math.round(h * 0.42);
+        // النصف السفلي: من 44% إلى 100% من الارتفاع (تداخل 12% لضمان عدم قطع أي سطر في المنتصف)
+        const botY = Math.round(h * 0.44);
         const botH = h - botY;
         const botCanvas = document.createElement('canvas');
         botCanvas.width = w;
@@ -125,8 +176,8 @@ export async function splitImageIntoOverlappingHalves(
         botCtx?.drawImage(img, 0, botY, w, botH, 0, 0, w, botH);
 
         resolve({
-          topHalf: topCanvas.toDataURL('image/jpeg', 0.9),
-          bottomHalf: botCanvas.toDataURL('image/jpeg', 0.9),
+          topHalf: topCanvas.toDataURL('image/jpeg', 0.88),
+          bottomHalf: botCanvas.toDataURL('image/jpeg', 0.88),
         });
       } catch {
         resolve({ topHalf: imageSource, bottomHalf: imageSource });
@@ -140,11 +191,11 @@ export async function splitImageIntoOverlappingHalves(
 
 /**
  * تقسيم الورقة الكثيفة (37 سطراً) إلى 3 شرائح أفقية متداخلة (علوية، وسطى، سفلية)
- * لضمان قراءة الأسطر الوسطى والسفلية بالكامل دون ضياع أي سطر في المحرك المحلي
+ * للمسح المتوازي عبر 3 عمال محليين (3 Parallel Workers) في نفس اللحظة
  */
-export async function splitImageIntoThreeBands(
+export async function splitImageIntoThreeOverlappingBands(
   imageSource: string
-): Promise<{ topBand: string; midBand: string; botBand: string }> {
+): Promise<{ topBand: string; midBand: string; botBand: string; bands: [string, string, string] }> {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -154,7 +205,12 @@ export async function splitImageIntoThreeBands(
         const w = img.naturalWidth || img.width;
         const h = img.naturalHeight || img.height;
         if (w < 300 || h < 300) {
-          return resolve({ topBand: imageSource, midBand: imageSource, botBand: imageSource });
+          return resolve({
+            topBand: imageSource,
+            midBand: imageSource,
+            botBand: imageSource,
+            bands: [imageSource, imageSource, imageSource],
+          });
         }
 
         const cropBand = (startRatio: number, endRatio: number): string => {
@@ -168,21 +224,38 @@ export async function splitImageIntoThreeBands(
           return canvas.toDataURL('image/jpeg', 0.9);
         };
 
+        const topBand = cropBand(0, 0.42);
+        const midBand = cropBand(0.30, 0.70);
+        const botBand = cropBand(0.58, 1.0);
+
         resolve({
-          topBand: cropBand(0, 0.42),
-          midBand: cropBand(0.29, 0.71),
-          botBand: cropBand(0.58, 1.0),
+          topBand,
+          midBand,
+          botBand,
+          bands: [topBand, midBand, botBand],
         });
       } catch {
-        resolve({ topBand: imageSource, midBand: imageSource, botBand: imageSource });
+        resolve({
+          topBand: imageSource,
+          midBand: imageSource,
+          botBand: imageSource,
+          bands: [imageSource, imageSource, imageSource],
+        });
       }
     };
 
     img.onerror = () =>
-      resolve({ topBand: imageSource, midBand: imageSource, botBand: imageSource });
+      resolve({
+        topBand: imageSource,
+        midBand: imageSource,
+        botBand: imageSource,
+        bands: [imageSource, imageSource, imageSource],
+      });
     img.src = imageSource;
   });
 }
+
+export const splitImageIntoThreeBands = splitImageIntoThreeOverlappingBands;
 
 /**
  * تدوير يدوي أو تلقائي بزاوية محددة (90 / 180 / 270 درجة) بسرعة فائقة
@@ -212,7 +285,7 @@ export async function rotateImageDegrees(
         ctx.rotate((degrees * Math.PI) / 180);
         ctx.drawImage(img, -origW / 2, -origH / 2);
 
-        resolve(canvas.toDataURL('image/jpeg', 0.92));
+        resolve(canvas.toDataURL('image/jpeg', 0.88));
       } catch {
         resolve(imageSource);
       }
@@ -226,7 +299,12 @@ export async function rotateImageDegrees(
 export async function runPreProcessingPipeline(
   imageSource: string,
   options?: any
-): Promise<{ processedImage: string; appliedRotation: number; isClaheApplied: boolean; isDenoised: boolean }> {
+): Promise<{
+  processedImage: string;
+  appliedRotation: number;
+  isClaheApplied: boolean;
+  isDenoised: boolean;
+}> {
   const processed = await prepareImageForAi(imageSource, {
     forceRotateCcw: options?.fixedRotation === 270,
   });
