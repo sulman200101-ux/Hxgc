@@ -1,9 +1,9 @@
 /**
- * تنقية الصورة وتوحيد الإضاءة الموضعية عبر الصورة التكاملية (Integral Image Adaptive Normalization)
- * مع خوارزمية حذف خطوط الشبكة العمودية والأفقية مع الحفاظ التام على ضربات الحروف المتقاطعة (Stroke-Preserving Grid Removal):
- * 1. موازنة إضاءة الورقة موضعياً لإزالة ظلال التصوير مع الحفاظ الكامل على الحروف الرفيعة في الجداول الكثيفة (37 سطراً).
- * 2. مسح خطوط الشبكة الأفقية والعمودية الطويلة فقط في النقاط التي لا تتقاطع مع ضربات الحروف والأرقام،
- *    مما يمنع قراءة الخط العمودي (|) كرقم (1 أو 7) ويمنع التصاق الأرقام بحدود الجدول.
+ * خوارزمية تنقية الصورة المتقدمة وحذف خطوط الجدول مع حفظ الحروف (Stroke-Preserving Grid Removal & Shadow-Free Normalization)
+ * تقوم بـ:
+ * 1. موازنة إضاءة الورقة موضعياً عبر الصورة التكاملية (Integral Image) لإزالة الظلال الجانبية.
+ * 2. تطبيق زيادة حدة الحروف (Unsharp Mask) لإبراز الأرقام الباهتة في زوايا الورقة.
+ * 3. حذف خطوط الشبكة العمودية والأفقية الفاصلة بين خلايا الجدول مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة معها.
  */
 export const preprocessImageForOCR = async (imageSrc: string): Promise<string> => {
   return new Promise((resolve, reject) => {
@@ -25,29 +25,34 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
 
       const imageData = ctx.getImageData(0, 0, width, height);
       const data = imageData.data;
-      const gray = new Float32Array(width * height);
+      const totalPixels = width * height;
+      const gray = new Float32Array(totalPixels);
 
       for (let i = 0, j = 0; i < data.length; i += 4, j++) {
         gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
       }
 
-      // 1. بناء الصورة التكاملية (Integral Image) لتقدير إضاءة خلفية الورقة الموضعية وإزالة ظلال التصوير
+      // 1. بناء الصورة التكاملية (Integral Image) لتقدير إضاءة خلفية الورقة الموضعية بـ O(1)
       const intW = width + 1;
       const integral = new Float64Array((width + 1) * (height + 1));
       for (let y = 0; y < height; y++) {
         let rowSum = 0;
+        const rowOff = y * width;
+        const intRowOff = (y + 1) * intW;
+        const prevIntRowOff = y * intW;
         for (let x = 0; x < width; x++) {
-          rowSum += gray[y * width + x];
-          integral[(y + 1) * intW + (x + 1)] = integral[y * intW + (x + 1)] + rowSum;
+          rowSum += gray[rowOff + x];
+          integral[intRowOff + (x + 1)] = integral[prevIntRowOff + (x + 1)] + rowSum;
         }
       }
 
-      const radius = Math.max(20, Math.round(Math.min(width, height) / 32));
-      const normGray = new Uint8ClampedArray(width * height);
+      const radius = Math.max(22, Math.round(Math.min(width, height) / 28));
+      const norm = new Uint8ClampedArray(totalPixels);
 
       for (let y = 0; y < height; y++) {
         const y0 = Math.max(0, y - radius);
         const y1 = Math.min(height, y + radius + 1);
+        const rowOff = y * width;
         for (let x = 0; x < width; x++) {
           const x0 = Math.max(0, x - radius);
           const x1 = Math.min(width, x + radius + 1);
@@ -57,87 +62,119 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
             integral[y0 * intW + x1] -
             integral[y1 * intW + x0] +
             integral[y0 * intW + x0];
-          const localBg = Math.max(65, localSum / count);
-          const px = gray[y * width + x];
+          const localBg = Math.max(60, localSum / count);
+          const px = gray[rowOff + x];
+          norm[rowOff + x] = Math.min(255, Math.max(0, Math.round((px / localBg) * 255)));
+        }
+      }
 
-          const ratio = px / localBg;
-          let normalized: number;
-          if (ratio < 0.91) {
-            normalized = Math.max(0, (ratio - 0.54) * 340);
+      // 2. زيادة حدة الحروف والأرقام (Unsharp Mask) قبل كشف خطوط الجدول
+      const sharpened = new Uint8ClampedArray(norm);
+      for (let y = 1; y < height - 1; y++) {
+        const rowOff = y * width;
+        for (let x = 1; x < width - 1; x++) {
+          const idx = rowOff + x;
+          const c = norm[idx];
+          const blur = (norm[idx - width] + norm[idx + width] + norm[idx - 1] + norm[idx + 1] + c * 4) >> 3;
+          const sharpenedVal = c + ((c - blur) * 3) / 5;
+          sharpened[idx] = Math.min(255, Math.max(0, Math.round(sharpenedVal)));
+        }
+      }
+
+      // 3. كشف خطوط الجدول الأفقية والعمودية الطويلة وحذفها دون مسح الحروف المتقاطعة معها
+      const hKernel = Math.max(38, Math.round(width / 26));
+      const vKernel = Math.max(32, Math.round(height / 26));
+      const hLineMask = new Uint8Array(totalPixels);
+      const vLineMask = new Uint8Array(totalPixels);
+
+      // كشف الخطوط الأفقية
+      for (let y = 0; y < height; y++) {
+        const rowOff = y * width;
+        let run = 0;
+        for (let x = 0; x < width; x++) {
+          if (sharpened[rowOff + x] < 205) {
+            run++;
           } else {
-            normalized = 252;
-          }
-
-          normGray[y * width + x] = Math.min(255, Math.max(0, Math.round(normalized)));
-        }
-      }
-
-      const outGray = new Uint8ClampedArray(normGray);
-
-      // 2. حذف خطوط الشبكة الأفقية مع الحفاظ التام على ضربات الحروف المتقاطعة (Horizontal Stroke-Preserving Grid Removal)
-      const minHorizSpan = Math.max(36, Math.round(width / 28));
-      for (let y = 2; y < height - 2; y++) {
-        let runStart = -1;
-        for (let x = 0; x <= width; x++) {
-          const isDark = x < width && normGray[y * width + x] < 165;
-          if (isDark) {
-            if (runStart === -1) runStart = x;
-          } else if (runStart !== -1) {
-            const runLen = x - runStart;
-            if (runLen >= minHorizSpan) {
-              for (let k = runStart; k < x; k++) {
-                const above1 = normGray[(y - 1) * width + k];
-                const above2 = normGray[(y - 2) * width + k];
-                const below1 = normGray[(y + 1) * width + k];
-                const below2 = normGray[(y + 2) * width + k];
-                // إذا لم يكن هناك امتداد عمودي لضربة حرف أعلى وأسفل الخط، نمسح بكسل خط الشبكة
-                if (above2 > 205 && below2 > 205 && (above1 > 180 || below1 > 180)) {
-                  outGray[y * width + k] = 250;
-                }
-              }
+            if (run >= hKernel) {
+              for (let k = x - run; k < x; k++) hLineMask[rowOff + k] = 1;
             }
-            runStart = -1;
+            run = 0;
           }
+        }
+        if (run >= hKernel) {
+          for (let k = width - run; k < width; k++) hLineMask[rowOff + k] = 1;
         }
       }
 
-      // 3. حذف خطوط الشبكة العمودية مع الحفاظ التام على ضربات الحروف المتقاطعة (Vertical Stroke-Preserving Grid Removal)
-      const minVertSpan = Math.max(26, Math.round(height / 24));
-      for (let x = 2; x < width - 2; x++) {
-        let runStart = -1;
-        for (let y = 0; y <= height; y++) {
-          const isDark = y < height && normGray[y * width + x] < 165;
-          if (isDark) {
-            if (runStart === -1) runStart = y;
-          } else if (runStart !== -1) {
-            const runLen = y - runStart;
-            if (runLen >= minVertSpan) {
-              for (let k = runStart; k < y; k++) {
-                const left1 = normGray[k * width + (x - 1)];
-                const left2 = normGray[k * width + (x - 2)];
-                const right1 = normGray[k * width + (x + 1)];
-                const right2 = normGray[k * width + (x + 2)];
-                // إذا لم يكن هناك امتداد أفقي لضربة رقم أو حرف يمين ويسار الخط العمودي، نمسح بكسل الخط العمودي
-                if (left2 > 205 && right2 > 205 && (left1 > 180 || right1 > 180)) {
-                  outGray[k * width + x] = 250;
-                }
-              }
+      // كشف الخطوط العمودية الفاصلة بين الأعمدة
+      for (let x = 0; x < width; x++) {
+        let run = 0;
+        for (let y = 0; y < height; y++) {
+          if (sharpened[y * width + x] < 205) {
+            run++;
+          } else {
+            if (run >= vKernel) {
+              for (let k = y - run; k < y; k++) vLineMask[k * width + x] = 1;
             }
-            runStart = -1;
+            run = 0;
+          }
+        }
+        if (run >= vKernel) {
+          for (let k = height - run; k < height; k++) vLineMask[k * width + x] = 1;
+        }
+      }
+
+      const cleaned = new Uint8ClampedArray(sharpened);
+
+      // حذف الخطوط الأفقية مع الحفاظ الكامل على ضربات الحروف العمودية المتقاطعة (حيث توجد بكسلات داكنة أعلى وأسفل الخط)
+      for (let y = 4; y < height - 4; y++) {
+        const rowOff = y * width;
+        for (let x = 0; x < width; x++) {
+          const idx = rowOff + x;
+          if (
+            hLineMask[idx] ||
+            hLineMask[idx - width] ||
+            hLineMask[idx + width] ||
+            hLineMask[idx - width * 2] ||
+            hLineMask[idx + width * 2]
+          ) {
+            const aboveDark = sharpened[idx - width * 3] < 200 || sharpened[idx - width * 4] < 200;
+            const belowDark = sharpened[idx + width * 3] < 200 || sharpened[idx + width * 4] < 200;
+            if (!(aboveDark && belowDark)) {
+              cleaned[idx] = 255;
+            }
           }
         }
       }
 
-      for (let j = 0; j < outGray.length; j++) {
-        const val = outGray[j];
-        const idx = j * 4;
-        data[idx] = val;
-        data[idx + 1] = val;
-        data[idx + 2] = val;
+      // حذف الخطوط العمودية الفاصلة بين الأعمدة لمنع قراءتها كـ | أو 1 أو 7
+      for (let y = 0; y < height; y++) {
+        const rowOff = y * width;
+        for (let x = 2; x < width - 2; x++) {
+          const idx = rowOff + x;
+          if (
+            vLineMask[idx] ||
+            vLineMask[idx - 1] ||
+            vLineMask[idx + 1] ||
+            vLineMask[idx - 2] ||
+            vLineMask[idx + 2]
+          ) {
+            cleaned[idx] = 255;
+          }
+        }
+      }
+
+      // 4. تعزيز التباين النهائي بحيث تصبح الخلفية نقية تماماً (255) والحروف سوداء واضحة
+      for (let j = 0, i = 0; j < totalPixels; j++, i += 4) {
+        const v = cleaned[j];
+        const stretched = v >= 215 ? 255 : Math.min(255, Math.max(0, Math.round(((v - 110) * 255) / 130)));
+        data[i] = stretched;
+        data[i + 1] = stretched;
+        data[i + 2] = stretched;
       }
 
       ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL('image/jpeg', 0.9));
+      resolve(canvas.toDataURL('image/jpeg', 0.92));
     };
 
     img.onerror = (err) => reject(err);

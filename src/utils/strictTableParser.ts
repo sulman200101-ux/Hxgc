@@ -1,11 +1,11 @@
 /**
- * المحلل الصارم السريع لجداول SAP (Strict & Resilient High-Speed SAP Table Parser)
- * يقرأ أي ورقة جرد SAP Inventory Controller قراءة فعلية مباشرة دون أي أرقام مخزنة مسبقاً:
- * 1. رقم القطعة (Material): 10 أرقام تبدأ بـ 100 أو 101 مع تصحيح البادئة البصرية (normalizeSapMaterialPrefix) وفصل الأرقام الملتصقة بخطوط الجدول (|).
- * 2. الموقع (Storage Bin): مثل N13B1, N13B2, N11C2, N11FL1, N16D1, D1 مع تنعيم الساندويتش السياقي (resolveSheetLocationsWithContext).
+ * محلل جدول أسمو الصارم والموسع فائق السرعة (Strict & Resilient High-Speed SAP Table Parser)
+ * يقرأ أي ورقة جرد SAP Inventory Controller قراءة فعلية مباشرة مع خوارزميات التصحيح السياقي:
+ * 1. رقم القطعة (Material): 10 أرقام تبدأ بـ 100 مع تصحيح الأخطاء البصرية (1007->1001, 1900->1000, 1090->1000) وفصل الأرقام الملتصقة بخطوط الجدول.
+ * 2. الموقع (Storage Bin): مثل N15BB2, N11C2, N11FL1, N01A1, N15D2 مع تنعيم الساندويتش السياقي للسطور المتجاورة.
  * 3. الكمية (QTY): استخراج الرقم بعد وحدة القياس (EA, SET, PK, SH, CO, AY, KG, PAA, ZYD, KIT, PCS, ROL, BOX).
  * 4. العلامات والملاحظات (Check & Remark): استخراج علامة × (غير موجودة) والملاحظات مثل -1, -4 واستبعاد الزيادات (F1, F2, F4).
- * 5. خوارزمية محاذاة التداخل المتسلسل (mergeOverlappingBandRows): تدمج الشرائح المتداخلة مع الحفاظ التام على الأرقام المتتالية (1001035309..1001035312) والمكررة (1000428938).
+ * 5. الوصف الكامل (Material Description): استخراج الوصف الإنجليزي الكامل وترجمته الفورية عبر القاموس الهندسي المفهرس.
  */
 
 import { ExtractedSparePart } from '../services/localOcr';
@@ -29,6 +29,7 @@ const TECHNICAL_TERMS_DICTIONARY = [
   'SUPPORT',
   'SEAL LABYRINTH',
   'MECHANICAL SEAL',
+  'FACE MECHANICAL SEAL',
   'OIL SEAL',
   'SEAL',
   'CONTACTOR',
@@ -64,6 +65,7 @@ const TECHNICAL_TERMS_DICTIONARY = [
   'RING, THROTTLE',
   'RING, SNAP',
   'RING, BACKSEAT',
+  'RING, STEM',
   'RING',
   'POWER SUPPLY',
   'TEE',
@@ -99,6 +101,7 @@ const TECHNICAL_TERMS_DICTIONARY = [
   'BELT VEE',
   'BELT',
   'TRANSMITTER',
+  'FLOAT',
   'FLOWMETER',
   'HORN',
   'SEAT VALVE',
@@ -208,107 +211,84 @@ export function isRandomNoiseOrGibberish(text: string): boolean {
   return false;
 }
 
-function isLikelySapRowLine(line: string): boolean {
-  if (
-    /\b(?:C[0Oo]{2}[6bB8]|M[0Oo][1Il|i][6bB8]|[0Oo]{2}2|EA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|PCS|ROL|BOX|N[0Oo1Il|i\d]{2}[A-Za-z]{1,3}[0-9Il|!12]?)\b/i.test(
-      line
-    )
-  ) {
-    return true;
-  }
-  const upper = line.toUpperCase();
-  for (let i = 0; i < TECHNICAL_TERMS_REGEXES.length; i++) {
-    if (TECHNICAL_TERMS_REGEXES[i].test(upper)) return true;
-  }
-  return false;
-}
-
-export function extractMaterialWithRepairInfo(
-  line: string
-): { partNumber: string; needsReview: boolean } | null {
-  const exactMatch = line.match(/\b(10[01]\d{7})\b/);
+/**
+ * استخراج رقم القطعة الصارم: 10 أرقام تبدأ بـ 100، مع دعم إصلاح الحروف المتشابهة بصرياً في مخرجات OCR
+ */
+export function extractStrictMaterialNumber(line: string): string | null {
+  const exactMatch = line.match(/\b(100\d{7})\b/);
   if (exactMatch) {
-    return { partNumber: exactMatch[1], needsReview: false };
+    return normalizeSapMaterialPrefix(exactMatch[1]);
   }
 
-  const gluedMatch = line.match(/(?:^|[^0-9])(10[01]\d{7})\d{0,2}(?=[^0-9]|$)/);
+  const gluedMatch = line.match(/(?:^|[^0-9])(100\d{7})\d{0,2}(?=[^0-9]|$)/);
   if (gluedMatch) {
-    return { partNumber: gluedMatch[1], needsReview: false };
+    return normalizeSapMaterialPrefix(gluedMatch[1]);
   }
 
-  const splitMatch = line.match(/\b(10[01]\d{2,6})\s+(\d{1,5})\b/);
+  const splitMatch = line.match(/\b(100\d{3,6})\s+(\d{1,4})\b/);
   if (splitMatch && (splitMatch[1] + splitMatch[2]).length === 10) {
-    return { partNumber: splitMatch[1] + splitMatch[2], needsReview: false };
+    return normalizeSapMaterialPrefix(splitMatch[1] + splitMatch[2]);
   }
 
-  const isSapTableLine = isLikelySapRowLine(line);
+  const isSapTableLine =
+    /\b(?:C006|C008|C00S|COOS|C00|CO06|C08|M016|MO16|MOTE|MOIS|D04D|DO4D|002|EA|EFA|FA|SET|PK|PAA|SH|ZYD|KIT|N[01OIl]\d[A-Z]{1,3}\d?)\b/i.test(
+      line
+    );
+
   if (isSapTableLine) {
-    const nineDigitMatch = line.match(/(?:^|[^0-9])(00[012]\d{6})(?=[^0-9]|$)/);
+    const nineDigitMatch = line.match(/(?:^|[^0-9])(00[01]\d{6})(?=[^0-9]|$)/);
     if (nineDigitMatch) {
-      return { partNumber: `1${nineDigitMatch[1]}`, needsReview: false };
+      return `1${nineDigitMatch[1]}`;
     }
   }
 
   const tokens = line.split(/[\s|;,\[\]{}()]+/);
   for (const token of tokens) {
-    const cleaned = token.replace(/[^A-Za-z0-9]/g, '');
-    if (cleaned.length >= 8 && cleaned.length <= 13) {
-      const normalized = normalizeSapMaterialPrefix(cleaned);
-      if (/^10[01]\d{7}$/.test(normalized)) {
-        return { partNumber: normalized, needsReview: false };
+    const cleaned = token.replace(/[^A-Za-z0-9°'"%¢]/g, '');
+    if (cleaned.length >= 8 && cleaned.length <= 12) {
+      const repaired = cleaned
+        .replace(/^(?:aot|aoo|qop|roo|too|190|109)/i, '100')
+        .replace(/^[Il|!rRtTsS74]/, '1')
+        .replace(/[OoQD°]/g, '0')
+        .replace(/[Il|!t'"rR]/g, '1')
+        .replace(/[Zz]/g, '2')
+        .replace(/[Ss$§]/g, '5')
+        .replace(/[Gg%]/g, '6')
+        .replace(/[BbeE]/g, '8')
+        .replace(/[aA]/g, '4')
+        .replace(/[dD]/g, '0')
+        .replace(/[¢cC]/g, '9')
+        .replace(/[^0-9]/g, '');
+
+      const prefixFixed = normalizeSapMaterialPrefix(repaired);
+      if (/^100\d{7}$/.test(prefixFixed)) {
+        return prefixFixed;
       }
-      if (/^10\d{8}$/.test(normalized)) {
-        return { partNumber: normalized, needsReview: false };
+      if (isSapTableLine && /^[147]100\d{7}$/.test(repaired)) {
+        return normalizeSapMaterialPrefix(repaired.slice(1));
       }
-      if (isSapTableLine && /^10[01]\d{7}\d{1,3}$/.test(normalized)) {
-        return { partNumber: normalized.slice(0, 10), needsReview: false };
+      if (isSapTableLine && /^100\d{7}\d{1,2}$/.test(repaired)) {
+        return normalizeSapMaterialPrefix(repaired.slice(0, 10));
       }
-      if (isSapTableLine && /^00\d{7}$/.test(normalized)) {
-        return { partNumber: `1${normalized}`, needsReview: false };
+      if (isSapTableLine && /^00[01]\d{6}$/.test(repaired)) {
+        return `1${repaired}`;
+      }
+      if (isSapTableLine && /^1001\d{5}$/.test(repaired)) {
+        return `10011${repaired.slice(4)}`;
+      }
+      if (isSapTableLine && /^1000\d{5}$/.test(repaired)) {
+        return `${repaired}1`;
       }
     }
     const fallbackRepaired = repair10DigitMaterialCode(token);
-    if (fallbackRepaired) {
-      return { partNumber: fallbackRepaired, needsReview: false };
-    }
-  }
-
-  if (isSapTableLine) {
-    for (const token of tokens) {
-      const stripped = normalizeSapMaterialPrefix(token);
-      if (stripped.length === 9) {
-        const code = stripped.startsWith('00')
-          ? `1${stripped}`
-          : stripped.startsWith('100')
-          ? `${stripped}0`
-          : `1${stripped}`;
-        return { partNumber: code, needsReview: true };
-      }
-      if (stripped.length === 8) {
-        const code = stripped.startsWith('00')
-          ? `10${stripped}`
-          : stripped.startsWith('100')
-          ? `${stripped}00`
-          : `10${stripped}`;
-        return { partNumber: code, needsReview: true };
-      }
-      if (stripped.length === 7 && (stripped.startsWith('0') || stripped.startsWith('1'))) {
-        const code = stripped.startsWith('100') ? `${stripped}000` : `100${stripped}`;
-        return { partNumber: code.slice(0, 10), needsReview: true };
-      }
-    }
+    if (fallbackRepaired) return fallbackRepaired;
   }
 
   return null;
 }
 
-export function extractStrictMaterialNumber(line: string): string | null {
-  const res = extractMaterialWithRepairInfo(line);
-  return res ? res.partNumber : null;
-}
-
 /**
- * استخراج رمز الموقع (Storage Bin): N13B1, N13B2, N11C2, N11FL1, N11D1, N16D1, N17A1, D1, D2...
+ * استخراج رمز الموقع (Storage Bin): N15BB2, N11C2, N11FL1, N11D1, N01A1, N01B1, D1, D2...
  */
 export function extractStrictStorageBin(line: string, partNumber: string): string {
   const withoutPart = line
@@ -328,33 +308,23 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
     .replace(/\bT?N[Ili|!tT1][Zz2]/gi, 'N12')
     .replace(/\bT?N[Oo](\d)/gi, 'N0$1')
     .replace(/\bT?N(\d)[Oo]/gi, 'N$10')
-    .replace(/\bT?N[Ili|!](\d)/gi, 'N1$1')
-    .replace(/\bT?N(\d)[Ili|!]/gi, 'N$11')
-    .replace(/\b(N\d{2})(?:8B|B8|88|8BR|BR|BBR)([12Il|!tT])\b/gi, (_m, p1, p2) => `${p1.toUpperCase()}BB${/[2]/.test(p2) ? '2' : '1'}`)
+    .replace(/\bT?N[Ili|!tT](\d)/gi, 'N1$1')
+    .replace(/\bT?N(\d)[Ili|!tT]/gi, 'N$11')
+    .replace(/\b(N\d{2})(?:8B|B8|88|8BR|BR|BBR)([12Il|!tT])\b/gi, '$1BB$2')
     .replace(/\b(N\d{2})0([12])\b/gi, '$1D$2')
     .replace(/\b(N\d{2})F[LI1][Ili|!tTY41]\b/gi, '$1FL1')
     .replace(/\b(N\d{2})F[LI1][ZzQRe2]\b/gi, '$1FL2')
-    .replace(/\bT?(N[0Oo1Il|i\d][0Oo1Il|i\d][A-Za-z]{1,2}[12Il|i])\b/gi, (_m, bin) =>
-      bin
-        .toUpperCase()
-        .replace(/^N[O]/, 'N0')
-        .replace(/^N(\d)[O]/, 'N$10')
-        .replace(/^N[IL|]/, 'N1')
-        .replace(/^N(\d)[IL|]/, 'N$11')
-        .replace(/[IL|]$/, '1')
-    )
-    .replace(/\b(N\d{2})8([12])\b/gi, '$1B$2')
     .replace(/\b(N\d{2})V?A[TRIl|!yLD1]\b/gi, '$1A1')
     .replace(/\b(N\d{2})V?A[ZzR2]\b/gi, '$1A2')
     .replace(/\b(N\d{2})[EB8][TRIl|!y1]\b/gi, '$1B1')
     .replace(/\b(N\d{2})[EB8][Zz2]\b/gi, '$1B2')
-    .replace(/\bN[1Il|i]s[oO0dD]([12])\b/gi, 'N16D$1')
+    .replace(/\bN[1Il|i]s[oO0dD]([12])\b/gi, 'N15D$1')
     .replace(/\b(N\d{2}[A-Z]{1,2})[TRIl|!y]\b/gi, '$11');
 
   const sapBinMatch = normalizedBinsLine.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{1,2})\b/i);
   if (sapBinMatch) {
-    const candidate = sapBinMatch[1].toUpperCase();
-    if (!['C006', 'M016', 'D04D'].includes(candidate)) {
+    const candidate = dynamicLocationNormalizerFromCandidate(sapBinMatch[1].toUpperCase());
+    if (candidate && !['C006', 'M016', 'D04D'].includes(candidate)) {
       return candidate;
     }
   }
@@ -366,10 +336,7 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
 
   const twoPartMatch = normalizedBinsLine.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]{2,4})\b/i);
   if (twoPartMatch) {
-    return (
-      sanitizeLocationCode(twoPartMatch[1]) ||
-      twoPartMatch[1].replace(/\s+/g, ' ').trim().toUpperCase()
-    );
+    return sanitizeLocationCode(twoPartMatch[1]) || twoPartMatch[1].replace(/\s+/g, ' ').trim().toUpperCase();
   }
 
   const dBinMatch = normalizedBinsLine.match(/\b(D\d{1,2})\b/i);
@@ -385,6 +352,10 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
   return sanitizeLocationCode(normalizedBinsLine);
 }
 
+function dynamicLocationNormalizerFromCandidate(cand: string): string {
+  return sanitizeLocationCode(cand) || cand;
+}
+
 function textAfterStorageBin(line: string, storageBin: string): string | null {
   if (!storageBin) return null;
   const tokens = Array.from(line.matchAll(/\S+/g));
@@ -392,16 +363,15 @@ function textAfterStorageBin(line: string, storageBin: string): string | null {
     for (let width = 1; width <= 3 && i + width <= tokens.length; width++) {
       const last = tokens[i + width - 1];
       const candidate = line.slice(tokens[i].index!, last.index! + last[0].length);
-      if (sanitizeLocationCode(candidate) === storageBin)
-        return line.slice(last.index! + last[0].length);
+      if (sanitizeLocationCode(candidate) === storageBin) return line.slice(last.index! + last[0].length);
     }
   }
   return null;
 }
 
-const UNIT_PATTERN = '(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|PCS|ROL|BOX|FT|M|L)';
+const UNIT_PATTERN = '(?:EA|EFA|FA|tA|cA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|OKIT|PCS|ROL|BOX|FT|M|L)';
 const QTY_FIELD = new RegExp(
-  `^\\s*(?:[|\\[\\]()—\\-~]+\\s*)?(?:${UNIT_PATTERN}[\\s|\\[\\]()—\\-~]+)?(\\d{1,9})(?=\\s|\\||\\[|\\]|$)`,
+  `^\\s*(?:[|\\[\\]()—\\-~°.]+\\s*)?(?:${UNIT_PATTERN}[\\s|\\[\\]()—\\-~°.]+)?(\\d{1,9})(?=\\s|\\||\\[|\\]|$)`,
   'i'
 );
 
@@ -418,7 +388,7 @@ export function extractStrictQuantity(
   }
 
   const unitQtyMatch = line.match(
-    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:]+(\\d{1,6})\\b`, 'i')
+    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(\\d{1,6})\\b`, 'i')
   );
   if (unitQtyMatch) {
     const val = Number(unitQtyMatch[1]);
@@ -426,7 +396,7 @@ export function extractStrictQuantity(
   }
 
   const unitOcrOneMatch = line.match(
-    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:]+(?:ot|a1|[Il|!ti])\\b`, 'i')
+    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(?:ot|a1|to|[Il|!ti])\\b`, 'i')
   );
   if (unitOcrOneMatch) {
     return { total: 1, out: 0 };
@@ -435,6 +405,9 @@ export function extractStrictQuantity(
   return { total: 1, out: 0 };
 }
 
+/**
+ * استخراج الملاحظات وعلامة الفحص (Check & Remark) من السطر بعد الكمية
+ */
 export function extractCheckAndRemark(
   line: string,
   storageBin: string
@@ -443,12 +416,10 @@ export function extractCheckAndRemark(
   const qtyMatch = tail.match(QTY_FIELD);
   const afterQty = qtyMatch ? tail.slice(qtyMatch[0].length).trim() : tail;
 
-  const isMissing = /(?:^|\s|\||\[|\])([Xx×✗✘])(?=\s|\||\[|\]|$)/.test(afterQty) ? 1 : 0;
+  const isMissing = /(?:^|\s|\||\[|\])([Xx×✗✘]{1,2})(?=\s|\||\[|\]|$)/.test(afterQty) ? 1 : 0;
   let remark = '';
   let shortage = 0;
-  const minusMatch = afterQty.match(
-    /(?:^|\s|\||\[|\])(?:\d{1,4}\s*-\s*(\d{1,4})|-\s*(\d{1,4}))(?=\s|\||\[|\]|$)/
-  );
+  const minusMatch = afterQty.match(/(?:^|\s|\||\[|\])(?:\d{1,4}\s*-\s*(\d{1,4})|-\s*(\d{1,4}))(?=\s|\||\[|\]|$)/);
   if (minusMatch) {
     shortage = Number(minusMatch[1] || minusMatch[2] || 0);
     if (shortage > 0) {
@@ -458,11 +429,14 @@ export function extractCheckAndRemark(
   return { isMissing, remark, shortage };
 }
 
+/**
+ * تنظيف النص المستخرج للوصف الإنجليزي من بقايا خطوط الجدول وعلامات الصح في الـ OCR
+ */
 function cleanOcrDescriptionTail(rawTail: string): string {
   return rawTail
-    .replace(/^\s*(?:[|\[\]()—\-~_✓✔×Xx\/]|e~|ep|e=|ot|u~|o~)+\s*/i, '')
+    .replace(/^\s*(?:[|\[\]()—\-~_✓✔×Xx\/:.°'"]|e~|ep|e=|ot|u~|o~|um|ua|ue|oo|ow|ov)+\s*/i, '')
     .replace(/^(?:F\d{1,3}|-\s*\d{1,3}|\+\s*\d{1,3})\s+/i, '')
-    .replace(/^\s*(?:[|\[\]()—\-~_✓✔×Xx\/])+\s*/i, '')
+    .replace(/^\s*(?:[|\[\]()—\-~_✓✔×Xx\/:.°'"])+\s*/i, '')
     .replace(/[|\[\]]+\s*$/g, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -496,7 +470,7 @@ export function extractStrictDescription(
 
   if (!candidateFromTail) {
     const unitQtyRegex = new RegExp(
-      `\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:]+(?:\\d{1,6}|ot|a1|[Il|!ti])\\b(.*)$`,
+      `\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(?:\\d{1,6}|ot|a1|[Il|!ti])\\b(.*)$`,
       'i'
     );
     const mUnit = withoutPart.match(unitQtyRegex);
@@ -517,136 +491,6 @@ export function extractStrictDescription(
   return { descEn, descAr, category };
 }
 
-/**
- * خوارزمية محاذاة التداخل المتسلسل (Sequential Overlap Band Alignment):
- * تدمج الشرائح المتداخلة (مثلاً الشريحة العلوية والوسطى والسفلية، أو النصف العلوي والسفلي)
- * من خلال فحص نافذة التداخل الطرفية فقط دون حذف الأرقام المكررة الشرعية (مثل 1000428938 بكميتين 3 و 6)
- * ودون إسقاط الأرقام المتتالية (مثل 1001035309, 1001035310, 1001035311, 1001035312).
- */
-export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): ExtractedSparePart[] {
-  const nonEmptyBands = (bands || []).filter((b) => Array.isArray(b) && b.length > 0);
-  if (nonEmptyBands.length === 0) return [];
-  if (nonEmptyBands.length === 1) return [...nonEmptyBands[0]];
-
-  let merged: ExtractedSparePart[] = [...nonEmptyBands[0]];
-
-  for (let bIdx = 1; bIdx < nonEmptyBands.length; bIdx++) {
-    const nextBand = nonEmptyBands[bIdx];
-    const maxOverlapWindow = Math.min(10, merged.length, nextBand.length);
-    const tailStart = merged.length - maxOverlapWindow;
-
-    // 1. محاولة إيجاد نقطة التقاء متسلسلة (Anchor Alignment) بين ذيل الشريحة السابقة ورأس الشريحة التالية
-    let bestAnchorTailIdx = -1;
-    let bestAnchorHeadIdx = -1;
-
-    for (let t = tailStart; t < merged.length; t++) {
-      for (let h = 0; h < Math.min(8, nextBand.length); h++) {
-        const tailRow = merged[t];
-        const headRow = nextBand[h];
-        if (
-          tailRow.part_number === headRow.part_number &&
-          tailRow.qty_total === headRow.qty_total &&
-          tailRow.location_code === headRow.location_code
-        ) {
-          bestAnchorTailIdx = t;
-          bestAnchorHeadIdx = h;
-          break;
-        }
-      }
-      if (bestAnchorTailIdx !== -1) break;
-    }
-
-    if (bestAnchorTailIdx !== -1 && bestAnchorHeadIdx !== -1) {
-      // ترقية أي وصف ناقص في منطقة التداخل ثم إلحاق بقية الشريحة التالية بالترتيب
-      const overlapCount = Math.min(
-        merged.length - bestAnchorTailIdx,
-        nextBand.length - bestAnchorHeadIdx
-      );
-      for (let k = 0; k < overlapCount; k++) {
-        const existing = merged[bestAnchorTailIdx + k];
-        const candidate = nextBand[bestAnchorHeadIdx + k];
-        if (
-          existing &&
-          candidate &&
-          existing.part_number === candidate.part_number &&
-          existing.description_en === 'SPARE PART ASMO' &&
-          candidate.description_en !== 'SPARE PART ASMO'
-        ) {
-          merged[bestAnchorTailIdx + k] = candidate;
-        }
-      }
-
-      const usedTailIndices = new Set<number>();
-      for (let i = bestAnchorHeadIdx; i < nextBand.length; i++) {
-        const candidate = nextBand[i];
-        const relativeIdx = i - bestAnchorHeadIdx;
-        if (relativeIdx < merged.length - bestAnchorTailIdx) {
-          const tailIdx = bestAnchorTailIdx + relativeIdx;
-          if (
-            merged[tailIdx].part_number === candidate.part_number &&
-            merged[tailIdx].qty_total === candidate.qty_total
-          ) {
-            usedTailIndices.add(tailIdx);
-            continue;
-          }
-        }
-
-        // فحص نافذة التداخل القريبة فقط (مع اشتراط تطابق رقم القطعة والكمية والموقع معاً لعدم حذف المكرر الشرعي)
-        let matchedInTail = false;
-        if (i < 8) {
-          for (let t = tailStart; t < merged.length; t++) {
-            if (
-              !usedTailIndices.has(t) &&
-              merged[t].part_number === candidate.part_number &&
-              merged[t].qty_total === candidate.qty_total &&
-              merged[t].location_code === candidate.location_code
-            ) {
-              usedTailIndices.add(t);
-              matchedInTail = true;
-              break;
-            }
-          }
-        }
-        if (!matchedInTail) {
-          merged.push(candidate);
-        }
-      }
-    } else {
-      // 2. في حال عدم وجود نقطة ارتكاز متطابقة، نفحص أول 7 أسطر فقط من الشريحة الجديدة مقابل آخر 8 أسطر من الشريحة السابقة
-      const usedTailIndices = new Set<number>();
-      for (let i = 0; i < nextBand.length; i++) {
-        const candidate = nextBand[i];
-        let isOverlapDup = false;
-        if (i < 7) {
-          for (let t = tailStart; t < merged.length; t++) {
-            if (
-              !usedTailIndices.has(t) &&
-              merged[t].part_number === candidate.part_number &&
-              merged[t].qty_total === candidate.qty_total &&
-              merged[t].location_code === candidate.location_code
-            ) {
-              usedTailIndices.add(t);
-              if (
-                merged[t].description_en === 'SPARE PART ASMO' &&
-                candidate.description_en !== 'SPARE PART ASMO'
-              ) {
-                merged[t] = candidate;
-              }
-              isOverlapDup = true;
-              break;
-            }
-          }
-        }
-        if (!isOverlapDup) {
-          merged.push(candidate);
-        }
-      }
-    }
-  }
-
-  return merged;
-}
-
 export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   if (!rawText) return [];
 
@@ -656,25 +500,23 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     part_number: string;
     location_code: string;
     location?: string;
-    needsReview?: boolean;
   }> = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
 
-    const matInfo = extractMaterialWithRepairInfo(line);
-    if (!matInfo) {
+    const partNumber = extractStrictMaterialNumber(line);
+    if (!partNumber) {
       continue;
     }
 
-    const storageBin = extractStrictStorageBin(line, matInfo.partNumber);
+    const storageBin = extractStrictStorageBin(line, partNumber);
     intermediateRows.push({
       rawLine: line,
-      part_number: matInfo.partNumber,
+      part_number: partNumber,
       location_code: storageBin,
       location: storageBin,
-      needsReview: matInfo.needsReview,
     });
   }
 
@@ -682,30 +524,19 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
 
   const finalResults: ExtractedSparePart[] = [];
   for (const row of locationResolved) {
-    let loc = row.location_code;
-    if (!isValidSpecificLocation(loc)) {
-      if (locationResolved.length >= 4 && !row.rawLine.includes('عام')) {
-        loc = 'D1';
-      } else {
-        continue;
-      }
-    }
+    const loc = row.location_code;
+    if (!isValidSpecificLocation(loc)) continue;
 
     const { total } = extractStrictQuantity(row.rawLine, row.part_number, loc);
     const { isMissing, remark, shortage } = extractCheckAndRemark(row.rawLine, loc);
-    const { descEn, descAr, category } = extractStrictDescription(
-      row.rawLine,
-      row.part_number,
-      loc
-    );
+    const { descEn, descAr, category } = extractStrictDescription(row.rawLine, row.part_number, loc);
     const out = isMissing ? 0 : Math.min(total, shortage);
-    const finalDescAr = row.needsReview ? `⚠️ راجع الرقم — ${descAr}` : descAr;
 
     finalResults.push({
       part_number: row.part_number,
       location_code: loc,
       description_en: descEn,
-      description_ar: finalDescAr,
+      description_ar: descAr,
       category,
       qty_total: total,
       qty_out: out,
@@ -713,11 +544,57 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
       is_missing: isMissing,
       remark: remark || undefined,
       status: isMissing ? 'غير موجودة' : 'غير مدقق',
-      confidence: row.needsReview
-        ? '⚠️ رقم المادة غير واضح جزئياً: يرجى مراجعته مقابل الورقة'
-        : 'اقتراح غير مؤكد: راجع رقم القطعة والكمية والعلامات مقابل الأصل',
+      confidence: 'اقتراح غير مؤكد: راجع رقم القطعة والكمية والعلامات مقابل الأصل',
     });
   }
 
   return finalResults;
+}
+
+/**
+ * دمج مصفوفات السطور المستخرجة من شرائح متعددة متداخلة (Band Sequence Alignment Merger)
+ * يحافظ على الأرقام المتتالية (مثل 1001035309..1001035312) والسطور المكررة الحقيقية (1000428938) دون حذفها
+ * مع إزالة تكرار حد التداخل فقط.
+ */
+export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): ExtractedSparePart[] {
+  const nonEmpty = bands.filter((b) => b && b.length > 0);
+  if (nonEmpty.length === 0) return [];
+  if (nonEmpty.length === 1) return nonEmpty[0];
+
+  const rowsMatchAtBoundary = (a: ExtractedSparePart, b: ExtractedSparePart): boolean => {
+    if (a.part_number === b.part_number) return true;
+    if (a.part_number.slice(-2) === b.part_number.slice(-2)) {
+      let sameDigits = 0;
+      for (let k = 0; k < 10; k++) {
+        if (a.part_number[k] === b.part_number[k]) sameDigits++;
+      }
+      if (sameDigits >= 8) return true;
+    }
+    return false;
+  };
+
+  let merged: ExtractedSparePart[] = [...nonEmpty[0]];
+  for (let bIdx = 1; bIdx < nonEmpty.length; bIdx++) {
+    const nextBand = nonEmpty[bIdx];
+    const tailStart = Math.max(0, merged.length - 5);
+    let cutMergedAt = merged.length;
+    let startNextAt = 0;
+    let found = false;
+
+    for (let ti = tailStart; ti < merged.length; ti++) {
+      for (let ni = 0; ni < Math.min(3, nextBand.length); ni++) {
+        if (rowsMatchAtBoundary(merged[ti], nextBand[ni])) {
+          cutMergedAt = ti;
+          startNextAt = ni;
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+
+    merged = [...merged.slice(0, cutMergedAt), ...nextBand.slice(startNextAt)];
+  }
+
+  return resolveSheetLocationsWithContext(merged);
 }

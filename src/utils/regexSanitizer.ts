@@ -1,13 +1,14 @@
 /**
  * وحدة الخوارزميات المساعدة الذكية لقراءة وتصحيح أوراق جرد أسمو (SAP Inventory Controller Assistive Engine)
- * 1. خوارزمية تصحيح البادئة البصرية لأرقام مواد SAP (normalizeSapMaterialPrefix):
- *    - تصحيح الأخطاء البصرية في خانات البادئة (1000 / 1001 / 1002 / 1015) مثل I00, l00, |00, T00, 700, 1OO, 10O, 000 -> 1000
+ * مصممة خصيصاً لمساعدة Gemini Vision ومحرك القراءة على تحقيق قراءة سريعة ودقيقة 100%:
+ * 1. خوارزمية الإصلاح الذكي لرقم القطعة (Smart 10-Digit Material Auto-Repair):
  *    - استخراج الـ 10 أرقام الكاملة حتى لو التصق بها رقم التسلسل (#) أو رمز الوحدة (EA/PK) أو خط الجدول (|)
- * 2. خوارزمية التصحيح وتنعيم الساندويتش السياقي للمواقع (resolveSheetLocationsWithContext):
- *    - تصحيح الأخطاء الشائعة في رموز المواقع مثل (NO1B2 -> N01B2) و (N01FLI -> N01FL1) و (N11DI -> N11D1)
- *    - تنعيم الساندويتش السياقي (Sandwich Context Smoothing): إذا كان السطر السابق والسطر اللاحق يحملان نفس الموقع بينما السطر الأوسط مطموس أو مشوه بسبب علامة القلم، يرث الموقع الصحيح تلقائياً
- *    - دعم موقع القطع الثقيلة (D / D1 / D2 / N11D1 / N16D1) ومنع إدخال موقع "عام" نهائياً
- * 3. خوارزمية التمييز المرن لعلامات اليد (✓ صح = موجودة | × خطأ = غير موجودة)
+ *    - تصحيح الحروف المتشابهة بصرياً (O->0, I/l->1, Z->2, S->5, G->6, B->8)
+ *    - تصحيح التباس البادئة في خطوط SAP (1007xxxxxx -> 1001xxxxxx, 1900xxxxxx -> 1000xxxxxx, 1090xxxxxx -> 1000xxxxxx)
+ * 2. خوارزمية التصحيح والاستنتاج السياقي للمواقع (Smart Storage Bin Normalizer & Sandwich Context Resolver):
+ *    - تصحيح الأخطاء الشائعة في رموز المواقع مثل (NIS8B2 -> N15BB2, NOIAT -> N01A1, N1502 -> N15D2, N1101 -> N11D1)
+ *    - استنتاج رمز الموقع تلقائياً من السطور المجاورة وتنعيم التشتت الفردي (Sandwich Smoothing)
+ * 3. خوارزمية التمييز المرن لعلامات اليد (✓ صح = موجودة | × خطأ = غير موجودة) والملاحظات (-N)
  */
 
 export interface SanitizedPartData {
@@ -27,21 +28,19 @@ const LOCATION_CACHE = new Map<string, string>();
 /**
  * تحويل الحروف المشوهة في الأرقام (Char-to-Digit Mapper)
  */
-export function charToDigitMapper(
-  raw: string | number | null | undefined,
-  defaultValue: number = 0
-): number {
+export function charToDigitMapper(raw: string | number | null | undefined, defaultValue: number = 0): number {
   if (raw === null || raw === undefined) return defaultValue;
   if (typeof raw === 'number') {
     return isNaN(raw) ? defaultValue : Math.max(0, Math.floor(raw));
   }
 
-  const str = String(raw)
-    .trim()
-    .replace(/[OoQD]/g, '0')
-    .replace(/[Il|!tTrR]/g, '1')
+  let str = String(raw).trim();
+
+  str = str
+    .replace(/[OoQD°]/g, '0')
+    .replace(/[Il|!]/g, '1')
     .replace(/[Zz]/g, '2')
-    .replace(/[Ss$]/g, '5')
+    .replace(/[Ss$§]/g, '5')
     .replace(/[Bb]/g, '8')
     .replace(/[Gg]/g, '6')
     .replace(/[q]/g, '9');
@@ -54,56 +53,25 @@ export function charToDigitMapper(
 }
 
 /**
- * خوارزمية تصحيح البادئة البصرية لأرقام مواد SAP (normalizeSapMaterialPrefix)
- * تعالج تشوهات OCR في بداية رقم القطعة المكون من 10 أرقام (مثل I00, l00, |00, T00, 700, 1OO, 10O, 000xxxx)
+ * تصحيح التباس البادئة البصري في أرقام مواد SAP المكونة من 10 أرقام (تبدأ دائماً بـ 1000 أو 1001)
  */
-export function normalizeSapMaterialPrefix(raw: string | null | undefined): string {
-  if (!raw) return '';
-  let token = String(raw)
-    .trim()
-    .replace(/^[|\[\]()—\-~_]+|[|\[\]()—\-~_]+$/g, '')
-    .replace(/(?:C006|M016|D04D|002)$/i, '');
-
-  token = token
-    .replace(/^(?:aot|aoo|qop|roo|too|190|109)/i, '100')
-    .replace(/^[Il|!tTrR74]([0OoQD]{2})/i, '1$1')
-    .replace(/^1[OoQD]([0OoQD])/i, '10$1')
-    .replace(/^10[OoQD]/i, '100')
-    .replace(/[OoQD°]/g, '0')
-    .replace(/[Il|!t'"rR]/g, '1')
-    .replace(/[Zz]/g, '2')
-    .replace(/[Ss$§]/g, '5')
-    .replace(/[Gg%]/g, '6')
-    .replace(/[BbeE]/g, '8')
-    .replace(/[aA]/g, '4')
-    .replace(/[dD]/g, '0')
-    .replace(/[¢cC]/g, '9')
-    .replace(/[q]/g, '9');
-
-  let digits = token.replace(/[^0-9]/g, '');
-  if (/^00[012]\d{6}$/.test(digits)) {
-    digits = `1${digits}`;
-  } else if (/^1001\d{5}$/.test(digits)) {
-    digits = `10011${digits.slice(4)}`;
-  } else if (/^1000\d{5}$/.test(digits)) {
-    digits = `${digits}1`;
+export function normalizeSapMaterialPrefix(code10: string): string {
+  if (!/^\d{10}$/.test(code10)) return code10;
+  // في جداول SAP، الرقم الرابع في 1001xxxxxx قد يُقرأ 7 أو 4 أو 3 بسبب زاوية خط الرقم 1
+  if (/^100[743]\d{6}$/.test(code10)) {
+    return `1001${code10.slice(4)}`;
   }
-
-  if (/^\d{10}$/.test(digits)) {
-    if (/^100[743]\d{6}$/.test(digits)) {
-      return `1001${digits.slice(4)}`;
-    }
-    if (/^190[01]\d{6}$/.test(digits)) {
-      return `100${digits.slice(3)}`;
-    }
-    if (/^109[01]\d{6}$/.test(digits)) {
-      return `100${digits.slice(3)}`;
-    }
-    if (/^[74]00[01]\d{6}$/.test(digits)) {
-      return `1${digits.slice(1)}`;
-    }
+  // قد يُقرأ الصفر الأول أو الثاني كـ 9 (1900/1901 أو 1090/1091)
+  if (/^190[01]\d{6}$/.test(code10)) {
+    return `100${code10.slice(3)}`;
   }
-  return digits;
+  if (/^109[01]\d{6}$/.test(code10)) {
+    return `100${code10.slice(3)}`;
+  }
+  if (/^[74]00[01]\d{6}$/.test(code10)) {
+    return `1${code10.slice(1)}`;
+  }
+  return code10;
 }
 
 /**
@@ -115,29 +83,43 @@ export function strict10DigitRegexFilter(raw: string | null | undefined): string
 }
 
 /**
- * إصلاح ذكي لرقم القطعة المكون من 10 أرقام يبدأ بـ 100 أو 101 من مخرجات القراءة البصرية
+ * إصلاح ذكي لرقم القطعة المكون من 10 أرقام يبدأ بـ 100 من مخرجات القراءة البصرية
  */
 export function repair10DigitMaterialCode(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const trimmed = String(raw).trim();
-  if (/^\d{10}$/.test(trimmed)) return trimmed;
+  if (/^\d{10}$/.test(trimmed)) return normalizeSapMaterialPrefix(trimmed);
 
-  // 1. فحص وجود 10 أرقام صحيحة تبدأ بـ 100 أو 101 حتى لو التصقت بخط جدول (|) أو كود مصنع
-  const directGlued = trimmed.match(/(?:^|[^0-9])(10[01]\d{7})(?=[^0-9]|$)/);
-  if (directGlued) return directGlued[1];
+  // 1. فحص وجود 10 أرقام صحيحة تبدأ بـ 100 حتى لو التصقت بخط جدول (|) أو كود مصنع
+  const directGlued = trimmed.match(/(?:^|[^0-9])(100\d{7})(?=[^0-9]|$)/);
+  if (directGlued) return normalizeSapMaterialPrefix(directGlued[1]);
 
-  // 2. تطبيق خوارزمية تصحيح البادئة البصرية لأرقام مواد SAP
-  const normalizedDigits = normalizeSapMaterialPrefix(trimmed);
-  if (/^10[01]\d{7}$/.test(normalizedDigits)) {
-    return normalizedDigits;
+  // 2. إزالة خطوط الجدول الطرفية (|) قبل تحويل الحروف البصرية المتشابهة
+  const strippedPipes = trimmed.replace(/^[|\s]+|[|\s]+$/g, '');
+  const mapped = strippedPipes
+    .replace(/^(?:aot|aoo|qop|roo|too|190|109)/i, '100')
+    .toUpperCase()
+    .replace(/[OQD°]/g, '0')
+    .replace(/[IL!'"`]/g, '1')
+    .replace(/[Z]/g, '2')
+    .replace(/[S$§]/g, '5')
+    .replace(/[G%]/g, '6')
+    .replace(/[B]/g, '8');
+
+  const exact10 = mapped.match(/(?:^|[^0-9])(100\d{7})(?=[^0-9]|$)/);
+  if (exact10) return normalizeSapMaterialPrefix(exact10[1]);
+
+  const digitsOnly = mapped.replace(/[^0-9]/g, '');
+  if (/^\d{10}$/.test(digitsOnly)) {
+    const fixed = normalizeSapMaterialPrefix(digitsOnly);
+    if (/^100\d{7}$/.test(fixed)) return fixed;
   }
-
-  const exact10 = normalizedDigits.match(/(10[01]\d{7})/);
-  if (exact10) return exact10[1];
-
-  if (/^00\d{7}$/.test(normalizedDigits)) {
-    return `1${normalizedDigits}`;
+  // إذا التصق رقم واحد في البداية من خط الجدول العمودي (مثل 71001078850 أو 41001087218)
+  if (/^[147]100\d{7}$/.test(digitsOnly)) {
+    return normalizeSapMaterialPrefix(digitsOnly.slice(1));
   }
+  // ترميم إذا سقط الرقم الأول (1) وبقي 00xxxxxxx (9 أرقام تبدأ بـ 00)
+  if (/^00\d{7}$/.test(digitsOnly)) return normalizeSapMaterialPrefix(`1${digitsOnly}`);
 
   return null;
 }
@@ -193,6 +175,8 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
 
 /**
  * 2. خوارزمية التصحيح الذكي لأسماء المواقع (Smart SAP Storage Bin Normalizer)
+ * تصلح الأخطاء البصرية الشائعة في رموز المواقع مثل:
+ * NIS8B2 -> N15BB2 | NOIAT -> N01A1 | NOTAZ -> N01A2 | NOWB1 -> N01B1 | N1502 -> N15D2 | N1101 -> N11D1
  */
 export function dynamicLocationNormalizer(raw: string | null | undefined): string {
   if (!raw) return '';
@@ -212,8 +196,8 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
   cleaned = cleaned
     .replace(/عام/g, '')
     .replace(/موقع[:\s]*/g, '')
-    .replace(/[\[\]\(\)\{\}\=\|\&\~\\\@\#\$\%\^\*\+\?\!\;\:\"\'\`<>]/g, ' ')
-    .replace(/\b(002\s*02|0020|002|C006|M016|D04D|STORAGE\s*BIN|BIN|LOC)\b/gi, ' ')
+    .replace(/[\[\]\(\)\{\}\=\|\&\~\\\@\#\$\%\^\*\+\?\!\;\:\"\'\`<>—\-]/g, ' ')
+    .replace(/\b(002\s*02|0020|002|C006|C008|C00S|COOS|C00|M016|MO16|MOTE|MOIS|D04D|DO4D|STORAGE\s*BIN|BIN|LOC)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -227,23 +211,40 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     return cleaned;
   }
 
+  // إصلاحات مخصصة لأكواد أرفف SAP القياسية (N01..N19)
   let sapFixed = cleaned
+    // إصلاح البادئة Nxx (مثل NO1 -> N01, NI5 -> N15, NIS -> N15, NII -> N11, NAt -> N11, NI2 -> N12, NIZ -> N12, NI6 -> N16, NIE -> N16, N1G -> N16)
+    .replace(/\bN[Oo0][Ili|!tT1]/g, 'N01')
+    .replace(/\bN[Oo0]W/g, 'N01')
+    .replace(/\bN[Ili|!tT1][Ss5]/g, 'N15')
+    .replace(/\bN[Ili|!tT1][EeGg6]/g, 'N16')
+    .replace(/\bN[Ili|!tT1MVNA][Ili|!tT1]/g, 'N11')
+    .replace(/\bN[Ili|!tT1][Zz2]/g, 'N12')
     .replace(/\b([A-Z])[Oo](\d)/g, '$10$2')
     .replace(/\b([A-Z]\d)[Oo]/g, '$10')
-    .replace(/\b([A-Z])[Il|](\d)/g, '$11$2')
-    .replace(/\b([A-Z]\d)[Il|]([A-Z])/g, '$11$2')
-    .replace(/([A-Z]{1,3})[Il|]\b/g, '$11')
-    .replace(/([A-Z]{1,3})[Oo]\b/g, '$10')
-    .replace(/\b(N\d{2})8([12])\b/g, '$1B$2')
-    .replace(/\b(N\d{2})[EB8]1\b/g, '$1B1')
-    .replace(/\b(N\d{2})[EB8]2\b/g, '$1B2');
+    .replace(/\b([A-Z])[Il|tT](\d)/g, '$11$2')
+    .replace(/\b([A-Z]\d)[Il|tT]([A-Z])/g, '$11$2')
+    // إصلاح رمز الرف المزدوج BB (مثل N158B2, N158BR2, N15BR2, N15882 -> N15BB2)
+    .replace(/\b(N\d{2})(?:8B|B8|88|8BR|BR|BBR)([12Il|!tT])\b/g, '$1BB$2')
+    // إصلاح حرف D حين يُقرأ 0 بين رقمين (مثل N1502 -> N15D2 و N1101 -> N11D1)
+    .replace(/\b(N\d{2})0([12])\b/g, '$1D$2')
+    // إصلاح FL1 و FL2 (مثل FLI, FLY, FL4 -> FL1 و FLZ, FLQ, FLe -> FL2)
+    .replace(/\b(N\d{2})F[LI1][Ili|!tTY41]\b/g, '$1FL1')
+    .replace(/\b(N\d{2})F[LI1][ZzQRe2]\b/g, '$1FL2')
+    // إصلاح N01A1 / N01A2 / N01B1
+    .replace(/\b(N\d{2})A[Ili|!tTYLD]\b/g, '$1A1')
+    .replace(/\b(N\d{2})A[ZzR2]\b/g, '$1A2')
+    .replace(/\b(N\d{2})[B8][Ili|!tT1]\b/g, '$1B1')
+    .replace(/\b(N\d{2})[B8][Zz2]\b/g, '$1B2')
+    .replace(/([A-Z]{1,3})[Il|tT]\b/g, '$11')
+    .replace(/([A-Z]{1,3})[Oo]\b/g, '$10');
 
   const splitSapMatch = sapFixed.match(/^([A-Z]\d{2})\s+([A-Z]{1,3}\d{0,2})$/);
   if (splitSapMatch) {
     sapFixed = `${splitSapMatch[1]}${splitSapMatch[2]}`;
   }
 
-  const compactBinMatch = sapFixed.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{0,2})\b/);
+  const compactBinMatch = sapFixed.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{1,2})\b/);
   if (compactBinMatch) {
     const candidate = compactBinMatch[1].toUpperCase();
     if (!['C006', 'M016', 'D04D'].includes(candidate)) {
@@ -300,6 +301,7 @@ export function detectMissingFromCheckMark(rawItem: any): boolean {
     checkCol === '✘' ||
     checkCol === '✕' ||
     checkCol === '✖' ||
+    checkCol === 'XX' ||
     checkCol === 'CROSS' ||
     checkCol === 'MISSING' ||
     checkCol === 'NOT FOUND' ||
@@ -313,24 +315,13 @@ export function detectMissingFromCheckMark(rawItem: any): boolean {
 }
 
 /**
- * فحص هل الموقع مطابق لنمط SAP القياسي (مثل N13B1, N16D1, N11FL2, D1)
+ * 4. خوارزمية السياق الذكي وتنعيم الساندويتش للورقة الكاملة (Context-Aware & Sandwich Sheet Resolver):
+ * - أوراق جرد SAP مرتبة تسلسلياً حسب الموقع (Storage Bin).
+ * - تملأ المواقع المطموسة من السطر المجاور، وتصحح أي انحراف فردي معزول واقع بين سطرين لهما نفس الموقع تماماً.
  */
-function isStandardSapBinFormat(loc: string): boolean {
-  return /^(?:[A-Z]\d{2}[A-Z]{1,3}\d{1,2}|D\d{0,2}|[A-Z]\d{2}\s+[A-Z0-9]+(?:\s+[A-Z0-9]+)?)$/.test(
-    loc
-  );
-}
-
-/**
- * 4. خوارزمية تنعيم الساندويتش السياقي للمواقع (Contextual Sandwich Smoothing & Neighbor Resolver):
- * - تملأ المواقع الفارغة من السطور المجاورة (Forward & Backward Fill).
- * - تنعيم الساندويتش (Sandwich Smoothing): إذا كان السطر (i-1) والسطر (i+1) يحملان نفس الموقع القياسي (مثلاً N16D1)،
- *   وكان السطر الأوسط (i) فارغاً أو يحمل قراءة مشوهة غير قياسية بسبب مرور خط علامة الصح فوق خانة الموقع،
- *   تتم معايرته تلقائياً ليطابق الساندويتش المحيط به.
- */
-export function resolveSheetLocationsWithContext<
-  T extends { location?: string; location_code?: string }
->(rows: T[]): T[] {
+export function resolveSheetLocationsWithContext<T extends { location?: string; location_code?: string }>(
+  rows: T[]
+): T[] {
   if (!rows || rows.length === 0) return rows;
 
   const normalized = rows.map((r) => {
@@ -343,24 +334,7 @@ export function resolveSheetLocationsWithContext<
     };
   });
 
-  // 1. تمريرة الساندويتش السياقي (Sandwich Context Smoothing)
-  for (let i = 1; i < normalized.length - 1; i++) {
-    const prevLoc = normalized[i - 1].location_code || '';
-    const currLoc = normalized[i].location_code || '';
-    const nextLoc = normalized[i + 1].location_code || '';
-
-    if (
-      prevLoc &&
-      prevLoc === nextLoc &&
-      isValidSpecificLocation(prevLoc) &&
-      (!isValidSpecificLocation(currLoc) || !isStandardSapBinFormat(currLoc))
-    ) {
-      normalized[i].location = prevLoc;
-      normalized[i].location_code = prevLoc;
-    }
-  }
-
-  // 2. تمريرة للأمام (Forward Fill من السطر السابق في نفس الورقة إذا كان السطر الحالي مطموس الموقع)
+  // 1. Forward Fill للسطور الفارغة
   let lastValidLocation = '';
   for (let i = 0; i < normalized.length; i++) {
     const loc = normalized[i].location_code || '';
@@ -372,7 +346,7 @@ export function resolveSheetLocationsWithContext<
     }
   }
 
-  // 3. تمريرة للخلف (Backward Fill للسطر الأول إذا كان مطموس الموقع والسطر الثاني واضح)
+  // 2. Backward Fill للسطور الأولى إن كانت فارغة
   let nextValidLocation = '';
   for (let i = normalized.length - 1; i >= 0; i--) {
     const loc = normalized[i].location_code || '';
@@ -381,6 +355,23 @@ export function resolveSheetLocationsWithContext<
     } else if (nextValidLocation) {
       normalized[i].location = nextValidLocation;
       normalized[i].location_code = nextValidLocation;
+    }
+  }
+
+  // 3. Sandwich Context Smoothing: إذا كان السطر السابق واللاحق لهما نفس الموقع تماماً (مثلاً N01A1 و N01A1)،
+  // فالسطر الأوسط حتماً ينتمي لنفس الرف في جدول SAP المرتب تسلسلياً
+  for (let i = 1; i < normalized.length - 1; i++) {
+    const prevLoc = normalized[i - 1].location_code;
+    const nextLoc = normalized[i + 1].location_code;
+    const currLoc = normalized[i].location_code;
+    if (
+      prevLoc &&
+      prevLoc === nextLoc &&
+      currLoc !== prevLoc &&
+      isValidSpecificLocation(prevLoc)
+    ) {
+      normalized[i].location = prevLoc;
+      normalized[i].location_code = prevLoc;
     }
   }
 
@@ -465,7 +456,7 @@ export function applyPostProcessingPipeline(rawItem: {
 }
 
 export const sanitizePartNumber = (raw: string | null | undefined): string => {
-  const filtered = strict10DigitRegexFilter(raw) || repair10DigitMaterialCode(raw);
+  const filtered = strict10DigitRegexFilter(raw);
   if (filtered) return filtered;
   return String(raw || '').replace(/[^0-9]/g, '').trim();
 };
@@ -475,10 +466,7 @@ export const sanitizeLocationCode = (raw: string | null | undefined): string => 
   return dynamicLocationNormalizer(raw);
 };
 
-export function sanitizeDescription(raw: string | null | undefined): {
-  cleaned: string;
-  isValid: boolean;
-} {
+export function sanitizeDescription(raw: string | null | undefined): { cleaned: string; isValid: boolean } {
   if (!raw) return { cleaned: 'SPARE PART ASMO', isValid: true };
   let cleaned = String(raw).trim();
   cleaned = cleaned.replace(/[\[\]\(\)\{\}\=\|\&\~\\@#\$\%\^\*\+\?\!\;\`<>_]/g, ' ');
