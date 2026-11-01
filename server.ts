@@ -349,6 +349,119 @@ app.post('/api/gemini/extract-part', async (req, res) => {
   }
 });
 
+app.post('/api/gemini/analyze-parts', async (req, res) => {
+  try {
+    const { parts } = req.body;
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return res.status(200).json({
+        success: false,
+        analyses: [],
+        message: 'لا توجد قطع مرسلة للتحليل.',
+      });
+    }
+
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (!apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.startsWith('AIza')) {
+      return res.status(200).json({
+        success: false,
+        fallbackToLocal: true,
+        analyses: [],
+        message: 'يتم استخدام المساعد الهندسي المحلي الذكي للترجمة وحسبة المقاسات والأوزان.',
+      });
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+
+    const inputSummary = parts.slice(0, 45).map((p: any, idx: number) => ({
+      index: idx + 1,
+      part_number: String(p.part_number || `ITEM-${idx + 1}`),
+      description_en: String(p.description_en || ''),
+      current_location: String(p.location_code || 'N11A1'),
+      quantity: Number(p.quantity || p.qty_remaining || 1),
+    }));
+
+    const prompt = `أنت مساعد هندسي ذكي (Gemini Industrial Assistant) متخصص في مستودعات قطع الغيار الصناعية (SAP Inventory Controller - ASMO).
+المطلوب لكل قطعة في القائمة المرفقة:
+1. "description_ar": ترجمة عربية هندسية دقيقة وواضحة لوصف القطعة الإنجليزي مع ذكر وظيفتها.
+2. "dimensions_calculation_ar": حسبة تفصيلية للمقاسات والأبعاد المذكورة في الوصف مع تحويل الوحدات:
+   - حول أي مقاس بالبوصة (IN أو ") إلى المليمتر (MM) والسنتيمتر (CM) بدقة (1 بوصة = 25.4 ملم).
+   - حول البوصة المربعة (SQ IN) إلى سم² (1 بوصة مربعة = 6.45 سم²).
+   - وضح القطر الخارجي (OD)، القطر الداخلي (ID)، السماكة (THK)، الطول (LG)، العرض (WD)، مقاس القلاووظ (مثل M10×45 ملم)، أو القدرة الكهربائية (أمبير A / فولت V).
+3. "material_ar": نوع المعدن أو المادة بالعربية (مثل: ستانلس ستيل 316، صلب كربوني، برونز، حديد زهر، سبيكة إنكونيل، تفلون PTFE، مطاط نيتريل، نايلون).
+4. "estimated_weight_kg": تقدير الوزن التقريبي للقطعة الواحدة بالكيلوجرام (رقم عشري مثل 18.5 أو 2.4 أو 0.05) بناءً على نوع القطعة ومعدنها وأبعادها.
+5. "weight_label_ar": نص يوضح الوزن التقريبي للقطعة وإجمالي الوزن للكمية (مثال: "القطعة ~8.5 كجم | الإجمالي ~17 كجم").
+6. "size_category": تصنيف الحجم والوزن ويجب أن يكون أحد القيم الثلاث فقط: "كبير / ثقيل" أو "متوسط الحجم" أو "صغير / خفيف".
+7. "recommended_shelf_code": رمز ارتفاع الرف الأنسب للقطعة حسب القاعدة المعتمدة في المستودع:
+   - "FL": الرف على الأرض (0 متر) — للقطع الثقيلة والكبيرة (أكثر من 10 كجم أو صمامات/مضخات/محامل كبيرة/أعمدة/حلقات تآكل ثقيلة).
+   - "A": يرتفع 1 متر عن الأرض — للقطع المتوسطة المائلة للثقل (من 4 إلى 10 كجم).
+   - "B": يرتفع مترين (2 متر) عن الأرض — للقطع متوسطة الحجم والوزن (من 1.5 إلى 4 كجم).
+   - "BB": يرتفع 3 متر عن الأرض — للقطع المتوسطة الخفيفة (من 0.5 إلى 1.5 كجم).
+   - "C": يرتفع 4 متر عن الأرض — للقطع الخفيفة والصغيرة (من 0.15 إلى 0.5 كجم مثل الجازكيت والبراغي والفيوزات).
+   - "D": يرتفع 5 متر عن الأرض — للقطع الصغيرة والخفيفة جداً (أقل من 0.15 كجم مثل حلقات O-Ring وأربطة الكابلات).
+8. "recommended_bin": رمز الموقع المقترح كاملاً مع الحفاظ على رقم الممر الحالي للقطعة (مثال: إذا كانت في N11D1 وهي ثقيلة اقترح "N11FL1" أو "N11A1").
+9. "placement_reason_ar": سبب اختيار هذا الرف والمكان بناءً على حسبة الحجم والوزن والارتفاع بالمتر.
+
+القطع المطلوب تحليلها:
+${JSON.stringify(inputSummary)}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: prompt,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              part_number: { type: Type.STRING },
+              description_ar: { type: Type.STRING },
+              dimensions_calculation_ar: { type: Type.STRING },
+              material_ar: { type: Type.STRING },
+              estimated_weight_kg: { type: Type.NUMBER },
+              weight_label_ar: { type: Type.STRING },
+              size_category: { type: Type.STRING },
+              recommended_shelf_code: { type: Type.STRING },
+              recommended_bin: { type: Type.STRING },
+              placement_reason_ar: { type: Type.STRING },
+            },
+          },
+        },
+      },
+    });
+
+    const text = response.text?.trim();
+    if (!text) {
+      return res.status(200).json({
+        success: false,
+        fallbackToLocal: true,
+        analyses: [],
+      });
+    }
+
+    const parsed = JSON.parse(text);
+    return res.status(200).json({
+      success: Array.isArray(parsed) && parsed.length > 0,
+      analyses: Array.isArray(parsed) ? parsed : [],
+    });
+  } catch (error: any) {
+    return res.status(200).json({
+      success: false,
+      fallbackToLocal: true,
+      analyses: [],
+      message: error?.message || 'تم تفعيل المحلل الهندسي المحلي لحسبة المقاسات والأوزان.',
+    });
+  }
+});
+
 const apkCandidates = [
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.6.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.6.0.apk'),

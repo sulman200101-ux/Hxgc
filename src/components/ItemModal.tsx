@@ -1,7 +1,11 @@
 import { suggestTechnicalTranslation, suggestModelTranslation } from '../services/partTranslation';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { InventoryItem } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
+import {
+  analyzePartsWithGeminiAssistant,
+  computeLocalPartEngineeringAnalysis,
+} from '../services/transferSuggestions';
 import {
   strict10DigitRegexFilter,
   sanitizeQuantity,
@@ -9,7 +13,7 @@ import {
   sanitizeLocationCode,
   isValidSpecificLocation,
 } from '../utils/regexSanitizer';
-import { X, Save, Package, Sparkles, ArrowRightLeft, AlertTriangle } from 'lucide-react';
+import { X, Save, Package, Sparkles, ArrowRightLeft, AlertTriangle, Ruler, Scale, MapPin } from 'lucide-react';
 
 interface ItemModalProps {
   isOpen: boolean;
@@ -69,6 +73,17 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       setStatus('غير مدقق');
     }
   }, [item, isOpen]);
+
+  const liveAnalysis = useMemo(() => {
+    if (!descEn.trim()) return null;
+    return computeLocalPartEngineeringAnalysis({
+      part_number: partNumber || '1000000000',
+      description_en: descEn,
+      description_ar: descAr,
+      location_code: locationCode || 'N11A1',
+      qty_remaining: Math.max(1, qtyTotal - qtyOut),
+    });
+  }, [descEn, descAr, locationCode, partNumber, qtyTotal, qtyOut]);
 
   if (!isOpen) return null;
 
@@ -232,14 +247,82 @@ export const ItemModal: React.FC<ItemModalProps> = ({
           </div>
 
           </fieldset>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => setDescAr(suggestTechnicalTranslation(descEn).arabic)}>ترجمة بالقاموس الصناعي</button>
-            <button type="button" disabled={isSubmitting} onClick={async () => {
-              setIsSubmitting(true);
-              try { const result = await suggestModelTranslation(descEn); setDescAr(result.arabic); }
-              catch (err) { setValidationError((err as Error).message); } finally { setIsSubmitting(false); }
-            }}>تحميل نموذج الترجمة واقتراح العربية</button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setDescAr(suggestTechnicalTranslation(descEn).arabic)}
+              className="px-3 py-1.5 rounded-lg bg-[#3A271F] hover:bg-[#4D342A] text-amber-200 font-bold border border-[#52382D] cursor-pointer"
+            >
+              ترجمة بالقاموس الصناعي
+            </button>
+            <button
+              type="button"
+              disabled={isSubmitting || !descEn.trim()}
+              onClick={async () => {
+                setIsSubmitting(true);
+                try {
+                  const aiRes = await analyzePartsWithGeminiAssistant([
+                    {
+                      part_number: partNumber || '1000000000',
+                      description_en: descEn,
+                      location_code: locationCode || 'N11A1',
+                      qty_remaining: Math.max(1, qtyTotal - qtyOut),
+                    },
+                  ]);
+                  if (aiRes.length > 0) {
+                    setDescAr(aiRes[0].description_ar);
+                    if (aiRes[0].recommended_bin) {
+                      setLocationCode(aiRes[0].recommended_bin);
+                    }
+                  } else {
+                    const result = await suggestModelTranslation(descEn);
+                    setDescAr(result.arabic);
+                  }
+                } catch (err) {
+                  setValidationError((err as Error).message);
+                } finally {
+                  setIsSubmitting(false);
+                }
+              }}
+              className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-black flex items-center gap-1 cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>مساعد جمني: ترجمة وحسبة المقاس والرف المناسب ✨</span>
+            </button>
           </div>
+
+          {liveAnalysis && (
+            <div className="p-3 rounded-xl bg-[#1A110D] border border-amber-600/50 space-y-1.5 text-[11px]">
+              <div className="flex items-center justify-between flex-wrap gap-1">
+                <span className="font-black text-amber-300 flex items-center gap-1">
+                  <Ruler className="w-3.5 h-3.5" />
+                  <span>حسبة المقاس: {liveAnalysis.dimensions_calculation_ar}</span>
+                </span>
+                <span className="font-bold text-orange-300 flex items-center gap-1">
+                  <Scale className="w-3.5 h-3.5" />
+                  <span>{liveAnalysis.size_category} ({liveAnalysis.weight_label_ar})</span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between flex-wrap gap-2 pt-1 border-t border-[#32211A]">
+                <span className="text-emerald-300 font-bold flex items-center gap-1">
+                  <MapPin className="w-3.5 h-3.5" />
+                  <span>
+                    الرف المقترح للحجم والوزن: <strong className="font-mono">{liveAnalysis.recommended_bin}</strong> ({liveAnalysis.recommended_elevation.shortLabelAr})
+                  </span>
+                </span>
+                {locationCode.trim().toUpperCase() !== liveAnalysis.recommended_bin && (
+                  <button
+                    type="button"
+                    onClick={() => setLocationCode(liveAnalysis.recommended_bin)}
+                    className="px-2.5 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white font-black cursor-pointer"
+                  >
+                    اعتماد الرف {liveAnalysis.recommended_bin} 🟢
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           <p className="text-xs text-amber-300">الترجمة اقتراح يحتاج مراجعة؛ يبقى الاسم الإنجليزي والمواصفات محفوظة.</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Category */}

@@ -1,6 +1,4 @@
 // قاموس المصطلحات الفنية الشامل والموسع لقطع الغيار الصناعية (ASMO SAP Inventory Controller)
-// مطور ومفهرس مسبقاً (Pre-Compiled Regex Engine) لضمان ترجمة وتصنيف 4,000+ قطعة في أجزاء من المللي ثانية
-
 const EXACT_PHRASE_TRANSLATIONS: Record<string, string> = {
   // العبارات المركبة الدقيقة لضمان ترجمة عربية هندسية سليمة 100%
   'RING WEAR, CASING': 'حلقة تآكل حماية غلاف المضخة (كيسنج)',
@@ -13,7 +11,6 @@ const EXACT_PHRASE_TRANSLATIONS: Record<string, string> = {
   'SPRING RELIEF VALVE': 'ياي/نابض صمام تصريف الضغط',
   'SCREW CAP, HEX': 'مسمار غطاء برأس سداسي',
   'BEARING, JOURNAL / THRUST': 'محمل انزلاقي ودفعي (جورنال/ثرست)',
-  'BEARING, JOURNAL (MAIN BEARING)': 'محمل انزلاقي رئيسي ثقيل (مين جورنال بيرنج)',
   'PACKING, RING: PREFORMED': 'حشوة إحكام حلقية مشكلة مسبقاً',
   'FUSE, LOW VOLTAGE: HRC': 'فيوز/مصهر جهد منخفض عالي قدرة القطع HRC',
   'RING, BALL, CARBOGRAPHITE, UPPER': 'حلقة كروية علوية من الكربون الجرافيتي',
@@ -264,21 +261,6 @@ const TERM_TRANSLATIONS: Record<string, string> = {
   'METRIC': 'متري قياسي',
 };
 
-// فهرسة التعبيرات النمطية مسبقاً مرة واحدة عند بدء التشغيل لتجنب إعادة تجميعها مع كل قطعة
-const COMPILED_EXACT_PHRASES: Array<{ regex: RegExp; ar: string }> = Object.keys(EXACT_PHRASE_TRANSLATIONS)
-  .sort((a, b) => b.length - a.length)
-  .map((phrase) => ({
-    regex: new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
-    ar: EXACT_PHRASE_TRANSLATIONS[phrase],
-  }));
-
-const COMPILED_TERMS: Array<{ regex: RegExp; ar: string }> = Object.keys(TERM_TRANSLATIONS)
-  .sort((a, b) => b.length - a.length)
-  .map((enWord) => ({
-    regex: new RegExp(`\\b${enWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'),
-    ar: TERM_TRANSLATIONS[enWord],
-  }));
-
 // ذاكرة تخزين مؤقت دائمة للترجمة والتصنيف (One-Time Processing Cache)
 const TRANSLATION_CACHE = new Map<string, { category: string; descAr: string }>();
 
@@ -371,15 +353,23 @@ export function categorizeAndTranslate(descEn: string): { category: string; desc
   let descAr = descEn;
 
   // 1. استبدال العبارات المركبة الطويلة أولاً لضمان دقة السياق الهندسي
-  for (let i = 0; i < COMPILED_EXACT_PHRASES.length; i++) {
-    const rule = COMPILED_EXACT_PHRASES[i];
-    descAr = descAr.replace(rule.regex, rule.ar);
+  const sortedExactPhrases = Object.keys(EXACT_PHRASE_TRANSLATIONS).sort(
+    (a, b) => b.length - a.length
+  );
+  for (const phrase of sortedExactPhrases) {
+    const arPhrase = EXACT_PHRASE_TRANSLATIONS[phrase];
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'gi');
+    descAr = descAr.replace(regex, arPhrase);
   }
 
   // 2. استبدال المصطلحات المفردة والمركبة
-  for (let i = 0; i < COMPILED_TERMS.length; i++) {
-    const rule = COMPILED_TERMS[i];
-    descAr = descAr.replace(rule.regex, rule.ar);
+  const sortedTerms = Object.keys(TERM_TRANSLATIONS).sort((a, b) => b.length - a.length);
+  for (const enWord of sortedTerms) {
+    const arWord = TERM_TRANSLATIONS[enWord];
+    const escaped = enWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
+    descAr = descAr.replace(regex, arWord);
   }
 
   // 3. تعريب وحدات القياس والاختصارات الفنية الشائعة بشكل واضح ومقروء

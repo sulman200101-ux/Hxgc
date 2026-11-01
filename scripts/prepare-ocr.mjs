@@ -6,10 +6,10 @@ const files = [
   ['node_modules/tesseract.js-core/tesseract-core-lstm.wasm.js', 'public/ocr/tesseract-core-lstm.wasm.js'],
   ['node_modules/tesseract.js-core/tesseract-core-lstm.wasm', 'public/ocr/tesseract-core-lstm.wasm'],
   ['node_modules/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz', 'public/ocr/lang/eng.traineddata.gz'],
-  ['node_modules/@tesseract.js-data/ara/4.0.0_best_int/ara.traineddata.gz', 'public/ocr/lang/ara.traineddata.gz'],
 ];
 
 const optionalSimdFiles = [
+  ['node_modules/@tesseract.js-data/ara/4.0.0_best_int/ara.traineddata.gz', 'public/ocr/lang/ara.traineddata.gz'],
   ['node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm.js', 'public/ocr/tesseract-core-simd-lstm.wasm.js'],
   ['node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm', 'public/ocr/tesseract-core-simd-lstm.wasm'],
 ];

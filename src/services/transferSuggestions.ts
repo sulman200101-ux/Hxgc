@@ -1,4 +1,24 @@
 import type { InventoryItem } from '../types';
+import { categorizeAndTranslate } from '../utils/translator';
+
+export interface GeminiPartAnalysis {
+  part_number: string;
+  description_en: string;
+  description_ar: string;
+  dimensions_calculation_ar: string;
+  material_ar: string;
+  estimated_weight_kg: number;
+  total_weight_kg: number;
+  weight_label_ar: string;
+  size_category: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
+  current_bin: string;
+  current_elevation: ShelfElevationInfo;
+  recommended_shelf_code: 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D';
+  recommended_bin: string;
+  recommended_elevation: ShelfElevationInfo;
+  placement_reason_ar: string;
+  source: 'gemini-ai' | 'engineering-engine';
+}
 
 export interface ShelfElevationInfo {
   shelfCode: 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D' | string;
@@ -217,7 +237,7 @@ export function parseShelfElevation(locationCode: string): ShelfElevationInfo {
 /**
  * تقدير حجم ووزن القطعة الفعلي من وصفها الهندسي والمقاسات (MM, IN, SQ IN, A) لتحديد ترتيب الحجم والرف الأنسب
  */
-export function estimatePartSizeProfile(item: InventoryItem): PartSizeProfile {
+export function estimatePartSizeProfile(item: Pick<InventoryItem, 'description_en'>): PartSizeProfile {
   const desc = (item.description_en || '').toUpperCase();
   let score = 45; // نقطة البداية (متوسط)
   const extractedDims: string[] = [];
@@ -717,4 +737,346 @@ export function buildSimilaritySwapPlans(
     (a, b) =>
       b.allGroupItemsSortedBySize.length - a.allGroupItemsSortedBySize.length
   );
+}
+
+/**
+ * تحويل كسر البوصة (مثل 3/4 أو 1/2 أو 1.5) إلى قيمة عشرية بالبوصة
+ */
+function parseInchValue(raw: string): number {
+  const clean = raw.trim();
+  if (clean.includes('/')) {
+    const [num, den] = clean.split('/').map((n) => parseFloat(n));
+    if (!isNaN(num) && !isNaN(den) && den !== 0) {
+      return num / den;
+    }
+  }
+  const val = parseFloat(clean);
+  return isNaN(val) ? 0 : val;
+}
+
+/**
+ * المساعد الهندسي المحلي لحسبة المقاسات، تحويل الوحدات (بوصة ⬅ ملم/سم)، تقدير الوزن، والترجمة، واقتراح الرف الأنسب
+ */
+export function computeLocalPartEngineeringAnalysis(
+  item: Pick<InventoryItem, 'part_number' | 'description_en' | 'location_code'> & {
+    description_ar?: string;
+    qty_remaining?: number;
+  }
+): GeminiPartAnalysis {
+  const descEn = (item.description_en || '').trim();
+  const upper = descEn.toUpperCase();
+  const qty = Math.max(1, Number(item.qty_remaining ?? 1));
+  const { descAr: translatedAr } = categorizeAndTranslate(descEn);
+  const finalDescAr =
+    item.description_ar &&
+    /[\u0600-\u06FF]/.test(item.description_ar) &&
+    item.description_ar !== descEn
+      ? item.description_ar
+      : translatedAr;
+
+  const sizeProf = estimatePartSizeProfile({ description_en: descEn });
+
+  // 1. حسبة المقاسات التفصيلية وتحويل الوحدات (بوصة ⬅ ملم وسم)
+  const calcParts: string[] = [];
+
+  // القطر الخارجي والداخلي والسماكة والطول والعرض بالمليمتر
+  const odMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*OD\b/);
+  if (odMatch) {
+    const mm = parseFloat(odMatch[1]);
+    calcParts.push(`القطر الخارجي (OD): ${mm} ملم (${(mm / 10).toFixed(1)} سم)`);
+  }
+  const idMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*ID\b/);
+  if (idMatch) {
+    const mm = parseFloat(idMatch[1]);
+    calcParts.push(`القطر الداخلي (ID): ${mm} ملم (${(mm / 10).toFixed(1)} سم)`);
+  }
+  const thkMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*THK\b/);
+  if (thkMatch) {
+    const mm = parseFloat(thkMatch[1]);
+    calcParts.push(`السماكة (THK): ${mm} ملم`);
+  }
+  const lgMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*LG\b/);
+  if (lgMatch) {
+    const mm = parseFloat(lgMatch[1]);
+    calcParts.push(`الطول (LG): ${mm} ملم (${(mm / 10).toFixed(1)} سم)`);
+  }
+  const wdMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*WD\b/);
+  if (wdMatch) {
+    const mm = parseFloat(wdMatch[1]);
+    calcParts.push(`العرض (WD): ${mm} ملم`);
+  }
+
+  // أي أبعاد عامة بالمليمتر لم تذكر أعلاه
+  if (calcParts.length === 0) {
+    const genericMm = Array.from(upper.matchAll(/(\d+(?:\.\d+)?)\s*MM\b/g));
+    for (const m of genericMm) {
+      const mm = parseFloat(m[1]);
+      if (!isNaN(mm)) {
+        calcParts.push(`المقاس: ${mm} ملم (${(mm / 10).toFixed(2)} سم / ${(mm / 25.4).toFixed(2)} بوصة)`);
+      }
+    }
+  }
+
+  // تحويل المساحة بالبوصة المربعة (SQ IN) إلى سم²
+  const sqInMatch = upper.match(/(\d+(?:\.\d+)?)\s*SQ\s*IN\b/);
+  if (sqInMatch) {
+    const sqIn = parseFloat(sqInMatch[1]);
+    const sqCm = (sqIn * 6.4516).toFixed(1);
+    calcParts.push(`مساحة المشغل: ${sqIn} بوصة مربعة = ${sqCm} سم²`);
+  }
+
+  // تحويل البوصة (IN) إلى مليمتر وسنتيمتر
+  const inMatches = Array.from(upper.matchAll(/\b(\d+(?:\/\d+|\.\d+)?)\s*IN\b/g));
+  for (const m of inMatches) {
+    if (upper.includes(`${m[1]} SQ IN`)) continue;
+    const inchVal = parseInchValue(m[1]);
+    if (inchVal > 0) {
+      const mmVal = (inchVal * 25.4).toFixed(1);
+      const cmVal = (inchVal * 2.54).toFixed(2);
+      calcParts.push(`المقاس بالبوصة: ${m[1]} بوصة = ${mmVal} ملم (${cmVal} سم)`);
+    }
+  }
+
+  // مقاس القلاووظ المليمتري مثل M10 X 45
+  const threadMatch = upper.match(/\bM(\d+)\s*X\s*(\d+)\b/);
+  if (threadMatch) {
+    calcParts.push(`قلاووظ متري: قطر ${threadMatch[1]} ملم × طول ${threadMatch[2]} ملم`);
+  }
+
+  // القدرات الكهربائية والضغط
+  const ampMatch = upper.match(/\b(\d+)\s*A\b/);
+  if (ampMatch) {
+    calcParts.push(`قدرة التيار: ${ampMatch[1]} أمبير`);
+  }
+  const voltMatch = upper.match(/\b(\d+)\s*(VDC|VAC|V)\b/);
+  if (voltMatch) {
+    calcParts.push(`الجهد الكهربائي: ${voltMatch[1]} ${voltMatch[2] === 'VDC' ? 'فولت مستمر' : 'فولت متردد'}`);
+  }
+  const barMatch = upper.match(/(\d+\s*-\s*\d+|\d+)\s*BAR\b/);
+  if (barMatch) {
+    calcParts.push(`نطاق الضغط: ${barMatch[1]} بار`);
+  }
+
+  const dimensionsCalculationAr =
+    calcParts.length > 0
+      ? calcParts.join(' | ')
+      : `مقاس صناعي قياسي (${sizeProf.dimensionsLabel})`;
+
+  // 2. استخلاص نوع المعدن/المادة وتقدير الكثافة والوزن
+  let materialAr = 'سبائك معدنية صناعية';
+  let densityFactor = 1.0;
+
+  if (upper.includes('316') || upper.includes('304') || upper.includes('410') || upper.includes('STAINLESS')) {
+    materialAr = 'فولاذ مقاوم للصدأ (ستانلس ستيل)';
+    densityFactor = 1.35;
+  } else if (upper.includes('CAST IRON')) {
+    materialAr = 'حديد زهر عالي الكثافة';
+    densityFactor = 1.5;
+  } else if (upper.includes('NITRONIC') || upper.includes('INCONEL') || upper.includes('STELLITE')) {
+    materialAr = 'سبيكة خاصة عالية الصلابة مقاومة للتآكل والحرارة';
+    densityFactor = 1.4;
+  } else if (upper.includes('BRONZE') || upper.includes('BRASS') || upper.includes('COPPER')) {
+    materialAr = 'سبيكة برونز / نحاس صناعي';
+    densityFactor = 1.3;
+  } else if (upper.includes('STEEL') || upper.includes('B7') || upper.includes('4140')) {
+    materialAr = 'صلب كربوني معالج حرارياً';
+    densityFactor = 1.25;
+  } else if (upper.includes('CARBOGRAPHITE') || upper.includes('CARBON') || upper.includes('GRAFOIL')) {
+    materialAr = 'كربون جرافيتي صناعي';
+    densityFactor = 0.55;
+  } else if (upper.includes('PTFE') || upper.includes('RPTFE') || upper.includes('TEFLON')) {
+    materialAr = 'تفلون حراري (PTFE)';
+    densityFactor = 0.3;
+  } else if (upper.includes('NEOPRENE') || upper.includes('NITRILE') || upper.includes('VITON') || upper.includes('RUBBER')) {
+    materialAr = 'مطاط صناعي مانع للتسرب';
+    densityFactor = 0.15;
+  } else if (upper.includes('NYLON') || upper.includes('PLASTIC')) {
+    materialAr = 'نايلون / بوليمر خفيف';
+    densityFactor = 0.1;
+  } else if (upper.includes('ARAMID') || upper.includes('KLINGERSIL')) {
+    materialAr = 'ألياف أراميد / كلينجرسيل مانعة للتسرب';
+    densityFactor = 0.2;
+  }
+
+  // تقدير الوزن بالكيلوجرام للقطعة الواحدة بناءً على درجة الحجم والكثافة
+  let unitWeightKg = 0.8;
+  if (sizeProf.sizeScore >= 75) {
+    unitWeightKg = +(8.5 * densityFactor + (sizeProf.sizeScore - 70) * 0.45).toFixed(2);
+  } else if (sizeProf.sizeScore >= 65) {
+    unitWeightKg = +(4.2 * densityFactor + (sizeProf.sizeScore - 60) * 0.25).toFixed(2);
+  } else if (sizeProf.sizeScore >= 45) {
+    unitWeightKg = +(1.4 * densityFactor + (sizeProf.sizeScore - 40) * 0.08).toFixed(2);
+  } else if (sizeProf.sizeScore >= 30) {
+    unitWeightKg = +(0.35 * densityFactor).toFixed(2);
+  } else {
+    unitWeightKg = +(Math.max(0.02, 0.12 * densityFactor)).toFixed(3);
+  }
+
+  const totalWeightKg = +(unitWeightKg * qty).toFixed(2);
+  const weightLabelAr =
+    unitWeightKg >= 1
+      ? `القطعة ~${unitWeightKg} كجم (الإجمالي للكمية ${qty}: ~${totalWeightKg} كجم)`
+      : `القطعة ~${Math.round(unitWeightKg * 1000)} جرام (الإجمالي للكمية ${qty}: ~${totalWeightKg} كجم)`;
+
+  // 3. تحديد الرف والموقع الأنسب حسب الوزن والحجم (FL=0م، A=1م، B=2م، BB=3م، C=4م، D=5م)
+  const currentBin = (item.location_code || 'N11A1').trim().toUpperCase();
+  const currentElevation = parseShelfElevation(currentBin);
+  const currentZone = zone(currentBin) || 'N11';
+  const currentSubBinMatch = currentBin.match(/(\d+)$/);
+  const subBinDigit = currentSubBinMatch ? currentSubBinMatch[1] : '1';
+
+  let recommendedShelfCode: 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D' = 'B';
+  if (unitWeightKg >= 9 || sizeProf.sizeScore >= 74) {
+    recommendedShelfCode = 'FL';
+  } else if (unitWeightKg >= 4 || sizeProf.sizeScore >= 65) {
+    recommendedShelfCode = 'A';
+  } else if (unitWeightKg >= 1.5 || sizeProf.sizeScore >= 48) {
+    recommendedShelfCode = 'B';
+  } else if (unitWeightKg >= 0.45 || sizeProf.sizeScore >= 38) {
+    recommendedShelfCode = 'BB';
+  } else if (unitWeightKg >= 0.12 || sizeProf.sizeScore >= 25) {
+    recommendedShelfCode = 'C';
+  } else {
+    recommendedShelfCode = 'D';
+  }
+
+  // إذا كان الرف الحالي يقع أصلاً ضمن النطاق المسموح به للقطعة نحافظ عليه لتجنب النقل غير الضروري
+  const isCurrentHeightIdeal =
+    sizeProf.recommendedShelves.includes(currentElevation.shelfCode as any) &&
+    Math.abs(currentElevation.meters - parseShelfElevation(`${currentZone}${recommendedShelfCode}1`).meters) <= 1;
+
+  const finalShelfCode = isCurrentHeightIdeal
+    ? (currentElevation.shelfCode as 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D')
+    : recommendedShelfCode;
+
+  const recommendedBin = isCurrentHeightIdeal
+    ? currentBin
+    : `${currentZone}${finalShelfCode}${subBinDigit}`;
+  const recommendedElevation = parseShelfElevation(recommendedBin);
+
+  const placementReasonAr = isCurrentHeightIdeal
+    ? `✓ الموقع الحالي (${currentBin} — ${currentElevation.shortLabelAr}) مناسب تماماً لحجم القطعة (${sizeProf.sizeCategory}) ووزنها (~${unitWeightKg >= 1 ? `${unitWeightKg} كجم` : `${Math.round(unitWeightKg * 1000)} جم`}).`
+    : `يُنصح بنقلها من (${currentBin} — ${currentElevation.shortLabelAr}) إلى (${recommendedBin} — ${recommendedElevation.shortLabelAr}) لأنها (${sizeProf.sizeCategory} بوزن ~${unitWeightKg >= 1 ? `${unitWeightKg} كجم` : `${Math.round(unitWeightKg * 1000)} جم`}) والرف ${finalShelfCode} (${recommendedElevation.meters === 0 ? 'على الأرض 0م' : `ارتفاع ${recommendedElevation.meters}م`}) هو الأنسب لسلامة التخزين.`;
+
+  return {
+    part_number: item.part_number,
+    description_en: descEn,
+    description_ar: finalDescAr,
+    dimensions_calculation_ar: dimensionsCalculationAr,
+    material_ar: materialAr,
+    estimated_weight_kg: unitWeightKg,
+    total_weight_kg: totalWeightKg,
+    weight_label_ar: weightLabelAr,
+    size_category: sizeProf.sizeCategory,
+    current_bin: currentBin,
+    current_elevation: currentElevation,
+    recommended_shelf_code: finalShelfCode,
+    recommended_bin: recommendedBin,
+    recommended_elevation: recommendedElevation,
+    placement_reason_ar: placementReasonAr,
+    source: 'engineering-engine',
+  };
+}
+
+/**
+ * استدعاء مساعد جمني الذكي (/api/gemini/analyze-parts) مع الدمج الفوري بالحاسبة الهندسية المحلية
+ */
+export async function analyzePartsWithGeminiAssistant(
+  items: Array<
+    Pick<InventoryItem, 'part_number' | 'description_en' | 'location_code'> & {
+      description_ar?: string;
+      qty_remaining?: number;
+    }
+  >
+): Promise<GeminiPartAnalysis[]> {
+  if (!items || items.length === 0) return [];
+
+  // حساب التحليل الهندسي المحلي أولاً كأساس فوري ودقيق
+  const localResults = items.map((item) => computeLocalPartEngineeringAnalysis(item));
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 18000);
+
+    const response = await fetch('/api/gemini/analyze-parts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        parts: items.slice(0, 45).map((i) => ({
+          part_number: i.part_number,
+          description_en: i.description_en,
+          location_code: i.location_code,
+          quantity: i.qty_remaining ?? 1,
+        })),
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) return localResults;
+    const data = await response.json();
+    if (!data || !data.success || !Array.isArray(data.analyses) || data.analyses.length === 0) {
+      return localResults;
+    }
+
+    const aiByPart = new Map<string, any>();
+    for (const row of data.analyses) {
+      if (row && row.part_number) {
+        aiByPart.set(String(row.part_number).trim(), row);
+      }
+    }
+
+    return localResults.map((local, idx) => {
+      const aiRow = aiByPart.get(local.part_number) || data.analyses[idx];
+      if (!aiRow) return local;
+
+      const validShelf = ['FL', 'A', 'B', 'BB', 'C', 'D'].includes(
+        String(aiRow.recommended_shelf_code || '').toUpperCase()
+      )
+        ? (String(aiRow.recommended_shelf_code).toUpperCase() as 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D')
+        : local.recommended_shelf_code;
+
+      const currentZone = zone(local.current_bin) || 'N11';
+      const recBin =
+        aiRow.recommended_bin && /^[A-Z]\d{2}(FL|BB|A|B|C|D)\d*$/i.test(String(aiRow.recommended_bin).trim())
+          ? String(aiRow.recommended_bin).trim().toUpperCase()
+          : `${currentZone}${validShelf}1`;
+
+      const unitWeight =
+        typeof aiRow.estimated_weight_kg === 'number' && aiRow.estimated_weight_kg > 0
+          ? +aiRow.estimated_weight_kg.toFixed(2)
+          : local.estimated_weight_kg;
+
+      return {
+        ...local,
+        description_ar:
+          aiRow.description_ar && /[\u0600-\u06FF]/.test(aiRow.description_ar)
+            ? String(aiRow.description_ar).trim()
+            : local.description_ar,
+        dimensions_calculation_ar:
+          aiRow.dimensions_calculation_ar && aiRow.dimensions_calculation_ar.length > 3
+            ? String(aiRow.dimensions_calculation_ar).trim()
+            : local.dimensions_calculation_ar,
+        material_ar:
+          aiRow.material_ar && aiRow.material_ar.length > 2
+            ? String(aiRow.material_ar).trim()
+            : local.material_ar,
+        estimated_weight_kg: unitWeight,
+        weight_label_ar:
+          aiRow.weight_label_ar && aiRow.weight_label_ar.length > 3
+            ? String(aiRow.weight_label_ar).trim()
+            : local.weight_label_ar,
+        recommended_shelf_code: validShelf,
+        recommended_bin: recBin,
+        recommended_elevation: parseShelfElevation(recBin),
+        placement_reason_ar:
+          aiRow.placement_reason_ar && aiRow.placement_reason_ar.length > 4
+            ? String(aiRow.placement_reason_ar).trim()
+            : local.placement_reason_ar,
+        source: 'gemini-ai',
+      };
+    });
+  } catch {
+    return localResults;
+  }
 }

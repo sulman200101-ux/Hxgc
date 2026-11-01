@@ -286,7 +286,7 @@ export default function App() {
         <button type="button" aria-pressed={screen === 'inventory'} onClick={() => changeScreen('inventory')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer ${screen === 'inventory' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>المخزون</button>
         <button type="button" aria-pressed={screen === 'similar'} onClick={() => changeScreen('similar')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer flex items-center justify-center gap-1.5 ${screen === 'similar' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-amber-200'}`}>
           <Layers className="w-4 h-4" />
-          <span>المتشابهات وخطة النقل</span>
+          <span>مساعد جمني للمقاسات والترجمة وخطة النقل ✨</span>
         </button>
         <button type="button" aria-pressed={screen === 'operations'} onClick={() => changeScreen('operations')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer ${screen === 'operations' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>العمليات والتقارير</button>
       </nav>

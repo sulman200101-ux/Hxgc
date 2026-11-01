@@ -11,6 +11,7 @@ import {
   type SimilaritySwapPlan,
 } from '../services/transferSuggestions';
 import { sanitizeLocationCode, isValidSpecificLocation } from '../utils/regexSanitizer';
+import { GeminiEngineeringAssistantPanel } from './GeminiEngineeringAssistantPanel';
 import {
   Layers,
   ArrowRightLeft,
@@ -357,6 +358,13 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
           })}
         </div>
       </div>
+
+      {/* مساعد جمني الذكي للترجمة وحسبة المقاسات والأماكن المناسبة للحجم والوزن */}
+      <GeminiEngineeringAssistantPanel
+        items={items}
+        onRefresh={onRefresh}
+        onMoveItemToShelf={handleDirectMoveSingleItem}
+      />
 
       {/* تنبيه الحالة */}
       {statusMessage && (
