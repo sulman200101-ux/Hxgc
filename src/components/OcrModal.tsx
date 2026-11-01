@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ImageSourcePicker } from './ImageSourcePicker';
 import { BatchDocumentsPanel } from './BatchDocumentsPanel';
 import { RotateCcw, CheckCircle2, ScanLine } from 'lucide-react';
+import { prewarmLocalOcrWorker } from '../services/localOcr';
 export { captureAndProcessImage } from '../services/cameraService';
 
 function CaptureFlow({
@@ -15,6 +16,10 @@ function CaptureFlow({
 }) {
   const [files, setFiles] = useState<File[]>([]);
   const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    prewarmLocalOcrWorker();
+  }, []);
 
   return (
     <div

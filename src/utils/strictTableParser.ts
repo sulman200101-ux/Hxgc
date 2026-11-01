@@ -509,13 +509,28 @@ export function extractInclusiveMaterialNumber(line: string, rowIndex: number): 
   const strict = extractStrictMaterialNumber(line);
   if (strict) return strict;
 
+  // تحويل الحروف البصرية المتشابهة في الأرقام الملتصقة قبل فحص الأرقام الجزئية
+  const visualNormalized = line.replace(/\b[1Il|!74][0OoQD°]{2}[0-9OoQD°Il|!Ss$ZzBbGg]{4,8}\b/g, (tok) =>
+    tok
+      .replace(/^[Il|!74]/, '1')
+      .replace(/[OoQD°]/g, '0')
+      .replace(/[Il|!]/g, '1')
+      .replace(/[Ss$]/g, '5')
+      .replace(/[Zz]/g, '2')
+      .replace(/[Bb]/g, '8')
+      .replace(/[Gg]/g, '6')
+  );
+
+  const visualStrict = extractStrictMaterialNumber(visualNormalized);
+  if (visualStrict) return visualStrict;
+
   const hasTableContext =
     /\b(?:C006|C008|C00S|COOS|C00|M016|MO16|MOTE|MOIS|D04D|002|EA|EFA|FA|SET|PK|PAA|SH|ZYD|KIT|PCS|ROL|BOX|N[01OIl]\d[A-Z0-9]{1,4})\b/i.test(
       line
     );
 
   // البحث عن أي رقم جزئي من 6 إلى 9 أرقام في السطر وإكماله إلى 10 أرقام ببادئة 100
-  const partialMatches = line.match(/\b(\d{6,9})\b/g);
+  const partialMatches = visualNormalized.match(/\b(\d{6,9})\b/g);
   if (partialMatches) {
     for (const num of partialMatches) {
       if (/^(?:05\d{7,8}|966\d{6,8})$/.test(num)) continue;
@@ -527,7 +542,7 @@ export function extractInclusiveMaterialNumber(line: string, rowIndex: number): 
   }
 
   if (hasTableContext) {
-    const fiveDigitMatch = line.match(/\b(10\d{3,5}|\d{5})\b/);
+    const fiveDigitMatch = visualNormalized.match(/\b(10\d{3,5}|\d{4,5})\b/);
     if (fiveDigitMatch) {
       const d = fiveDigitMatch[1];
       return `100${d.slice(-7).padStart(7, '0')}`;
@@ -535,9 +550,22 @@ export function extractInclusiveMaterialNumber(line: string, rowIndex: number): 
 
     const candidateBin = extractStrictStorageBin(line, '');
     const hasTechTerm = TECHNICAL_TERMS_REGEXES.some((rx) => rx.test(line));
-    if (isValidSpecificLocation(candidateBin) && hasTechTerm) {
+    if (isValidSpecificLocation(candidateBin) || hasTechTerm) {
       return `100999${String(rowIndex + 1).padStart(4, '0')}`;
     }
+  }
+
+  // استرجاع خوارزمي للسطور التي تحتوي على مصطلح هندسي واضح حتى لو كان رقم القطعة باهتاً
+  const hasStrongTechTerm = TECHNICAL_TERMS_REGEXES.some((rx) => rx.test(line));
+  if (hasStrongTechTerm && line.length >= 8) {
+    const anyDigits = visualNormalized.match(/\b(\d{4,10})\b/);
+    if (anyDigits) {
+      const d = anyDigits[1];
+      return d.length === 10 && d.startsWith('10')
+        ? normalizeSapMaterialPrefix(d)
+        : `100${d.slice(-7).padStart(7, '0')}`;
+    }
+    return `100998${String(rowIndex + 1).padStart(4, '0')}`;
   }
 
   return null;

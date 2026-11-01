@@ -6,7 +6,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { createWorker } from 'tesseract.js';
-import { parseRawTextOcr } from './src/services/localOcr';
+import { parseRawTextOcr, combineBestSheetExtractions } from './src/services/localOcr';
 
 dotenv.config();
 
@@ -181,18 +181,34 @@ async function getNodeOcrWorker(): Promise<NodeWorkerInstance> {
   return nodeOcrWorkerPromise;
 }
 
-async function runNodeTableOcr(imageBase64: string): Promise<any | null> {
+async function runNodeTableOcr(imageBase64: string, preprocessedBase64?: string): Promise<any | null> {
   try {
-    const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
-    if (!cleanBase64) return null;
-    const imgBuffer = Buffer.from(cleanBase64, 'base64');
     const worker = await getNodeOcrWorker();
-    const { data } = await worker.recognize(imgBuffer);
-    const items = parseRawTextOcr(data.text || '');
-    if (items.length > 0) {
+    let extracted: any[] = [];
+
+    if (preprocessedBase64) {
+      const cleanPre = preprocessedBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
+      if (cleanPre) {
+        const preBuf = Buffer.from(cleanPre, 'base64');
+        const { data: preData } = await worker.recognize(preBuf);
+        extracted = parseRawTextOcr(preData.text || '');
+      }
+    }
+
+    if (extracted.length < 18) {
+      const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
+      if (cleanBase64) {
+        const imgBuffer = Buffer.from(cleanBase64, 'base64');
+        const { data } = await worker.recognize(imgBuffer);
+        const naturalItems = parseRawTextOcr(data.text || '');
+        extracted = combineBestSheetExtractions(extracted, naturalItems);
+      }
+    }
+
+    if (extracted.length > 0) {
       return {
         success: true,
-        items,
+        items: extracted,
         skipped_rows: [],
       };
     }
@@ -322,7 +338,7 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
   });
 }
 
-async function runBestServerTableOcr(imageBase64: string): Promise<any> {
+async function runBestServerTableOcr(imageBase64: string, preprocessedBase64?: string): Promise<any> {
   const geminiResult = await runGeminiVisionTableOcr(imageBase64);
   if (geminiResult?.success && Array.isArray(geminiResult.items) && geminiResult.items.length > 0) {
     return geminiResult;
@@ -333,7 +349,7 @@ async function runBestServerTableOcr(imageBase64: string): Promise<any> {
     return pyResult;
   }
 
-  const nodeResult = await runNodeTableOcr(imageBase64);
+  const nodeResult = await runNodeTableOcr(imageBase64, preprocessedBase64);
   if (nodeResult?.success && Array.isArray(nodeResult.items) && nodeResult.items.length > 0) {
     return nodeResult;
   }
@@ -344,7 +360,7 @@ async function runBestServerTableOcr(imageBase64: string): Promise<any> {
 // مسار القراءة السحابي والخادمي الهجين (Gemini Vision -> Python OpenCV -> Node Server Tesseract -> Client Fallback)
 app.post('/api/gemini/parse-table', async (req, res) => {
   try {
-    const { imageBase64 } = req.body;
+    const { imageBase64, preprocessedBase64 } = req.body;
     if (!imageBase64) {
       return res.status(200).json({
         success: false,
@@ -354,7 +370,10 @@ app.post('/api/gemini/parse-table', async (req, res) => {
       });
     }
 
-    const result = await runBestServerTableOcr(String(imageBase64));
+    const result = await runBestServerTableOcr(
+      String(imageBase64),
+      preprocessedBase64 ? String(preprocessedBase64) : undefined
+    );
     return res.status(200).json(result);
   } catch (error: any) {
     return res.status(200).json({
@@ -369,11 +388,14 @@ app.post('/api/gemini/parse-table', async (req, res) => {
 
 app.post('/api/python/parse-table', async (req, res) => {
   try {
-    const { imageBase64 } = req.body;
+    const { imageBase64, preprocessedBase64 } = req.body;
     if (!imageBase64) {
       return res.status(200).json({ success: false, items: [], skipped_rows: [] });
     }
-    const result = await runBestServerTableOcr(String(imageBase64));
+    const result = await runBestServerTableOcr(
+      String(imageBase64),
+      preprocessedBase64 ? String(preprocessedBase64) : undefined
+    );
     return res.status(200).json(result);
   } catch (error: any) {
     return res.status(200).json({
@@ -555,11 +577,12 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v1.8.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.7.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.6.0.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.8.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.7.0.apk'),
-  path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.6.0.apk'),
   path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
 ];
 
@@ -567,17 +590,18 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v1.7.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v1.8.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.7.0/asmo-inventory-v1.7.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.8.0/asmo-inventory-v1.8.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v1.8.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.7.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.6.0.apk', handleApkDownload);
 app.get('/api/download-apk', handleApkDownload);

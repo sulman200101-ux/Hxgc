@@ -322,7 +322,8 @@ export function mergeOverlappingSheetRows(
 
 export async function parseTableWithGeminiVision(
   imageSource: string | File | Blob,
-  alreadyPrepared = false
+  alreadyPrepared = false,
+  preprocessedBase64?: string
 ): Promise<GeminiVisionResult> {
   try {
     let cleanImageDataUrl = '';
@@ -347,7 +348,7 @@ export async function parseTableWithGeminiVision(
       });
     }
 
-    const rawItems = await callPythonVisionServer(cleanImageDataUrl);
+    const rawItems = await callPythonVisionServer(cleanImageDataUrl, preprocessedBase64);
     if (!rawItems || rawItems.length === 0) {
       return {
         success: false,
