@@ -291,10 +291,8 @@ export function validateDocument(doc: StockDocument) {
     line.part_number = String(line.part_number || '').trim();
     if (!/^\d{10}$/.test(line.part_number)) {
       const digits = line.part_number.replace(/\D/g, '');
-      if (digits.length >= 10) {
-        line.part_number = digits.slice(0, 10);
-      } else if (digits.length >= 7) {
-        line.part_number = digits.padStart(10, '1000');
+      if (digits.length === 10) {
+        line.part_number = digits;
       } else {
         throw new Error('راجع رقم القطعة' + rowLabel);
       }
@@ -306,10 +304,10 @@ export function validateDocument(doc: StockDocument) {
       line.quantity = 1;
     }
     if (!line.location || !line.location.trim()) {
-      line.location = 'N01A1';
+      line.location = 'غير محدد';
     }
     if (!line.description_en || !line.description_en.trim()) {
-      line.description_en = 'SPARE PART ASMO';
+      line.description_en = 'غير محدد';
     }
     line.reviewed = true;
     if (seen.has(line.part_number) && ['inventory', 'receipt'].includes(doc.kind)) {

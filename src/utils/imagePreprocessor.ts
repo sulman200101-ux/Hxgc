@@ -54,14 +54,12 @@ function applyFastUnsharpMask(imageData: ImageData, amount = 0.45): void {
 
 /**
  * معايرة تلقائية فائقة السرعة لاتجاه الورقة (<15ms) قبل بدء القراءة
- * تقارن طاقة تدرج السطور الأفقية مقابل العمودية مع نسبة الأبعاد لتحديد ما إذا كانت الورقة مصورة بشكل طولي تحتاج تدوير 90° عكس عقارب الساعة
+ * تقارن طاقة تدرج السطور الأفقية مقابل العمودية لتحديد ما إذا كانت النصوص نفسها مصورة بشكل عمودي فعلياً
+ * دون تدوير الصور الطولية العادية التي تكون نصوصها أفقية سليمة.
  */
 function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
   const origW = img.naturalWidth || img.width;
   const origH = img.naturalHeight || img.height;
-  if (origH > origW * 1.06) {
-    return true;
-  }
   if (origW > origH * 1.25) {
     return false;
   }
@@ -72,7 +70,7 @@ function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
     c.width = sampleSize;
     c.height = sampleSize;
     const ctx = c.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return origH > origW;
+    if (!ctx) return false;
     ctx.drawImage(img, 0, 0, sampleSize, sampleSize);
     const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
 
@@ -103,9 +101,9 @@ function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
       vertColEnergy += colDiffSum;
     }
 
-    return vertColEnergy > horizRowEnergy * 1.22;
+    return vertColEnergy > horizRowEnergy * 1.48;
   } catch {
-    return origH > origW;
+    return false;
   }
 }
 

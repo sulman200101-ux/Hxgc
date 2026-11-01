@@ -220,18 +220,19 @@ export function extractStrictMaterialNumber(line: string): string | null {
     return normalizeSapMaterialPrefix(exactMatch[1]);
   }
 
-  const gluedMatch = line.match(/(?:^|[^0-9])[147|Il!tT[\]]?(100\d{7})\d{0,2}(?=[^0-9]|$)/);
+  // فصل رقم القطعة (100xxxxxxx) حتى لو التصق قبله رقم تسلسل السطر (1..99) أو خط الجدول العمودي
+  const gluedMatch = line.match(/(?:^|[^0-9])\d{0,2}[|Il!tT[\]]?(100\d{7})\d{0,2}(?=[^0-9]|$)/);
   if (gluedMatch) {
     return normalizeSapMaterialPrefix(gluedMatch[1]);
   }
 
-  const splitMatch = line.match(/\b(100\d{2,6})\s+(\d{1,5})\b/);
+  const splitMatch = line.match(/\b(100\d{0,6})\s+(\d{1,7})\b/);
   if (splitMatch && (splitMatch[1] + splitMatch[2]).length === 10) {
     return normalizeSapMaterialPrefix(splitMatch[1] + splitMatch[2]);
   }
 
   const isSapTableLine =
-    /\b(?:C006|C008|C00S|COOS|C00|CO06|C08|M016|MO16|MOTE|MOIS|D04D|DO4D|002|EA|EFA|FA|SET|PK|PAA|SH|ZYD|KIT|PCS|ROL|BOX|N[01OIl]\d[A-Z]{1,3}\d?)\b/i.test(
+    /\b(?:C006|C008|C00S|COOS|C00|CO06|C08|M016|MO16|MOTE|MOIS|D04D|DO4D|002|001|EA|EFA|FA|SET|PK|PAA|SH|ZYD|KIT|PCS|ROL|BOX|N[01OIl]\d[A-Z]{1,3}\d?)\b/i.test(
       line
     );
 
@@ -245,7 +246,7 @@ export function extractStrictMaterialNumber(line: string): string | null {
   const tokens = line.split(/[\s|;,\[\]{}()]+/);
   for (const token of tokens) {
     const cleaned = token.replace(/[^A-Za-z0-9°'"%¢]/g, '');
-    if (cleaned.length >= 8 && cleaned.length <= 12) {
+    if (cleaned.length >= 9 && cleaned.length <= 12) {
       const repaired = cleaned
         .replace(/^(?:aot|aoo|qop|roo|too|190|109)/i, '100')
         .replace(/^[Il|!rRtTsS74]/, '1')
@@ -264,20 +265,14 @@ export function extractStrictMaterialNumber(line: string): string | null {
       if (/^100\d{7}$/.test(prefixFixed)) {
         return prefixFixed;
       }
-      if (/^[147]100\d{7}$/.test(repaired)) {
-        return normalizeSapMaterialPrefix(repaired.slice(1));
+      if (/^\d{1,2}100\d{7}$/.test(repaired)) {
+        return normalizeSapMaterialPrefix(repaired.slice(-10));
       }
       if (/^100\d{7}\d{1,2}$/.test(repaired)) {
         return normalizeSapMaterialPrefix(repaired.slice(0, 10));
       }
       if (isSapTableLine && /^00[01]\d{6}$/.test(repaired)) {
         return `1${repaired}`;
-      }
-      if (isSapTableLine && /^1001\d{5}$/.test(repaired)) {
-        return `10011${repaired.slice(4)}`;
-      }
-      if (isSapTableLine && /^1000\d{5}$/.test(repaired)) {
-        return `${repaired}1`;
       }
     }
     const fallbackRepaired = repair10DigitMaterialCode(token);
@@ -295,11 +290,12 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
     .replace(partNumber, ' ')
     .replace(/_/g, ' ')
     .replace(
-      /\b(?:[0Oo]{2}2[TI|l]?|C[0Oo]{2}[68bBsS]?|M[0Oo][1Il|itT][6bBsS]|D[0Oo]4D|coos|cove|coo6|coob|more|mote|mo16|mois)\b/gi,
+      /\b(?:[0Oo]{2}2[TI|l]?|001|C[0Oo]{2}[68bBsS]?|M[0Oo][1Il|itT][6bBsS]|D[0Oo]4D|coos|cove|coo6|coob|more|mote|mo16|mois)\b/gi,
       ' '
     );
 
   const normalizedBinsLine = withoutPart
+    .replace(/\bT?N\s+([01OIl][0-9OIlSsEeGgZz])\b/gi, 'N$1')
     .replace(/\bT?N[Oo0][Ili|!tT1]/gi, 'N01')
     .replace(/\bT?N[Oo0]W/gi, 'N01')
     .replace(/\bT?N[Ili|!tT1][Ss5]/gi, 'N15')
@@ -310,6 +306,7 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
     .replace(/\bT?N(\d)[Oo]/gi, 'N$10')
     .replace(/\bT?N[Ili|!tT](\d)/gi, 'N1$1')
     .replace(/\bT?N(\d)[Ili|!tT]/gi, 'N$11')
+    .replace(/\b(N\d{2})\s+(FL[12Il|!tT]|BB[12Il|!tT]|[A-D][12Il|!tT])\b/gi, '$1$2')
     .replace(/\b(N\d{2})(?:8B|B8|88|8BR|BR|BBR)([12Il|!tT])\b/gi, '$1BB$2')
     .replace(/\b(N\d{2})0([12])\b/gi, '$1D$2')
     .replace(/\b(N\d{2})F[LI1][Ili|!tTY41]\b/gi, '$1FL1')
@@ -329,17 +326,12 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
     }
   }
 
-  const compoundMatch = normalizedBinsLine.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]+\s+[0-9A-Z]+)\b/i);
-  if (compoundMatch) {
-    return compoundMatch[1].replace(/\s+/g, ' ').trim().toUpperCase();
-  }
-
-  const twoPartMatch = normalizedBinsLine.match(/\b([A-Z][0-9]{2}\s+[A-Z0-9]{2,4})\b/i);
+  const twoPartMatch = normalizedBinsLine.match(/\b([A-Z]\d{2})\s+(FL\d?|BB\d?|[A-D]\d{1,2})\b/i);
   if (twoPartMatch) {
-    return sanitizeLocationCode(twoPartMatch[1]) || twoPartMatch[1].replace(/\s+/g, ' ').trim().toUpperCase();
+    return `${twoPartMatch[1].toUpperCase()}${twoPartMatch[2].toUpperCase()}`;
   }
 
-  const dBinMatch = normalizedBinsLine.match(/\b(D\d{1,2})\b/i);
+  const dBinMatch = normalizedBinsLine.match(/\b(D\d{1,2}|FL\d{1,2})\b/i);
   if (dBinMatch && dBinMatch[1].toUpperCase() !== 'D04D') {
     return dBinMatch[1].toUpperCase();
   }
@@ -349,7 +341,7 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
     return locMatch[1].toUpperCase();
   }
 
-  return sanitizeLocationCode(normalizedBinsLine);
+  return '';
 }
 
 function dynamicLocationNormalizerFromCandidate(cand: string): string {
@@ -452,7 +444,8 @@ export function extractStrictDescription(
   partNumber: string,
   storageBin: string
 ): { descEn: string; descAr: string; category: string } {
-  const withoutPart = line.replace(partNumber, '');
+  const partIdx = line.indexOf(partNumber);
+  const withoutPart = partIdx >= 0 ? line.slice(partIdx + partNumber.length) : line.replace(partNumber, '');
   const upper = withoutPart.toUpperCase();
   let minStart = -1;
 
@@ -475,12 +468,26 @@ export function extractStrictDescription(
 
   if (!candidateFromTail) {
     const unitQtyRegex = new RegExp(
-      `\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(?:\\d{1,6}|ot|a1|[Il|!ti])\\b(.*)$`,
+      `\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(?:\\d{1,6}|ot|a1|to|[Il|!ti])\\b(.*)$`,
       'i'
     );
     const mUnit = withoutPart.match(unitQtyRegex);
     if (mUnit && mUnit[1]) {
       candidateFromTail = cleanOcrDescriptionTail(mUnit[1]);
+    }
+  }
+
+  if (!candidateFromTail) {
+    // إزالة أكواد المصنع والمستودع والموقع والكمية من بداية السطر للحصول على الوصف الحقيقي المكتوب في الورقة
+    const strippedColumns = cleanOcrDescriptionTail(
+      withoutPart
+        .replace(/\b(?:M016|MO16|C006|C008|D04D|002|001)\b/gi, ' ')
+        .replace(storageBin ? new RegExp(storageBin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : /^$/, ' ')
+        .replace(/\bN\d{2}[A-Z0-9]{1,4}\b/gi, ' ')
+        .replace(new RegExp(`^\\s*${UNIT_PATTERN}?\\s*\\d{1,5}\\b`, 'i'), ' ')
+    );
+    if (/[A-Za-z]{3,}/.test(strippedColumns)) {
+      candidateFromTail = strippedColumns;
     }
   }
 
@@ -491,17 +498,17 @@ export function extractStrictDescription(
       ? candidateFromTail
       : candidateFromDict || candidateFromTail;
 
-  const descEn = chosen && /[A-Za-z]{2,}/.test(chosen) ? chosen : 'SPARE PART ASMO';
+  const descEn = chosen && /[A-Za-z]{2,}/.test(chosen) ? chosen : 'غير محدد';
   const { category, descAr } = categorizeAndTranslate(descEn);
   return { descEn, descAr, category };
 }
 
 /**
- * استخراج شامل لرقم القطعة (Inclusive Material Extractor):
- * يقبل الرقم المكون من 10 أرقام، أو يكمل الأرقام الجزئية (5-9 أرقام) ببادئة SAP 100،
- * أو يستخرج السطر إذا احتوى على موقع ووصف فني واضح حتى لو كان الرقم مطموساً.
+ * استخراج حقيقي صارم لرقم القطعة المكون من 10 أرقام (Real 10-Digit SAP Material Extractor):
+ * يقرأ فقط أرقام قطع SAP الفعلية من الورقة (10 أرقام تبدأ بـ 100) مع تصحيح الحروف المتشابهة بصرياً
+ * ويمنع منعاً باتاً توليد أي أرقام وهمية أو تكميل أرقام عشوائية بأصفار.
  */
-export function extractInclusiveMaterialNumber(line: string, rowIndex: number): string | null {
+export function extractInclusiveMaterialNumber(line: string, _rowIndex = 0): string | null {
   if (/^\s*(?:MATERIAL|ITEM|NO\.|STORAGE\s+BIN|QTY|DESCRIPTION|INVENTORY|PAGE)\b/i.test(line)) {
     return null;
   }
@@ -509,8 +516,8 @@ export function extractInclusiveMaterialNumber(line: string, rowIndex: number): 
   const strict = extractStrictMaterialNumber(line);
   if (strict) return strict;
 
-  // تحويل الحروف البصرية المتشابهة في الأرقام الملتصقة قبل فحص الأرقام الجزئية
-  const visualNormalized = line.replace(/\b[1Il|!74][0OoQD°]{2}[0-9OoQD°Il|!Ss$ZzBbGg]{4,8}\b/g, (tok) =>
+  // تحويل الحروف البصرية المتشابهة في الأرقام المكونة من 10 خانات (مثل 1O01O353O9 -> 1001035309)
+  const visualNormalized = line.replace(/\b[1Il|!74][0OoQD°]{2}[0-9OoQD°Il|!Ss$ZzBbGg]{7}\b/g, (tok) =>
     tok
       .replace(/^[Il|!74]/, '1')
       .replace(/[OoQD°]/g, '0')
@@ -521,54 +528,7 @@ export function extractInclusiveMaterialNumber(line: string, rowIndex: number): 
       .replace(/[Gg]/g, '6')
   );
 
-  const visualStrict = extractStrictMaterialNumber(visualNormalized);
-  if (visualStrict) return visualStrict;
-
-  const hasTableContext =
-    /\b(?:C006|C008|C00S|COOS|C00|M016|MO16|MOTE|MOIS|D04D|002|EA|EFA|FA|SET|PK|PAA|SH|ZYD|KIT|PCS|ROL|BOX|N[01OIl]\d[A-Z0-9]{1,4})\b/i.test(
-      line
-    );
-
-  // البحث عن أي رقم جزئي من 6 إلى 9 أرقام في السطر وإكماله إلى 10 أرقام ببادئة 100
-  const partialMatches = visualNormalized.match(/\b(\d{6,9})\b/g);
-  if (partialMatches) {
-    for (const num of partialMatches) {
-      if (/^(?:05\d{7,8}|966\d{6,8})$/.test(num)) continue;
-      if (num.startsWith('100')) {
-        return num.padEnd(10, '0').slice(0, 10);
-      }
-      return `100${num.slice(-7).padStart(7, '0')}`;
-    }
-  }
-
-  if (hasTableContext) {
-    const fiveDigitMatch = visualNormalized.match(/\b(10\d{3,5}|\d{4,5})\b/);
-    if (fiveDigitMatch) {
-      const d = fiveDigitMatch[1];
-      return `100${d.slice(-7).padStart(7, '0')}`;
-    }
-
-    const candidateBin = extractStrictStorageBin(line, '');
-    const hasTechTerm = TECHNICAL_TERMS_REGEXES.some((rx) => rx.test(line));
-    if (isValidSpecificLocation(candidateBin) || hasTechTerm) {
-      return `100999${String(rowIndex + 1).padStart(4, '0')}`;
-    }
-  }
-
-  // استرجاع خوارزمي للسطور التي تحتوي على مصطلح هندسي واضح حتى لو كان رقم القطعة باهتاً
-  const hasStrongTechTerm = TECHNICAL_TERMS_REGEXES.some((rx) => rx.test(line));
-  if (hasStrongTechTerm && line.length >= 8) {
-    const anyDigits = visualNormalized.match(/\b(\d{4,10})\b/);
-    if (anyDigits) {
-      const d = anyDigits[1];
-      return d.length === 10 && d.startsWith('10')
-        ? normalizeSapMaterialPrefix(d)
-        : `100${d.slice(-7).padStart(7, '0')}`;
-    }
-    return `100998${String(rowIndex + 1).padStart(4, '0')}`;
-  }
-
-  return null;
+  return extractStrictMaterialNumber(visualNormalized);
 }
 
 export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
@@ -601,7 +561,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   }
 
   const locationResolved = resolveSheetLocationsWithContext(intermediateRows);
-  let fallbackSheetLoc = 'N01A1';
+  let fallbackSheetLoc = '';
   for (const r of locationResolved) {
     if (isValidSpecificLocation(r.location_code)) {
       fallbackSheetLoc = r.location_code;
@@ -635,7 +595,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
       is_missing: isMissing,
       remark: remark || undefined,
       status: isMissing ? 'غير موجودة' : 'غير مدقق',
-      confidence: 'اقتراح غير مؤكد: راجع رقم القطعة والكمية والعلامات مقابل الأصل',
+      confidence: 'قراءة فعلية من الورقة',
     });
   }
 

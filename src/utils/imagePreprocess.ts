@@ -120,91 +120,17 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
           }
         }
 
-        // 3. كشف خطوط الجدول الأفقية والعمودية الطويلة وحذفها مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة
-        const hKernel = Math.max(55, Math.round(width / 16));
-        const vKernel = Math.max(38, Math.round(height / 20));
-        const hLineMask = new Uint8Array(totalPixels);
-        const vLineMask = new Uint8Array(totalPixels);
-
-        for (let y = 0; y < height; y++) {
-          const rowOff = y * width;
-          let run = 0;
-          for (let x = 0; x < width; x++) {
-            if (sharpened[rowOff + x] < 195) {
-              run++;
-            } else {
-              if (run >= hKernel) {
-                for (let k = x - run; k < x; k++) hLineMask[rowOff + k] = 1;
-              }
-              run = 0;
-            }
-          }
-          if (run >= hKernel) {
-            for (let k = width - run; k < width; k++) hLineMask[rowOff + k] = 1;
-          }
-        }
-
-        for (let x = 0; x < width; x++) {
-          let run = 0;
-          for (let y = 0; y < height; y++) {
-            if (sharpened[y * width + x] < 195) {
-              run++;
-            } else {
-              if (run >= vKernel) {
-                for (let k = y - run; k < y; k++) vLineMask[k * width + x] = 1;
-              }
-              run = 0;
-            }
-          }
-          if (run >= vKernel) {
-            for (let k = height - run; k < height; k++) vLineMask[k * width + x] = 1;
-          }
-        }
-
-        const cleaned = new Uint8ClampedArray(sharpened);
-
-        for (let y = 4; y < height - 4; y++) {
-          const rowOff = y * width;
-          for (let x = 4; x < width - 4; x++) {
-            const idx = rowOff + x;
-            if (hLineMask[idx] || hLineMask[idx - width] || hLineMask[idx + width]) {
-              const aboveDark =
-                sharpened[idx - width * 2] < 210 ||
-                sharpened[idx - width * 3] < 210 ||
-                sharpened[idx - width * 4] < 210;
-              const belowDark =
-                sharpened[idx + width * 2] < 210 ||
-                sharpened[idx + width * 3] < 210 ||
-                sharpened[idx + width * 4] < 210;
-              if (!aboveDark && !belowDark) {
-                cleaned[idx] = 255;
-              }
-            }
-            if (vLineMask[idx] || vLineMask[idx - 1] || vLineMask[idx + 1]) {
-              const leftDark =
-                sharpened[idx - 2] < 205 ||
-                sharpened[idx - 3] < 205;
-              const rightDark =
-                sharpened[idx + 2] < 205 ||
-                sharpened[idx + 3] < 205;
-              if (!leftDark && !rightDark) {
-                cleaned[idx] = 255;
-              }
-            }
-          }
-        }
-
         await yieldToMain();
 
-        // 4. تعزيز التباين المرن مع الحفاظ على الحروف الباهتة والأرقام الرفيعة
+        // 3. تعزيز التباين الطبيعي وتبييض خلفية الورقة (Shadow-Free Contrast Stretch) مع الحفاظ التام بنسبة 100% على ضربات الأرقام والحروف
         for (let j = 0, i = 0; j < totalPixels; j++, i += 4) {
-          const v = cleaned[j];
+          const v = sharpened[j];
           const stretched =
-            v >= 232
+            v >= 238
               ? 255
-              : v <= 95
+              : v <= 65
               ? 0
-              : Math.min(255, Math.max(0, Math.round(((v - 95) * 255) / 137)));
+              : Math.min(255, Math.max(0, Math.round(((v - 65) * 255) / 173)));
           data[i] = stretched;
           data[i + 1] = stretched;
           data[i + 2] = stretched;

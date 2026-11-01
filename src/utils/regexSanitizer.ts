@@ -155,22 +155,49 @@ const FORBIDDEN_LOCATIONS = new Set([
 ]);
 
 /**
- * فحص هل الموقع حقيقي ومحدد وليس موقعاً عاماً أو فارغاً أو كود مصنع
+ * فحص هل الموقع حقيقي ومحدد في مستودع أسمو (SAP Storage Bin) وليس نصاً عشوائياً أو كود مصنع
  */
 export function isValidSpecificLocation(loc: string | null | undefined): boolean {
   if (!loc) return false;
   const trimmed = String(loc).trim().toUpperCase();
   if (!trimmed) return false;
 
-  if (trimmed === 'D' || /^D\d{1,3}$/.test(trimmed)) {
+  if (trimmed === 'D' || /^D\d{1,3}$/.test(trimmed) || trimmed === 'FL' || /^FL\d{1,2}$/.test(trimmed)) {
     return true;
   }
 
-  if (trimmed.length < 2) return false;
+  if (trimmed.length < 2 || trimmed.length > 14) return false;
   if (FORBIDDEN_LOCATIONS.has(trimmed)) return false;
-  if (trimmed.includes('عام')) return false;
+  if (trimmed.includes('عام') || trimmed.includes('غير محدد')) return false;
 
-  return /^[A-Z0-9][A-Z0-9\s\/._-]{1,18}$/i.test(trimmed) && /[A-Z]/i.test(trimmed);
+  // استبعاد مقاسات البراغي والسبائك الشائعة في الوصف مثل M16, M12, 316L, 304L, A105
+  if (/^(?:M\d{1,2}|304L?|316L?|A105|B16|A234|SCH\d+|PN\d+|CL\d+)$/i.test(trimmed)) {
+    return false;
+  }
+
+  // صيغة أرفف SAP القياسية: N01A1, N15BB2, N11FL1, N12C2, N16D2 أو بصيغة مفصولة بمسافة
+  if (/^[A-Z]\d{2}[A-Z]{1,3}\d{0,2}$/.test(trimmed)) {
+    return !['C006', 'M016', 'D04D'].includes(trimmed);
+  }
+
+  if (/^[A-Z]\d{2}\s+[A-Z]{1,3}\d{0,2}$/.test(trimmed)) {
+    return true;
+  }
+
+  if (/^[A-Z]\d{2}\s+[A-Z0-9]{1,4}\s+[A-Z0-9]{1,4}$/.test(trimmed)) {
+    return true;
+  }
+
+  if (/^(?:LOC|BIN|RACK|SH|ZONE)-[A-Z0-9-]{1,10}$/.test(trimmed)) {
+    return true;
+  }
+
+  // قبول أكواد الأرفف القصيرة التي تجمع حرف رف ورقم (مثل A1, B2, BB1, C4, D1) عند إدخالها كرمز موقع مستقل
+  if (/^(?:FL|[A-D]|BB|C4)\d{1,2}$/.test(trimmed)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -188,16 +215,17 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
 
   let cleaned = rawStr.toUpperCase();
 
-  if (cleaned === 'D' || /^D\d{1,3}$/.test(cleaned)) {
+  if (cleaned === 'D' || /^D\d{1,3}$/.test(cleaned) || cleaned === 'FL' || /^FL\d{1,2}$/.test(cleaned)) {
     LOCATION_CACHE.set(rawStr, cleaned);
     return cleaned;
   }
 
   cleaned = cleaned
     .replace(/عام/g, '')
+    .replace(/غير محدد/g, '')
     .replace(/موقع[:\s]*/g, '')
     .replace(/[\[\]\(\)\{\}\=\|\&\~\\\@\#\$\%\^\*\+\?\!\;\:\"\'\`<>—\-]/g, ' ')
-    .replace(/\b(002\s*02|0020|002|C006|C008|C00S|COOS|C00|M016|MO16|MOTE|MOIS|D04D|DO4D|STORAGE\s*BIN|BIN|LOC)\b/gi, ' ')
+    .replace(/\b(002\s*02|0020|002|001|C006|C008|C00S|COOS|C00|M016|MO16|MOTE|MOIS|D04D|DO4D|STORAGE\s*BIN|BIN|LOC)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -206,14 +234,14 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     return '';
   }
 
-  if (cleaned === 'D' || /^D\d{1,3}$/.test(cleaned)) {
+  if (cleaned === 'D' || /^D\d{1,3}$/.test(cleaned) || cleaned === 'FL' || /^FL\d{1,2}$/.test(cleaned)) {
     LOCATION_CACHE.set(rawStr, cleaned);
     return cleaned;
   }
 
   // إصلاحات مخصصة لأكواد أرفف SAP القياسية (N01..N19)
   let sapFixed = cleaned
-    // إصلاح البادئة Nxx (مثل NO1 -> N01, NI5 -> N15, NIS -> N15, NII -> N11, NAt -> N11, NI2 -> N12, NIZ -> N12, NI6 -> N16, NIE -> N16, N1G -> N16)
+    .replace(/\bN\s+([01OIl][0-9OIlSsEeGgZz])\b/g, 'N$1')
     .replace(/\bN[Oo0][Ili|!tT1]/g, 'N01')
     .replace(/\bN[Oo0]W/g, 'N01')
     .replace(/\bN[Ili|!tT1][Ss5]/g, 'N15')
@@ -224,6 +252,8 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     .replace(/\b([A-Z]\d)[Oo]/g, '$10')
     .replace(/\b([A-Z])[Il|tT](\d)/g, '$11$2')
     .replace(/\b([A-Z]\d)[Il|tT]([A-Z])/g, '$11$2')
+    // دمج المسافة إن وُجدت بين رقم الممر Nxx ورمز الرف (مثل N01 A1 -> N01A1 أو N15 BB2 -> N15BB2)
+    .replace(/\b(N\d{2})\s+(FL[12Il|!tT]|BB[12Il|!tT]|[A-D][12Il|!tT])\b/g, '$1$2')
     // إصلاح رمز الرف المزدوج BB (مثل N158B2, N158BR2, N15BR2, N15882 -> N15BB2)
     .replace(/\b(N\d{2})(?:8B|B8|88|8BR|BR|BBR)([12Il|!tT])\b/g, '$1BB$2')
     // إصلاح حرف D حين يُقرأ 0 بين رقمين (مثل N1502 -> N15D2 و N1101 -> N11D1)
@@ -253,18 +283,13 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     }
   }
 
-  const spacedBinMatch3 = sapFixed.match(/\b([A-Z]\d{2}\s+[A-Z0-9]+\s+[A-Z0-9]+)\b/);
-  if (spacedBinMatch3) {
-    const res = spacedBinMatch3[1].replace(/\s+/g, ' ').trim();
-    LOCATION_CACHE.set(rawStr, res);
-    return res;
-  }
-
-  const spacedBinMatch2 = sapFixed.match(/\b([A-Z]\d{2}\s+[A-Z0-9]+)\b/);
-  if (spacedBinMatch2) {
-    const res = spacedBinMatch2[1].replace(/\s+/g, ' ').trim();
-    LOCATION_CACHE.set(rawStr, res);
-    return res;
+  const spacedBinMatch = sapFixed.match(/\b([A-Z]\d{2})\s+([A-Z]{1,3}\d{1,2})\b/);
+  if (spacedBinMatch) {
+    const candidate = `${spacedBinMatch[1]}${spacedBinMatch[2]}`.toUpperCase();
+    if (!['C006', 'M016', 'D04D'].includes(candidate)) {
+      LOCATION_CACHE.set(rawStr, candidate);
+      return candidate;
+    }
   }
 
   if (isValidSpecificLocation(sapFixed)) {

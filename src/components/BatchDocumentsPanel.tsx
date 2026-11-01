@@ -158,8 +158,8 @@ export function BatchDocumentsPanel({
             return {
               part_number: row.part_number,
               quantity: row.qty_total > 0 ? row.qty_total : 1,
-              location: row.location_code || 'N01A1',
-              description_en: row.description_en || 'SPARE PART ASMO',
+              location: row.location_code || '',
+              description_en: row.description_en && row.description_en !== 'غير محدد' ? row.description_en : '',
               description_ar: row.description_ar || '',
               check: row.is_missing === 1 ? 'X' : '',
               remark: marks.shortage > 0 ? `-${marks.shortage}` : '',

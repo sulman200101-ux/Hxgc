@@ -50,10 +50,10 @@ jobs:
           cd ../output_apk
           if [ -f app-debug.apk ]; then
             cp -f app-debug.apk asmo-inventory-app.apk
-            cp -f app-debug.apk asmo-inventory-v1.5.0.apk
             cp -f app-debug.apk asmo-inventory-v1.6.0.apk
             cp -f app-debug.apk asmo-inventory-v1.7.0.apk
             cp -f app-debug.apk asmo-inventory-v1.8.0.apk
+            cp -f app-debug.apk asmo-inventory-v1.9.0.apk
           fi
           cd ..
           echo "=== Generated Native APKs ==="
@@ -63,18 +63,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: v1.8.0
-          name: "ASMO Inventory App v1.8.0 (محرك قراءة هجين مع Gemini + خوارزميات معالجة الجداول)"
+          tag_name: v1.9.0
+          name: "ASMO Inventory App v1.9.0 (قراءة حقيقية صارمة 100% بدون أي أرقام وهمية)"
           body: |
-            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدث v1.8.0)
-            - **دعم القراءة بخوارزميات بصرية وهندسية متقدمة مع Gemini**: إزالة الظلال وخطوط الجدول، تسريع نواة WASM SIMD، والتقسيم النصفي المتداخل لضمان قراءة كافة السطور دون توقف.
-            - **إصلاح خطأ "تعذر تشغيل القراءة المحلية" نهائياً**: تسخين مسبق لمحرك القراءة مع حماية كل تمريرة بشكل مستقل.
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدث v1.9.0)
+            - **قراءة حقيقية 100% بدون أي أرقام أو مواقع وهمية**: إلغاء توليد الأرقام الافتراضية نهائياً، وقراءة أرقام قطع SAP الفعلية المكونة من 10 أرقام (100xxxxxxx) والمواقع والأوصاف الحقيقية المكتوبة في الورقة فقط.
+            - **إصلاح تدوير الصور الطولية وحفظ ضربات الأرقام**: منع التدوير الخاطئ للصور الطولية السليمة ومنع مسح الرقم (1) في عمود Material أثناء تنقية الظلال.
             - **اعتماد علامة الناقص (-) فقط**: إنقاص العدد واستبعاد الزيادة نهائياً.
             - **المساعد الذكي Gemini**: الترجمة الفورية وحساب المقاسات وتوزيع الأرفف حسب الارتفاع والوزن (FL, A, B, BB, C4, D).
           files: |
+            output_apk/asmo-inventory-v1.9.0.apk
             output_apk/asmo-inventory-v1.8.0.apk
             output_apk/asmo-inventory-v1.7.0.apk
-            output_apk/asmo-inventory-v1.6.0.apk
             output_apk/asmo-inventory-app.apk
             output_apk/app-debug.apk
         env:

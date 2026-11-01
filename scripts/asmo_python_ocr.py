@@ -52,43 +52,19 @@ def decode_image_from_input(input_data: str) -> np.ndarray:
 def preprocess_table_image_opencv(img_gray: np.ndarray) -> np.ndarray:
     """
     خوارزمية الرؤية الحاسوبية في بايثون (OpenCV Pipeline):
-    1. تدوير الصور الطولية 90° عكس عقارب الساعة
-    2. تكبير فائق الوضوح (Cubic 1.6x)
-    3. موازنة الإضاءة الموضعية وإزالة الظلال (Gaussian Retinex Division)
-    4. زيادة حدة الحروف والأرقام الدقيقة في الزوايا (Unsharp Masking)
-    5. عزل وحذف خطوط الشبكة الأفقية والعمودية مع حماية ضربات الحروف المتقاطعة (Stroke-Preserving Morphological Grid Removal)
+    1. تكبير فائق الوضوح (Cubic 1.5x)
+    2. موازنة الإضاءة الموضعية وإزالة الظلال (Gaussian Retinex Division)
+    3. زيادة حدة الحروف والأرقام الدقيقة في الزوايا (Unsharp Masking)
+    4. تعزيز التباين السلس مع الحفاظ التام بنسبة 100% على ضربات الأرقام والحروف
     """
-    h, w = img_gray.shape[:2]
-    if h > w * 1.05:
-        img_gray = cv2.rotate(img_gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-    up = cv2.resize(img_gray, (0, 0), fx=1.6, fy=1.6, interpolation=cv2.INTER_CUBIC)
+    up = cv2.resize(img_gray, (0, 0), fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
     bg = cv2.GaussianBlur(up, (45, 45), 0)
     norm = cv2.divide(up, bg, scale=255)
 
     blur = cv2.GaussianBlur(norm, (0, 0), 1.2)
-    sharp = cv2.addWeighted(norm, 1.6, blur, -0.6, 0)
+    sharp = cv2.addWeighted(norm, 1.55, blur, -0.55, 0)
 
-    bw = (sharp < 205).astype(np.uint8) * 255
-    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (55, 1))
-    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 45))
-    h_lines = cv2.morphologyEx(bw, cv2.MORPH_OPEN, hk) > 0
-    v_lines = cv2.morphologyEx(bw, cv2.MORPH_OPEN, vk) > 0
-
-    cleaned = sharp.copy()
-    keep_h = (
-        ((np.roll(sharp, -3, axis=0) < 200) | (np.roll(sharp, -4, axis=0) < 200))
-        & ((np.roll(sharp, 3, axis=0) < 200) | (np.roll(sharp, 4, axis=0) < 200))
-    )
-    for dy in (-2, -1, 0, 1, 2):
-        sh = np.roll(h_lines, dy, axis=0)
-        cleaned[sh & ~keep_h] = 255
-
-    for dx in (-2, -1, 0, 1, 2):
-        sv = np.roll(v_lines, dx, axis=1)
-        cleaned[sv] = 255
-
-    cleaned = np.clip((cleaned.astype(np.float32) - 115.0) * (255.0 / 125.0), 0, 255).astype(np.uint8)
+    cleaned = np.clip((sharp.astype(np.float32) - 65.0) * (255.0 / 173.0), 0, 255).astype(np.uint8)
     return cleaned
 
 

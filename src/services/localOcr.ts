@@ -437,88 +437,69 @@ export async function processOcrFromImage(
     }
 
     let extracted: ExtractedSparePart[] = [];
+    let winningSheetImage = scaledNaturalSource;
 
-    if (isFullSheetPhoto) {
-      reportLiveProgress(58, '3/4 قراءة الأرقام والسطور بعد تنقية خطوط الشبكة...');
+    reportLiveProgress(56, '3/4 قراءة الأرقام والسطور الفعلية من الورقة...');
+    await pauseUi(0);
+
+    // التمريرة الأساسية على الصورة المحسنة الطبيعية (تحافظ بنسبة 100% على كافة ضربات الأرقام)
+    const naturalText = await safeRecognizeText(worker, scaledNaturalSource, 22000);
+    extracted = parseRawTextOcr(naturalText);
+
+    // دمج التمريرة المنقاة من الظلال لإثراء أي سطر وقع تحت ظل الكاميرا
+    if (preprocessedGridFree && extracted.length < 30) {
+      reportLiveProgress(66, '3/4 مطابقة السطور مع طبقة إزالة الظلال...');
       await pauseUi(0);
-      if (!preprocessedGridFree) {
-        try {
-          preprocessedGridFree = await preprocessImageForOCR(scaledNaturalSource);
-        } catch {
-          preprocessedGridFree = scaledNaturalSource;
-        }
+      const shadowFreeText = await safeRecognizeText(worker, preprocessedGridFree, 22000);
+      const shadowFreeRows = parseRawTextOcr(shadowFreeText);
+      if (shadowFreeRows.length > extracted.length) {
+        winningSheetImage = preprocessedGridFree;
       }
-      const gridFreeText = await safeRecognizeText(worker, preprocessedGridFree, 24000);
-      extracted = parseRawTextOcr(gridFreeText);
-
-      // إذا كانت الورقة كثيفة ولم تكتمل كل السطور، ندمج قراءة النصف العلوي والسفلي المتداخلين بدقة عالية
-      if (extracted.length < 22) {
-        try {
-          reportLiveProgress(74, '3/4 مسح تفصيلي للنصف العلوي والسفلي لاستخراج كافة السطور...');
-          await pauseUi(0);
-          const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(
-            preprocessedGridFree || scaledNaturalSource
-          );
-          const topText = await safeRecognizeText(worker, topHalf, 18000);
-          reportLiveProgress(84, '3/4 استكمال مسح النصف السفلي للورقة...');
-          const botText = await safeRecognizeText(worker, bottomHalf, 18000);
-          const topRows = parseRawTextOcr(topText);
-          const botRows = parseRawTextOcr(botText);
-          const mergedHalves = mergeOverlappingBandRows([topRows, botRows]);
-          extracted = combineBestSheetExtractions(extracted, mergedHalves);
-        } catch {
-          // الاحتفاظ بالسطور المستخرجة في حال تعذر تقسيم النصفين
-        }
-      }
-
-      // تمريرة إضافية على الصورة الطبيعية المحسنة إذا بقي عدد السطور قليلاً
-      if (extracted.length < 10) {
-        reportLiveProgress(89, '3/4 مطابقة النصوص مع الصورة الأصلية المحسنة...');
-        const naturalText = await safeRecognizeText(worker, scaledNaturalSource, 20000);
-        const naturalRows = parseRawTextOcr(naturalText);
-        extracted = combineBestSheetExtractions(extracted, naturalRows);
-      }
-    } else {
-      reportLiveProgress(65, '3/4 القراءة الشاملة لسطور الورقة...');
-      const naturalText = await safeRecognizeText(worker, scaledNaturalSource, 22000);
-      extracted = parseRawTextOcr(naturalText);
-
-      if (!isUsableExtraction(extracted, 1)) {
-        reportLiveProgress(80, '3/4 تنقية إضاءة الورقة وإبراز الأرقام...');
-        try {
-          preprocessedGridFree = await preprocessImageForOCR(scaledNaturalSource);
-          const gridFreeText = await safeRecognizeText(worker, preprocessedGridFree, 22000);
-          const gridFreeExtracted = parseRawTextOcr(gridFreeText);
-          extracted = combineBestSheetExtractions(extracted, gridFreeExtracted);
-        } catch {
-          // المتابعة للتمريرة التالية
-        }
-      }
+      extracted = combineBestSheetExtractions(extracted, shadowFreeRows);
     }
 
-    // معايرة سريعة بزاوية 180° و90° لكامل الورقة إذا التُقطت مقلوبة أو مائلة
-    if (!isUsableExtraction(extracted, 1)) {
-      for (const deg of [180, 90, 270] as const) {
+    // إذا كانت الورقة ملتقطة بشكل جانبي (90° أو 270°) أو مقلوبة (180°)، نكتشف الزاوية الصحيحة تلقائياً
+    if (extracted.length < 2) {
+      for (const deg of [270, 90, 180] as const) {
         try {
-          reportLiveProgress(92, `3/4 معايرة اتجاه الورقة (${deg}°)...`);
+          reportLiveProgress(74, `3/4 معايرة اتجاه الورقة تلقائياً (${deg}°)...`);
           await pauseUi(0);
-          const rotatedImg = await rotateImageDegrees(preprocessedGridFree || scaledNaturalSource, deg);
+          const rotatedImg = await rotateImageDegrees(scaledNaturalSource, deg);
           const rotText = await safeRecognizeText(worker, rotatedImg, 18000);
           const rotAttempt = parseRawTextOcr(rotText);
           if (rotAttempt.length > extracted.length) {
             extracted = rotAttempt;
+            winningSheetImage = rotatedImg;
           }
-          if (isUsableExtraction(extracted, 3)) break;
+          if (extracted.length >= 4) break;
         } catch {
           // المتابعة للزاوية التالية
         }
       }
     }
 
+    // مسح تفصيلي للنصف العلوي والسفلي المتداخلين على الاتجاه الصحيح لاستخراج كافة سطور الورقة الكثيفة
+    if (isFullSheetPhoto && extracted.length > 0 && extracted.length < 28) {
+      try {
+        reportLiveProgress(82, '3/4 مسح تفصيلي للنصف العلوي والسفلي لاستخراج كافة السطور...');
+        await pauseUi(0);
+        const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(winningSheetImage);
+        const topText = await safeRecognizeText(worker, topHalf, 18000);
+        reportLiveProgress(90, '3/4 استكمال مسح النصف السفلي للورقة...');
+        const botText = await safeRecognizeText(worker, bottomHalf, 18000);
+        const topRows = parseRawTextOcr(topText);
+        const botRows = parseRawTextOcr(botText);
+        const mergedHalves = mergeOverlappingBandRows([topRows, botRows]);
+        extracted = combineBestSheetExtractions(extracted, mergedHalves);
+      } catch {
+        // الاحتفاظ بالسطور المستخرجة في حال تعذر تقسيم النصفين
+      }
+    }
+
     if (!isUsableExtraction(extracted, 1)) {
       try {
-        reportLiveProgress(96, '3/4 تعزيز التباين العميق للنصوص الخفيفة...');
-        const preprocessed = await preprocessImageWithOpenCV(scaledNaturalSource, {
+        reportLiveProgress(95, '3/4 تعزيز التباين العميق للنصوص الخفيفة...');
+        const preprocessed = await preprocessImageWithOpenCV(winningSheetImage, {
           rotateCounterClockwise90: false,
         });
         const enhText = await safeRecognizeText(worker, preprocessed.cleanedDataUrl, 18000);
@@ -563,7 +544,7 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
       continue;
     }
 
-    const normalizedDigitsLine = line.replace(/\b1[0OQD][0OQD][0-9OILSBGZD]{5,7}\b/gi, (token) =>
+    const normalizedDigitsLine = line.replace(/\b1[0OQD][0OQD][0-9OILSBGZD]{7}\b/gi, (token) =>
       token
         .toUpperCase()
         .replace(/[OQD]/g, '0')
@@ -574,23 +555,14 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
         .replace(/Z/g, '2')
     );
 
-    const partMatch =
-      normalizedDigitsLine.match(/\b(10\d{8})\b/) ||
-      normalizedDigitsLine.match(/\b(\d{6,9})\b/);
+    const partMatch = normalizedDigitsLine.match(/\b(100\d{7})\b/);
     if (!partMatch) {
       continue;
     }
 
-    const rawNum = partMatch[1];
-    const partNum =
-      rawNum.length === 10
-        ? rawNum
-        : rawNum.startsWith('100')
-        ? rawNum.padEnd(10, '0').slice(0, 10)
-        : `100${rawNum.slice(-7).padStart(7, '0')}`;
-
+    const partNum = partMatch[1];
     const dynamicLoc = extractDynamicLocationFromLine(line);
-    const loc = dynamicLoc || sanitizeLocationCode(line) || 'N01A1';
+    const loc = dynamicLoc || sanitizeLocationCode(line) || '';
 
     const hasCrossMark = /(?:^|\s)[Xx×✗✘](?:\s|$)/.test(line);
     const minusMatch = line.match(/(?:^|\s|\||\[|\])(?:\d{1,3}\s*[-−–—]\s*(\d{1,3})|[-−–—]\s*(\d{1,3}))(?=\s|\||\[|\]|$)/);
@@ -610,14 +582,14 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     const remark = out > 0 ? `-${out}` : undefined;
 
     const rawDesc = line
-      .replace(rawNum, '')
+      .replace(partNum, '')
       .replace(loc, '')
-      .replace(/\b(C006|M016|D04D|002|EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT)\b/gi, ' ')
+      .replace(/\b(C006|M016|D04D|002|001|EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT)\b/gi, ' ')
       .replace(/\b\d{1,4}\b/g, ' ')
       .trim();
 
     const { cleaned: descEn, isValid: descValid } = sanitizeDescription(rawDesc);
-    const finalDescEn = descValid ? descEn : 'SPARE PART ASMO';
+    const finalDescEn = descValid ? descEn : 'غير محدد';
     const { category, descAr } = categorizeAndTranslate(finalDescEn);
 
     rawResults.push({
@@ -633,14 +605,14 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
       is_missing: hasCrossMark ? 1 : 0,
       remark,
       status: hasCrossMark ? 'غير موجودة' : 'غير مدقق',
-      confidence: 'اقتراح قراءة غير مؤكد',
+      confidence: 'قراءة فعلية من الورقة',
     });
   }
 
   const contextResolved = resolveSheetLocationsWithContext(rawResults);
   return contextResolved.map(({ location: _loc, ...rest }) => ({
     ...rest,
-    location_code: isValidSpecificLocation(rest.location_code) ? rest.location_code : 'N01A1',
+    location_code: isValidSpecificLocation(rest.location_code) ? rest.location_code : '',
   }));
 }
 

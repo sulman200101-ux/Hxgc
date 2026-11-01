@@ -98,14 +98,6 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
   const match = cleaned.match(/(10\d{8})/);
   if (match) return normalizeSapMaterialPrefix(match[1]);
 
-  // إكمال الأرقام الجزئية المقروءة (5 إلى 9 أرقام) ببادئة SAP القياسية 100 لعدم إسقاط السطر
-  if (cleaned.length >= 5 && cleaned.length <= 9) {
-    if (cleaned.startsWith('100')) {
-      return cleaned.padEnd(10, '0');
-    }
-    const tail = cleaned.slice(-7).padStart(7, '0');
-    return `100${tail}`;
-  }
   return null;
 }
 
@@ -137,9 +129,12 @@ function isHeaderOrFooterNoise(item: any): boolean {
 }
 
 /**
- * استدعاء المحرك السحابي (/api/gemini/parse-table) لقراءة الورقة كاملة مع مهلة سريعة وتحويل فوري للمحلي عند انقطاع الشبكة
+ * استدعاء المحرك السحابي (/api/gemini/parse-table) لقراءة الورقة كاملة مع مهلة كافية وتحويل فوري للمحلي عند انقطاع الشبكة
  */
-async function callPythonVisionServer(dataUrl: string): Promise<any[] | null> {
+async function callPythonVisionServer(
+  dataUrl: string,
+  preprocessedBase64?: string
+): Promise<any[] | null> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return null;
   }
@@ -148,13 +143,14 @@ async function callPythonVisionServer(dataUrl: string): Promise<any[] | null> {
 
   for (const url of candidateUrls) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 9000);
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           imageBase64: dataUrl,
+          preprocessedBase64,
           mimeType: 'image/jpeg',
         }),
         signal: controller.signal,
@@ -189,7 +185,7 @@ function normalizeRawVisionItems(rawItems: any[]): {
   const validatedItems: ExtractedSparePart[] = [];
   const skippedRows: SkippedRow[] = [];
   let repairedCount = 0;
-  let lastValidLoc = 'N01A1';
+  let lastValidLoc = '';
 
   for (const r of contextResolvedItems) {
     const candidateLoc =
@@ -206,16 +202,19 @@ function normalizeRawVisionItems(rawItems: any[]): {
       item.part_number ?? item.material_number ?? item.material ?? item.partNumber ?? ''
     ).trim();
 
-    let valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
+    const valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
     if (!valid10DigitPart) {
-      const rawDigits = rawPartStr.replace(/[^0-9]/g, '');
-      if (rawDigits.length > 0) {
-        valid10DigitPart = `100${rawDigits.slice(-7).padStart(7, '0')}`;
-      } else {
-        valid10DigitPart = `100999${String(idx + 1).padStart(4, '0')}`;
-      }
-      repairedCount++;
-    } else if (valid10DigitPart !== rawPartStr) {
+      skippedRows.push({
+        rowIndex: idx + 1,
+        rawPartNumber: rawPartStr || 'غير مقروء',
+        rawLocation: String(item.location_code ?? item.location ?? ''),
+        rawQuantity: item.qty_total ?? item.quantity ?? 1,
+        description_en: String(item.description_en ?? item.description ?? ''),
+        reason: 'رقم القطعة غير مكتمل من 10 أرقام',
+      });
+      return;
+    }
+    if (valid10DigitPart !== rawPartStr) {
       repairedCount++;
     }
 
@@ -226,7 +225,7 @@ function normalizeRawVisionItems(rawItems: any[]): {
     if (isLocValid) {
       lastValidLoc = normLocation;
     }
-    const finalLocation = isLocValid ? normLocation : lastValidLoc || 'N01A1';
+    const finalLocation = isLocValid ? normLocation : lastValidLoc || '';
 
     const isMissing = detectMissingFromCheckMark(item);
     const rawQty = item.qty_total ?? item.quantity ?? item.qty;
@@ -243,7 +242,7 @@ function normalizeRawVisionItems(rawItems: any[]): {
     )
       .replace(/^[\s|—\-~_]+/, '')
       .trim();
-    const descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'SPARE PART ASMO';
+    const descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'غير محدد';
 
     const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
     const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
@@ -262,7 +261,7 @@ function normalizeRawVisionItems(rawItems: any[]): {
       is_missing: isMissing ? 1 : 0,
       remark,
       status: isMissing ? 'غير موجودة' : 'غير مدقق',
-      confidence: 'اقتراح قراءة غير مؤكد',
+      confidence: 'قراءة فعلية من الورقة',
     });
   });
 

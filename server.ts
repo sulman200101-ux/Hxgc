@@ -186,22 +186,20 @@ async function runNodeTableOcr(imageBase64: string, preprocessedBase64?: string)
     const worker = await getNodeOcrWorker();
     let extracted: any[] = [];
 
-    if (preprocessedBase64) {
+    const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
+    if (cleanBase64) {
+      const imgBuffer = Buffer.from(cleanBase64, 'base64');
+      const { data } = await worker.recognize(imgBuffer);
+      extracted = parseRawTextOcr(data.text || '');
+    }
+
+    if (preprocessedBase64 && extracted.length < 28) {
       const cleanPre = preprocessedBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
       if (cleanPre) {
         const preBuf = Buffer.from(cleanPre, 'base64');
         const { data: preData } = await worker.recognize(preBuf);
-        extracted = parseRawTextOcr(preData.text || '');
-      }
-    }
-
-    if (extracted.length < 18) {
-      const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
-      if (cleanBase64) {
-        const imgBuffer = Buffer.from(cleanBase64, 'base64');
-        const { data } = await worker.recognize(imgBuffer);
-        const naturalItems = parseRawTextOcr(data.text || '');
-        extracted = combineBestSheetExtractions(extracted, naturalItems);
+        const preItems = parseRawTextOcr(preData.text || '');
+        extracted = combineBestSheetExtractions(extracted, preItems);
       }
     }
 
@@ -577,12 +575,13 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v1.9.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.8.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.7.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.6.0.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.9.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.8.0.apk'),
-  path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.7.0.apk'),
   path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
 ];
 
@@ -590,17 +589,18 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v1.8.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v1.9.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.8.0/asmo-inventory-v1.8.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.9.0/asmo-inventory-v1.9.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v1.9.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.8.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.7.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.6.0.apk', handleApkDownload);
