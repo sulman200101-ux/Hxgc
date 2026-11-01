@@ -1,4 +1,4 @@
-import { mkdir, copyFile, access, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, copyFile, access, readFile, writeFile, rm } from 'node:fs/promises';
 import { gunzipSync } from 'node:zlib';
 
 const root = new URL('../', import.meta.url);
@@ -6,13 +6,16 @@ const files = [
   ['node_modules/tesseract.js/dist/worker.min.js', 'public/ocr/worker.min.js'],
   ['node_modules/tesseract.js-core/tesseract-core-lstm.wasm.js', 'public/ocr/tesseract-core-lstm.wasm.js'],
   ['node_modules/tesseract.js-core/tesseract-core-lstm.wasm', 'public/ocr/tesseract-core-lstm.wasm'],
-  ['node_modules/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz', 'public/ocr/lang/eng.traineddata.gz'],
 ];
 
 const optionalSimdFiles = [
-  ['node_modules/@tesseract.js-data/ara/4.0.0_best_int/ara.traineddata.gz', 'public/ocr/lang/ara.traineddata.gz'],
   ['node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm.js', 'public/ocr/tesseract-core-simd-lstm.wasm.js'],
   ['node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm', 'public/ocr/tesseract-core-simd-lstm.wasm'],
+];
+
+const langGzSources = [
+  ['eng', 'node_modules/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz'],
+  ['ara', 'node_modules/@tesseract.js-data/ara/4.0.0_best_int/ara.traineddata.gz'],
 ];
 
 await mkdir(new URL('public/ocr/lang/', root), { recursive: true });
@@ -28,18 +31,22 @@ for (const [source, target] of optionalSimdFiles) {
   }
 }
 
-// فك ضغط ملفات اللغات (.traineddata) مسبقاً لضمان عملها فوراً في أندرويد (APK Assets) والمتصفح بدون خطأ 404 أو تأخير فك الضغط
-for (const lang of ['eng', 'ara']) {
+// فك ضغط ملفات اللغات (.traineddata) مباشرة بدون الاحتفاظ بنسخة .gz لمنع تعارض mergeDebugAssets في أندرويد ولضمان عمل gzip: false في كل من APK والمتصفح
+for (const [lang, sourcePath] of langGzSources) {
   try {
-    const gzUrl = new URL(`public/ocr/lang/${lang}.traineddata.gz`, root);
+    const srcUrl = new URL(sourcePath, root);
+    await access(srcUrl);
     const rawUrl = new URL(`public/ocr/lang/${lang}.traineddata`, root);
-    const gzBuf = await readFile(gzUrl);
+    const oldGzUrl = new URL(`public/ocr/lang/${lang}.traineddata.gz`, root);
+    const gzBuf = await readFile(srcUrl);
     const uncompressed = gunzipSync(gzBuf);
     await writeFile(rawUrl, uncompressed);
+    await rm(oldGzUrl, { force: true });
   } catch {
     // المتابعة في حال كانت اللغة الاختيارية غير متوفرة
   }
 }
 
-console.log('Packaged local OCR worker, WASM (including SIMD if present), and uncompressed + gzipped English + Arabic language data');
+console.log('Packaged local OCR worker, WASM, and uncompressed English + Arabic traineddata for Web & Android APK');
+
 
