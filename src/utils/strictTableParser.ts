@@ -17,6 +17,13 @@ import {
   repair10DigitMaterialCode,
   normalizeSapMaterialPrefix,
 } from './regexSanitizer';
+import {
+  verifyAndRepairMaterialNumber,
+  enforceWithinBinMonotonicity,
+  hammingDistance10,
+  isVisuallyConfusableDigitPair,
+  resolveSameRowMaterialConflict,
+} from './sapMaterialCalibration';
 
 const TECHNICAL_TERMS_DICTIONARY = [
   'GASKET SPIRAL WOUND',
@@ -220,8 +227,10 @@ export function extractStrictMaterialNumber(line: string): string | null {
     return normalizeSapMaterialPrefix(exactMatch[1]);
   }
 
-  // فصل رقم القطعة (100xxxxxxx) حتى لو التصق قبله رقم تسلسل السطر (1..99) أو خط الجدول العمودي أو كود المصنع بعده
-  const gluedMatch = line.match(/(?:^|[^0-9])\d{0,2}[|Il!tT[\]().:\-\/\\]?(100\d{7})(?:\d{0,2}|C006|M016|002)?(?=[^0-9]|$)/i);
+  // فصل رقم القطعة (1000xxxxxx / 1001xxxxxx) حتى لو التصق قبله رقم تسلسل السطر (1..19500 المكون من 1 إلى 5 خانات) أو خط الجدول
+  const gluedMatch = line.match(
+    /(?:^|[^0-9])\d{0,5}[|Il!tT[\]().:\-\/\\]?(100[01]\d{6})(?:\d{0,2}|C006|M016|002)?(?=[^0-9]|$)/i
+  );
   if (gluedMatch) {
     return normalizeSapMaterialPrefix(gluedMatch[1]);
   }
@@ -246,37 +255,42 @@ export function extractStrictMaterialNumber(line: string): string | null {
     const cleaned = token
       .replace(/\b(?:C006|C008|M016|MO16|D04D)\b/gi, '')
       .replace(/[^A-Za-z0-9°'"%¢]/g, '');
-    if (cleaned.length >= 9 && cleaned.length <= 15) {
+    if (cleaned.length >= 9 && cleaned.length <= 16) {
       const repaired = cleaned
         .replace(/^(?:aot|aoo|qop|roo|too|loo|ioo|190|109|160|180)/i, '100')
-        .replace(/^[Il|!rRtTsS74]/, '1')
+        .replace(/^[Il|!74](?=00)/, '1')
         .replace(/[OoQD°@U]/g, '0')
-        .replace(/[Il|!t'"rR]/g, '1')
+        .replace(/[Il|!']/g, '1')
         .replace(/[Zz]/g, '2')
         .replace(/[Ss$§]/g, '5')
         .replace(/[Gg%]/g, '6')
-        .replace(/[BbeE]/g, '8')
-        .replace(/[aA]/g, '4')
-        .replace(/[dD]/g, '0')
-        .replace(/[¢cC]/g, '9')
+        .replace(/[Bb]/g, '8')
+        .replace(/[¢]/g, '9')
         .replace(/[^0-9]/g, '');
 
       const prefixFixed = normalizeSapMaterialPrefix(repaired);
-      if (/^100\d{7}$/.test(prefixFixed)) {
+      if (/^100[01]\d{6}$/.test(prefixFixed)) {
         return prefixFixed;
       }
-      if (repaired.length >= 11 && repaired.length <= 14) {
-        for (let offset = 0; offset <= repaired.length - 10; offset++) {
+      // البحث من اليمين إلى اليسار أولاً لتجنب أخذ أرقام عمود التسلسل (Seq) الملتصقة على اليسار
+      if (repaired.length >= 11 && repaired.length <= 16) {
+        for (let offset = repaired.length - 10; offset >= 0; offset--) {
+          const rawSlice = repaired.slice(offset, offset + 10);
+          if (/^100[01]\d{6}$/.test(rawSlice)) {
+            return normalizeSapMaterialPrefix(rawSlice);
+          }
+        }
+        for (let offset = repaired.length - 10; offset >= 0; offset--) {
           const candidate10 = normalizeSapMaterialPrefix(repaired.slice(offset, offset + 10));
           if (/^100[01]\d{6}$/.test(candidate10)) {
             return candidate10;
           }
         }
       }
-      if (/^\d{1,2}100\d{7}$/.test(repaired)) {
+      if (/^\d{1,5}100[01]\d{6}$/.test(repaired)) {
         return normalizeSapMaterialPrefix(repaired.slice(-10));
       }
-      if (/^100\d{7}\d{1,2}$/.test(repaired)) {
+      if (/^100[01]\d{6}\d{1,2}$/.test(repaired)) {
         return normalizeSapMaterialPrefix(repaired.slice(0, 10));
       }
       if (/^00[0174]\d{6}$/.test(repaired)) {
@@ -661,10 +675,11 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     const { total } = extractStrictQuantity(row.rawLine, row.part_number, loc);
     const { isMissing, remark, shortage } = extractCheckAndRemark(row.rawLine, loc);
     const { descEn, descAr, category } = extractStrictDescription(row.rawLine, row.part_number, loc);
+    const verifiedPart = verifyAndRepairMaterialNumber(row.part_number, row.rawLine, loc, descEn);
     const out = isMissing ? 0 : Math.min(total, shortage);
 
     finalResults.push({
-      part_number: row.part_number,
+      part_number: verifiedPart,
       location_code: loc,
       description_en: descEn,
       description_ar: descAr,
@@ -679,7 +694,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     });
   }
 
-  return finalResults;
+  return enforceWithinBinMonotonicity(finalResults);
 }
 
 function enrichSingleSparePartRow(primary: ExtractedSparePart, alt: ExtractedSparePart): ExtractedSparePart {
@@ -721,8 +736,46 @@ function enrichSingleSparePartRow(primary: ExtractedSparePart, alt: ExtractedSpa
   };
 }
 
+function areLikelySamePhysicalRowWithOcrTypo(a: ExtractedSparePart, b: ExtractedSparePart): boolean {
+  const dist = hammingDistance10(a.part_number, b.part_number);
+  if (dist === 0 || dist > 2) return false;
+
+  for (let k = 0; k < 10; k++) {
+    if (
+      a.part_number[k] !== b.part_number[k] &&
+      !isVisuallyConfusableDigitPair(a.part_number[k], b.part_number[k])
+    ) {
+      return false;
+    }
+  }
+
+  // استبعاد السطور المتتالية الحقيقية التي تختلف في الترتيب مثل (3RD) مقابل (4TH)
+  const ordRegex = /\b(1ST|2ND|3RD|4TH|5TH|6TH|7TH|8TH)\b/i;
+  const ordA = (a.description_en || '').match(ordRegex);
+  const ordB = (b.description_en || '').match(ordRegex);
+  if (ordA && ordB && ordA[1].toUpperCase() !== ordB[1].toUpperCase()) {
+    return false;
+  }
+
+  const descA = (a.description_en || '').toUpperCase().replace(/[^A-Z0-9\s]/g, '').trim();
+  const descB = (b.description_en || '').toUpperCase().replace(/[^A-Z0-9\s]/g, '').trim();
+  const firstWordA = descA.split(/\s+/)[0] || '';
+  const firstWordB = descB.split(/\s+/)[0] || '';
+
+  const sameFirstWord =
+    firstWordA.length >= 3 &&
+    firstWordB.length >= 3 &&
+    firstWordA !== 'SPARE' &&
+    firstWordA === firstWordB;
+  const sameLoc =
+    Boolean(a.location_code && b.location_code) && a.location_code === b.location_code;
+
+  return sameFirstWord || (sameLoc && dist === 1 && a.qty_total === b.qty_total);
+}
+
 /**
- * دمج شامل (Union) لتمريرتين مع الحفاظ التام على ترتيب السطور في الورقة وعدم إسقاط أي سطر ظهر في إحدى التمريرتين فقط
+ * دمج شامل (Union) لتمريرتين مع الحفاظ التام على ترتيب السطور في الورقة وعدم إسقاط أي سطر
+ * ومع دمج القراءتين لنفس السطر إذا اختلفتا في خانة بصرية واحدة لاختيار الرقم الأدق 100% دون تكرار.
  */
 export function unionOrderedRowSequences(
   passA: ExtractedSparePart[],
@@ -739,20 +792,18 @@ export function unionOrderedRowSequences(
   const matchedPrimaryIndices = new Set<number>();
   const secondaryToPrimaryMap = new Map<number, number>();
 
-  // 1. مطابقة السطور الموجودة في التمريرتين وإثراء بياناتها
+  // 1. مطابقة السطور المتطابقة تماماً في رقم القطعة وإثراء بياناتها
   let lastMatchedPIdx = -1;
   for (let sIdx = 0; sIdx < secondary.length; sIdx++) {
     const sRow = secondary[sIdx];
     let foundPIdx = -1;
 
-    // البحث للأمام أولاً للحفاظ على الترتيب التسلسلي للورقة
     for (let pIdx = Math.max(0, lastMatchedPIdx); pIdx < primary.length; pIdx++) {
       if (!matchedPrimaryIndices.has(pIdx) && primary[pIdx].part_number === sRow.part_number) {
         foundPIdx = pIdx;
         break;
       }
     }
-    // إذا لم يُعثر عليه للأمام، نبحث في كامل المصفوفة
     if (foundPIdx === -1) {
       for (let pIdx = 0; pIdx < primary.length; pIdx++) {
         if (!matchedPrimaryIndices.has(pIdx) && primary[pIdx].part_number === sRow.part_number) {
@@ -770,6 +821,36 @@ export function unionOrderedRowSequences(
     }
   }
 
+  // 1.5 مطابقة السطور غير المتطابقة التي تمثل نفس السطر الفعلي في الموضع ذاته مع اختلاف خانة بصرية واحدة (لمنع تغير الرقم أو تكرار السطر)
+  for (let sIdx = 0; sIdx < secondary.length; sIdx++) {
+    if (secondaryToPrimaryMap.has(sIdx)) continue;
+    const sRow = secondary[sIdx];
+    const expectedPIdx = Math.round((sIdx / Math.max(1, secondary.length - 1)) * Math.max(0, primary.length - 1));
+    const searchStart = Math.max(0, expectedPIdx - 3);
+    const searchEnd = Math.min(primary.length - 1, expectedPIdx + 3);
+
+    for (let pIdx = searchStart; pIdx <= searchEnd; pIdx++) {
+      if (matchedPrimaryIndices.has(pIdx)) continue;
+      if (areLikelySamePhysicalRowWithOcrTypo(primary[pIdx], sRow)) {
+        const prevPart = pIdx > 0 ? primary[pIdx - 1].part_number : undefined;
+        const nextPart = pIdx + 1 < primary.length ? primary[pIdx + 1].part_number : undefined;
+        const mergedRow = enrichSingleSparePartRow(primary[pIdx], sRow);
+        const bestPart = resolveSameRowMaterialConflict(
+          primary[pIdx].part_number,
+          sRow.part_number,
+          mergedRow.location_code,
+          mergedRow.description_en,
+          prevPart,
+          nextPart
+        );
+        primary[pIdx] = { ...mergedRow, part_number: bestPart };
+        matchedPrimaryIndices.add(pIdx);
+        secondaryToPrimaryMap.set(sIdx, pIdx);
+        break;
+      }
+    }
+  }
+
   // 2. إدراج السطور التي قرأتها التمريرة الثانوية وسقطت من التمريرة الأساسية في موضعها الصحيح
   const result: ExtractedSparePart[] = [...primary];
   const findCurrentIndexInResult = (targetRef: ExtractedSparePart): number => result.indexOf(targetRef);
@@ -778,7 +859,6 @@ export function unionOrderedRowSequences(
     if (secondaryToPrimaryMap.has(sIdx)) continue;
     const missingRow = secondary[sIdx];
 
-    // تجنب الإدراج إذا كان الرقم موجوداً بالفعل في النتيجة بنفس الرقم تماماً (إلا إذا كان مكرراً فعلياً في الورقة)
     const alreadyExistsExact = result.some((r) => r.part_number === missingRow.part_number);
     const countInSecondary = secondary.filter((r) => r.part_number === missingRow.part_number).length;
     const countInResult = result.filter((r) => r.part_number === missingRow.part_number).length;
@@ -786,7 +866,6 @@ export function unionOrderedRowSequences(
       continue;
     }
 
-    // تحديد موضع الإدراج الدقيق بناءً على أقرب سطر سابق أو لاحق تمتد له مطابقة
     let insertAt = -1;
     for (let prev = sIdx - 1; prev >= 0; prev--) {
       const mappedPIdx = secondaryToPrimaryMap.get(prev);
@@ -814,7 +893,6 @@ export function unionOrderedRowSequences(
 
     if (insertAt === -1 || insertAt > result.length) {
       result.push(missingRow);
-      // ربط هذا السطر المضاف ليصبح مرجعاً للسطور التالية له مباشرة
       const newPIdx = primary.push(missingRow) - 1;
       secondaryToPrimaryMap.set(sIdx, newPIdx);
     } else {
@@ -824,7 +902,7 @@ export function unionOrderedRowSequences(
     }
   }
 
-  return resolveSheetLocationsWithContext(result);
+  return enforceWithinBinMonotonicity(resolveSheetLocationsWithContext(result));
 }
 
 /**
@@ -835,7 +913,7 @@ export function unionOrderedRowSequences(
 export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): ExtractedSparePart[] {
   const nonEmpty = bands.filter((b) => b && b.length > 0);
   if (nonEmpty.length === 0) return [];
-  if (nonEmpty.length === 1) return nonEmpty[0];
+  if (nonEmpty.length === 1) return enforceWithinBinMonotonicity(nonEmpty[0]);
 
   let merged: ExtractedSparePart[] = [...nonEmpty[0]];
   for (let bIdx = 1; bIdx < nonEmpty.length; bIdx++) {
@@ -857,8 +935,21 @@ export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): Extract
       if (cutMergedAt !== -1) break;
     }
 
+    // 1.5 إذا لم توجد مطابقة تامة، نفحص مطابقة نفس السطر الفعلي مع اختلاف خانة بصرية واحدة على حد التداخل
+    if (cutMergedAt === -1) {
+      for (let ti = tailStart; ti < merged.length; ti++) {
+        for (let ni = 0; ni < headLimit; ni++) {
+          if (areLikelySamePhysicalRowWithOcrTypo(merged[ti], nextBand[ni])) {
+            cutMergedAt = ti;
+            startNextAt = ni;
+            break;
+          }
+        }
+        if (cutMergedAt !== -1) break;
+      }
+    }
+
     if (cutMergedAt !== -1 && startNextAt !== -1) {
-      // الاحتفاظ بأي سطر ظهر في أعلى الشريحة الثانية قبل نقطة التطابق ولم يظهر في نهاية الشريحة الأولى
       const recentMergedParts = new Set(
         merged.slice(Math.max(0, cutMergedAt - 8), cutMergedAt).map((r) => r.part_number)
       );
@@ -866,7 +957,6 @@ export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): Extract
         .slice(0, startNextAt)
         .filter((r) => !recentMergedParts.has(r.part_number));
 
-      // دمج منطقة التداخل وما بعدها عبر unionOrderedRowSequences لضمان عدم سقوط أي سطر
       const unifiedOverlapAndTail = unionOrderedRowSequences(
         merged.slice(cutMergedAt),
         nextBand.slice(startNextAt)
@@ -878,7 +968,6 @@ export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): Extract
         ...unifiedOverlapAndTail,
       ];
     } else {
-      // في حال عدم وجود سطر مشترك في حد التداخل، نجمع الشريحتين بالكامل دون إسقاط أي سطر
       const tailSet = new Set(merged.slice(tailStart).map((r) => r.part_number));
       const nonDupNext = [
         ...nextBand.slice(0, headLimit).filter((r) => !tailSet.has(r.part_number)),
@@ -888,5 +977,5 @@ export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): Extract
     }
   }
 
-  return resolveSheetLocationsWithContext(merged);
+  return enforceWithinBinMonotonicity(resolveSheetLocationsWithContext(merged));
 }

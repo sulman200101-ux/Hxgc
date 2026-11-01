@@ -159,7 +159,7 @@ export async function prepareImageForAi(
         ctx.imageSmoothingQuality = 'high';
 
         if (options.enhanceContrast !== false) {
-          ctx.filter = 'contrast(1.16) brightness(1.03)';
+          ctx.filter = 'contrast(1.08) brightness(1.02)';
         }
 
         if (shouldRotateCcw) {
@@ -173,14 +173,14 @@ export async function prepareImageForAi(
         if (options.sharpenText !== false && targetW >= 600 && targetH >= 300) {
           try {
             const imgData = ctx.getImageData(0, 0, targetW, targetH);
-            applyFastUnsharpMask(imgData, 0.45);
+            applyFastUnsharpMask(imgData, 0.28);
             ctx.putImageData(imgData, 0, 0);
           } catch {
             // الاحتفاظ بالصورة المرسومة في حال تعذر الوصول للبكسلات
           }
         }
 
-        const resultUrl = canvas.toDataURL('image/jpeg', 0.9);
+        const resultUrl = canvas.toDataURL('image/jpeg', 0.95);
         resolve(resultUrl);
       } catch (err) {
         console.warn('Image calibration failed, using original:', err);
@@ -233,8 +233,8 @@ export async function splitImageIntoOverlappingHalves(
         botCtx?.drawImage(img, 0, botY, w, botH, 0, 0, w, botH);
 
         resolve({
-          topHalf: topCanvas.toDataURL('image/jpeg', 0.88),
-          bottomHalf: botCanvas.toDataURL('image/jpeg', 0.88),
+          topHalf: topCanvas.toDataURL('image/jpeg', 0.96),
+          bottomHalf: botCanvas.toDataURL('image/jpeg', 0.96),
         });
       } catch {
         resolve({ topHalf: imageSource, bottomHalf: imageSource });
@@ -278,7 +278,7 @@ export async function splitImageIntoThreeOverlappingBands(
           c.height = sliceH;
           const ctx = c.getContext('2d', { alpha: false });
           ctx?.drawImage(img, 0, y0, w, sliceH, 0, 0, w, sliceH);
-          return c.toDataURL('image/jpeg', 0.9);
+          return c.toDataURL('image/jpeg', 0.96);
         }) as [string, string, string];
 
         resolve(bands);

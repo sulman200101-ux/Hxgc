@@ -420,15 +420,12 @@ export async function processOcrFromImage(
       extracted = parseRawTextOcr(naturalText);
     }
 
-    // دمج التمريرة المنقاة من الظلال لإثراء واستعادة أي سطر وقع تحت ظل الكاميرا
-    if (preprocessedGridFree && extracted.length < 37) {
+    // دمج التمريرة المنقاة من الظلال لإثراء واستعادة أي سطر وقع تحت ظل الكاميرا (مع إبقاء الصورة الطبيعية مرجعاً للتقسيم)
+    if (preprocessedGridFree && extracted.length < 38) {
       reportLiveProgress(64, '3/4 مطابقة واستعادة السطور مع طبقة إزالة الظلال...');
       await pauseUi(0);
       const shadowFreeText = await safeRecognizeText(worker, preprocessedGridFree, 22000);
       const shadowFreeRows = parseRawTextOcr(shadowFreeText);
-      if (shadowFreeRows.length > extracted.length) {
-        winningSheetImage = preprocessedGridFree;
-      }
       extracted = combineBestSheetExtractions(extracted, shadowFreeRows);
     }
 
@@ -452,19 +449,19 @@ export async function processOcrFromImage(
       }
     }
 
-    // مسح تفصيلي للنصف العلوي والسفلي المتداخلين على الاتجاه الصحيح لاستخراج كافة سطور الورقة الكثيفة دون تجاوز أي سطر
-    if (isFullSheetPhoto && extracted.length > 0 && extracted.length < 37) {
+    // مسح تفصيلي للنصف العلوي والسفلي المتداخلين بدقة مضاعفة لتدقيق الأرقام العشرة ومنع تغير أي خانة
+    if (isFullSheetPhoto && extracted.length > 0) {
       try {
-        reportLiveProgress(80, '3/4 مسح تفصيلي للنصف العلوي والسفلي لضمان عدم تجاوز أي سطر...');
+        reportLiveProgress(80, '3/4 مسح تفصيلي للنصف العلوي والسفلي لتدقيق الأرقام العشرة...');
         await pauseUi(0);
         const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(winningSheetImage);
         const topText = await safeRecognizeText(worker, topHalf, 18000);
-        reportLiveProgress(87, '3/4 استكمال مسح النصف السفلي للورقة ودمج السطور...');
+        reportLiveProgress(87, '3/4 استكمال مسح النصف السفلي للورقة وتطبيق المطابقة الرقمية...');
         const botText = await safeRecognizeText(worker, bottomHalf, 18000);
         const topRows = parseRawTextOcr(topText);
         const botRows = parseRawTextOcr(botText);
         const mergedHalves = mergeOverlappingBandRows([topRows, botRows]);
-        extracted = combineBestSheetExtractions(extracted, mergedHalves);
+        extracted = combineBestSheetExtractions(mergedHalves, extracted);
       } catch {
         // الاحتفاظ بالسطور المستخرجة في حال تعذر تقسيم النصفين
       }

@@ -107,7 +107,7 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
 
         await yieldToMain();
 
-        // 2. زيادة حدة الحروف والأرقام (Unsharp Mask) قبل كشف خطوط الجدول
+        // 2. زيادة حدة الحروف والأرقام بلطف للحفاظ على الفراغات الداخلية للأرقام (3, 5, 6, 8, 9, 0)
         const sharpened = new Uint8ClampedArray(norm);
         for (let y = 1; y < height - 1; y++) {
           const rowOff = y * width;
@@ -115,22 +115,22 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
             const idx = rowOff + x;
             const c = norm[idx];
             const blur = (norm[idx - width] + norm[idx + width] + norm[idx - 1] + norm[idx + 1] + c * 4) >> 3;
-            const sharpenedVal = c + ((c - blur) * 3) / 5;
+            const sharpenedVal = c + ((c - blur) * 2) / 5;
             sharpened[idx] = Math.min(255, Math.max(0, Math.round(sharpenedVal)));
           }
         }
 
         await yieldToMain();
 
-        // 3. تعزيز التباين الطبيعي وتبييض خلفية الورقة (Shadow-Free Contrast Stretch) مع الحفاظ التام بنسبة 100% على ضربات الأرقام والحروف
+        // 3. تعزيز التباين الطبيعي وتبييض خلفية الورقة دون تضخيم سمك الأرقام (منع تحول 3/5/6 إلى 8)
         for (let j = 0, i = 0; j < totalPixels; j++, i += 4) {
           const v = sharpened[j];
           const stretched =
-            v >= 238
+            v >= 244
               ? 255
-              : v <= 65
+              : v <= 38
               ? 0
-              : Math.min(255, Math.max(0, Math.round(((v - 65) * 255) / 173)));
+              : Math.min(255, Math.max(0, Math.round(((v - 38) * 255) / 206)));
           data[i] = stretched;
           data[i + 1] = stretched;
           data[i + 2] = stretched;
@@ -138,7 +138,7 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
 
         ctx.putImageData(imageData, 0, 0);
         clearTimeout(safetyTimer);
-        finish(canvas.toDataURL('image/jpeg', 0.92));
+        finish(canvas.toDataURL('image/jpeg', 0.95));
       } catch {
         clearTimeout(safetyTimer);
         finish(imageSrc);
