@@ -1,6 +1,7 @@
 import {
   rotateImageDegrees,
   prepareImageForAi,
+  splitImageIntoOverlappingHalves,
 } from '../utils/imagePreprocessor';
 import { preprocessImageForOCR } from '../utils/imagePreprocess';
 import { createWorker } from 'tesseract.js';
@@ -8,6 +9,7 @@ import { categorizeAndTranslate } from '../utils/translator';
 import { preprocessImageWithOpenCV } from '../utils/imagePreprocessing';
 import {
   parseStrictAsmoTable,
+  mergeOverlappingBandRows,
 } from '../utils/strictTableParser';
 import { parseTableWithGeminiVision } from './geminiVisionService';
 export {
@@ -129,28 +131,56 @@ async function createConfiguredFastWorker(): Promise<TesseractWorkerInstance> {
   const baseOrigin =
     typeof window !== 'undefined' && window.location?.origin ? window.location.origin : '';
 
-  const primaryOptions = {
-    workerPath: `${baseOrigin}/ocr/worker.min.js`,
-    corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
-    langPath: `${baseOrigin}/ocr/lang`,
-    workerBlobURL: false,
-  };
+  const candidateConfigs = [
+    // المحاولة الأولى: ملف اللغة غير المضغوط (eng.traineddata) يعمل فوراً في APK أندرويد والمتصفح بدون خطأ 404 أو تأخير gunzip
+    {
+      workerPath: `${baseOrigin}/ocr/worker.min.js`,
+      corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
+      langPath: `${baseOrigin}/ocr/lang`,
+      gzip: false,
+      workerBlobURL: false,
+    },
+    // المحاولة الثانية: Blob Worker مع ملف اللغة غير المضغوط لبيئات WebView المقيدة
+    {
+      workerPath: `${baseOrigin}/ocr/worker.min.js`,
+      corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
+      langPath: `${baseOrigin}/ocr/lang`,
+      gzip: false,
+      workerBlobURL: true,
+    },
+    // المحاولة الثالثة: ملف اللغة المضغوط (.gz) للتوافق العكسي
+    {
+      workerPath: `${baseOrigin}/ocr/worker.min.js`,
+      corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
+      langPath: `${baseOrigin}/ocr/lang`,
+      gzip: true,
+      workerBlobURL: false,
+    },
+    // المحاولة الرابعة: Blob Worker مع ملف اللغة المضغوط (.gz)
+    {
+      workerPath: `${baseOrigin}/ocr/worker.min.js`,
+      corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
+      langPath: `${baseOrigin}/ocr/lang`,
+      gzip: true,
+      workerBlobURL: true,
+    },
+  ];
 
-  let worker: TesseractWorkerInstance;
-  try {
-    worker = await spawnWorkerWithTimeout(primaryOptions, 9000);
-  } catch {
-    await pauseUi(100);
-    // محاولة بديلة باستخدام Blob Worker القياسي مع تعطيل الكاش لمنع أي تعليق في WebView أو المتصفح
-    worker = await spawnWorkerWithTimeout(
-      {
-        workerPath: `${baseOrigin}/ocr/worker.min.js`,
-        corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
-        langPath: `${baseOrigin}/ocr/lang`,
-        workerBlobURL: true,
-      },
-      11000
-    );
+  let worker: TesseractWorkerInstance | null = null;
+  let lastError: unknown = null;
+
+  for (const cfg of candidateConfigs) {
+    try {
+      worker = await spawnWorkerWithTimeout(cfg, 9500);
+      if (worker) break;
+    } catch (err) {
+      lastError = err;
+      await pauseUi(60);
+    }
+  }
+
+  if (!worker) {
+    throw lastError || new Error('Failed to initialize OCR worker');
   }
 
   try {
@@ -247,6 +277,53 @@ function isUsableExtraction(rows: ExtractedSparePart[], minRows = 1): boolean {
   return Array.isArray(rows) && rows.length >= minRows;
 }
 
+/**
+ * دمج نتائج تمريرتين مختلفتين على نفس الورقة (مثل التمريرة المنقاة من الشبكة + التمريرة الطبيعية)
+ * لاختيار القراءة الأكمل وإثراء أي سطر ناقص دون تكرار وهمي.
+ */
+function combineBestSheetExtractions(
+  passA: ExtractedSparePart[],
+  passB: ExtractedSparePart[]
+): ExtractedSparePart[] {
+  if (!passA.length) return passB;
+  if (!passB.length) return passA;
+
+  const primary = passB.length > passA.length ? passB : passA;
+  const secondary = passB.length > passA.length ? passA : passB;
+
+  // إثراء السطور في القائمة الأساسية إذا كانت القائمة الثانوية تحتوي على وصف أو ملاحظة ناقص أوضح لنفس رقم القطعة
+  const secondaryByPart = new Map<string, ExtractedSparePart>();
+  for (const row of secondary) {
+    if (!secondaryByPart.has(row.part_number)) {
+      secondaryByPart.set(row.part_number, row);
+    }
+  }
+
+  return primary.map((item) => {
+    const alt = secondaryByPart.get(item.part_number);
+    if (!alt) return item;
+    const betterDescEn =
+      item.description_en === 'SPARE PART ASMO' && alt.description_en !== 'SPARE PART ASMO'
+        ? alt.description_en
+        : item.description_en;
+    const betterDescAr =
+      betterDescEn !== item.description_en ? alt.description_ar : item.description_ar;
+    const betterRemark = item.remark || alt.remark;
+    const betterOut = Math.max(item.qty_out || 0, alt.qty_out || 0);
+    const betterMissing = item.is_missing === 1 || alt.is_missing === 1 ? 1 : 0;
+    return {
+      ...item,
+      description_en: betterDescEn,
+      description_ar: betterDescAr,
+      remark: betterRemark,
+      qty_out: betterMissing ? 0 : betterOut,
+      qty_remaining: betterMissing ? 0 : Math.max(0, item.qty_total - betterOut),
+      is_missing: betterMissing,
+      status: betterMissing ? 'غير موجودة' : item.status,
+    };
+  });
+}
+
 async function getImageDimensions(dataUrl: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve) => {
     const img = new Image();
@@ -257,10 +334,10 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
 }
 
 /**
- * قراءة أوراق الجرد الشاملة دفعة واحدة لكامل الورقة بدون تقسيم (Full-Sheet Single-Pass OCR):
- * 1. معايرة تلقائية فورية لاتجاه الورقة (<15ms) وتحجيمها لـ 1650px مع زيادة حدة الحروف (Unsharp Mask).
- * 2. محرك سحابي/خادمي فائق السرعة (/api/gemini/parse-table) مع بديل محلي فوري غير قابل للتعليق.
- * 3. قراءة الورقة كاملةً دفعة واحدة من أول سطر إلى آخر سطر مع تحديث حي ومستمر لشريط التقدم.
+ * قراءة أوراق الجرد الشاملة عالية الدقة (Full-Sheet High-Precision OCR):
+ * 1. معايرة تلقائية فورية لاتجاه الورقة (<15ms) وتحجيمها لـ 1900px مع زيادة حدة الحروف (Unsharp Mask).
+ * 2. محرك سحابي/خادمي فائق السرعة (/api/gemini/parse-table) مع بديل محلي فوري يعمل 100% في أندرويد والمتصفح.
+ * 3. إزالة الظلال وخطوط الجدول الأفقية والعمودية + التقسيم النصفي المتداخل للجداول الكثيفة لضمان عدم سقوط أي سطر.
  */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
@@ -286,10 +363,10 @@ export async function processOcrFromImage(
     const dims = await getImageDimensions(sourceDataUrl);
     const isFullSheetPhoto = dims.width >= 500 && dims.height >= 500;
 
-    // 1. معايرة تلقائية سريعة لاتجاه الورقة (تدوير تلقائي للصور الطولية) وتحجيم مثالي لكامل الورقة دفعة واحدة
+    // 1. معايرة تلقائية سريعة لاتجاه الورقة (تدوير تلقائي للصور الطولية) وتحجيم عالي الوضوح
     const scaledNaturalSource = await prepareImageForAi(sourceDataUrl, {
-      maxDimension: 1700,
-      minDimension: isFullSheetPhoto ? 1350 : 800,
+      maxDimension: 1900,
+      minDimension: isFullSheetPhoto ? 1450 : 850,
       enhanceContrast: true,
       sharpenText: true,
       autoRotate: true,
@@ -298,7 +375,7 @@ export async function processOcrFromImage(
     // 2. المحرك السحابي والخادمي لقراءة الورقة كاملة دفعة واحدة مع بديل محلي تلقائي فوري
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        reportLiveProgress(30, '2/4 القراءة الذكية الشاملة لكامل الورقة دفعة واحدة...');
+        reportLiveProgress(28, '2/4 القراءة الذكية الشاملة لكامل الورقة دفعة واحدة...');
         const visionResult = await parseTableWithGeminiVision(scaledNaturalSource, true);
         if (visionResult.success && isUsableExtraction(visionResult.items, 1)) {
           if (onProgress) {
@@ -311,33 +388,63 @@ export async function processOcrFromImage(
       }
     }
 
-    // 3. القراءة المحلية الشاملة لكامل الورقة مع تقدم حي غير قابل للتعليق عند 55%
-    reportLiveProgress(46, '2/4 تهيئة محرك القراءة المحلي الشامل...');
+    // 3. القراءة المحلية الشاملة لكامل الورقة (تعمل بدون إنترنت وفي أندرويد APK بكفاءة كاملة)
+    reportLiveProgress(45, '2/4 تهيئة محرك القراءة المحلي وتنقية الجدول...');
     await pauseUi(0);
 
     const [worker] = await acquireOcrWorkerPool(1);
 
-    reportLiveProgress(65, '3/4 القراءة الشاملة لكامل سطور الورقة دفعة واحدة...');
-    const rawNatural = await recognizeWithTimeout(worker, scaledNaturalSource);
-    let extracted = parseRawTextOcr(rawNatural.data.text);
+    // للأوراق المصورة بالكاميرا: نبدأ بتنقية الإضاءة وحذف خطوط الشبكة الأفقية والعمودية أولاً للحصول على أعلى دقة
+    let extracted: ExtractedSparePart[] = [];
+    let preprocessedGridFree: string | null = null;
 
-    // إذا كانت الورقة تحتاج تنقية إضافية لإزالة الظلال وخطوط الجدول، نطبق الفلتر غير المحجوب ونقارن النتيجة
-    if (!isUsableExtraction(extracted, isFullSheetPhoto ? 3 : 1)) {
-      reportLiveProgress(82, '3/4 تنقية إضاءة الورقة وإبراز الأرقام الباهتة...');
+    if (isFullSheetPhoto) {
+      reportLiveProgress(58, '3/4 إزالة الظلال وخطوط الجدول لإبراز كافة الأرقام...');
       await pauseUi(0);
-      const preprocessedGridFree = await preprocessImageForOCR(scaledNaturalSource);
+      preprocessedGridFree = await preprocessImageForOCR(scaledNaturalSource);
       const rawGridFree = await recognizeWithTimeout(worker, preprocessedGridFree);
-      const gridFreeExtracted = parseRawTextOcr(rawGridFree.data.text);
-      if (gridFreeExtracted.length > extracted.length) {
-        extracted = gridFreeExtracted;
+      extracted = parseRawTextOcr(rawGridFree.data.text);
+
+      // إذا كانت الورقة كثيفة ولم تكتمل كل السطور، ندمج قراءة النصف العلوي والسفلي المتداخلين بدقة عالية
+      if (extracted.length < 22) {
+        reportLiveProgress(74, '3/4 مسح تفصيلي للنصف العلوي والسفلي لاستخراج كافة السطور...');
+        await pauseUi(0);
+        const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(preprocessedGridFree);
+        const topRec = await recognizeWithTimeout(worker, topHalf);
+        reportLiveProgress(84, '3/4 استكمال مسح النصف السفلي للورقة...');
+        const botRec = await recognizeWithTimeout(worker, bottomHalf);
+        const topRows = parseRawTextOcr(topRec.data.text);
+        const botRows = parseRawTextOcr(botRec.data.text);
+        const mergedHalves = mergeOverlappingBandRows([topRows, botRows]);
+        extracted = combineBestSheetExtractions(extracted, mergedHalves);
+      }
+
+      // تمريرة إضافية على الصورة الطبيعية المحسنة إذا بقي عدد السطور قليلاً
+      if (extracted.length < 10) {
+        reportLiveProgress(89, '3/4 مطابقة النصوص مع الصورة الأصلية المحسنة...');
+        const rawNatural = await recognizeWithTimeout(worker, scaledNaturalSource);
+        const naturalRows = parseRawTextOcr(rawNatural.data.text);
+        extracted = combineBestSheetExtractions(extracted, naturalRows);
+      }
+    } else {
+      reportLiveProgress(65, '3/4 القراءة الشاملة لسطور الورقة...');
+      const rawNatural = await recognizeWithTimeout(worker, scaledNaturalSource);
+      extracted = parseRawTextOcr(rawNatural.data.text);
+
+      if (!isUsableExtraction(extracted, 1)) {
+        reportLiveProgress(80, '3/4 تنقية إضاءة الورقة وإبراز الأرقام...');
+        preprocessedGridFree = await preprocessImageForOCR(scaledNaturalSource);
+        const rawGridFree = await recognizeWithTimeout(worker, preprocessedGridFree);
+        const gridFreeExtracted = parseRawTextOcr(rawGridFree.data.text);
+        extracted = combineBestSheetExtractions(extracted, gridFreeExtracted);
       }
     }
 
     // معايرة سريعة بزاوية 180° لكامل الورقة إذا التُقطت مقلوبة رأساً على عقب
     if (!isUsableExtraction(extracted, 1)) {
-      reportLiveProgress(90, '3/4 معايرة سريعة لاتجاه الورقة المقلوبة...');
+      reportLiveProgress(92, '3/4 معايرة سريعة لاتجاه الورقة المقلوبة...');
       await pauseUi(0);
-      const flipped180 = await rotateImageDegrees(scaledNaturalSource, 180);
+      const flipped180 = await rotateImageDegrees(preprocessedGridFree || scaledNaturalSource, 180);
       const flipRec = await recognizeWithTimeout(worker, flipped180);
       const flipAttempt = parseRawTextOcr(flipRec.data.text);
       if (flipAttempt.length > extracted.length) {
@@ -346,7 +453,7 @@ export async function processOcrFromImage(
     }
 
     if (!isUsableExtraction(extracted, 1)) {
-      reportLiveProgress(95, '3/4 تعزيز التباين العميق للنصوص الخفيفة...');
+      reportLiveProgress(96, '3/4 تعزيز التباين العميق للنصوص الخفيفة...');
       const preprocessed = await preprocessImageWithOpenCV(scaledNaturalSource, {
         rotateCounterClockwise90: false,
       });
@@ -419,8 +526,8 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     const loc = dynamicLoc || sanitizeLocationCode(line) || 'N01A1';
 
     const hasCrossMark = /(?:^|\s)[Xx×✗✘](?:\s|$)/.test(line);
-    const remarkMatch = line.match(/\b(F\d{1,2}|[+-]\d{1,3})\b/i);
-    const remark = remarkMatch ? remarkMatch[1].toUpperCase() : undefined;
+    const minusMatch = line.match(/(?:^|\s|\||\[|\])(?:\d{1,3}\s*[-−–—]\s*(\d{1,3})|[-−–—]\s*(\d{1,3}))(?=\s|\||\[|\]|$)/);
+    const shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : 0;
 
     const qtyUnitMatch =
       line.match(/\b(EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT|FT|M|KG|L|ROL|BOX)[\s|\[\]()—\-]+(\d{1,4})\b/i) ||
@@ -432,7 +539,8 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
         : qtyUnitMatch[2]
       : 1;
     const total = Math.max(1, sanitizeQuantity(rawQtyVal, 1));
-    const out = 0;
+    const out = hasCrossMark ? 0 : Math.min(total, shortage);
+    const remark = out > 0 ? `-${out}` : undefined;
 
     const rawDesc = line
       .replace(rawNum, '')

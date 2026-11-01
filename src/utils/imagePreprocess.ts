@@ -37,14 +37,23 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
           return finish(imageSrc);
         }
 
-        // سقف أبعاد ذكي (1400px كحد أقصى) لتسريع الفلتر 3 أضعاف ومنع استهلاك الذاكرة
-        const maxDim = 1400;
-        const scale = Math.max(rawW, rawH) > maxDim ? maxDim / Math.max(rawW, rawH) : 1;
+        // سقف أبعاد عالي الدقة (1950px) لضمان وضوح الأرقام الصغيرة في الجداول الكثيفة (37+ سطراً)
+        const maxDim = 1950;
+        const minDim = 1450;
+        const longest = Math.max(rawW, rawH);
+        const scale =
+          longest > maxDim
+            ? maxDim / longest
+            : longest > 480 && longest < minDim
+            ? minDim / longest
+            : 1;
         const width = Math.max(1, Math.round(rawW * scale));
         const height = Math.max(1, Math.round(rawH * scale));
 
         canvas.width = width;
         canvas.height = height;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, width, height);
 
         const imageData = ctx.getImageData(0, 0, width, height);
@@ -74,7 +83,7 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
 
         await yieldToMain();
 
-        const radius = Math.max(20, Math.round(Math.min(width, height) / 28));
+        const radius = Math.max(22, Math.round(Math.min(width, height) / 26));
         const norm = new Uint8ClampedArray(totalPixels);
 
         for (let y = 0; y < height; y++) {
@@ -111,9 +120,11 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
           }
         }
 
-        // 3. كشف خطوط الجدول الأفقية الطويلة جداً وحذفها مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة
+        // 3. كشف خطوط الجدول الأفقية والعمودية الطويلة وحذفها مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة
         const hKernel = Math.max(55, Math.round(width / 16));
+        const vKernel = Math.max(38, Math.round(height / 20));
         const hLineMask = new Uint8Array(totalPixels);
+        const vLineMask = new Uint8Array(totalPixels);
 
         for (let y = 0; y < height; y++) {
           const rowOff = y * width;
@@ -133,11 +144,28 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
           }
         }
 
+        for (let x = 0; x < width; x++) {
+          let run = 0;
+          for (let y = 0; y < height; y++) {
+            if (sharpened[y * width + x] < 195) {
+              run++;
+            } else {
+              if (run >= vKernel) {
+                for (let k = y - run; k < y; k++) vLineMask[k * width + x] = 1;
+              }
+              run = 0;
+            }
+          }
+          if (run >= vKernel) {
+            for (let k = height - run; k < height; k++) vLineMask[k * width + x] = 1;
+          }
+        }
+
         const cleaned = new Uint8ClampedArray(sharpened);
 
         for (let y = 4; y < height - 4; y++) {
           const rowOff = y * width;
-          for (let x = 0; x < width; x++) {
+          for (let x = 4; x < width - 4; x++) {
             const idx = rowOff + x;
             if (hLineMask[idx] || hLineMask[idx - width] || hLineMask[idx + width]) {
               const aboveDark =
@@ -149,6 +177,17 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
                 sharpened[idx + width * 3] < 210 ||
                 sharpened[idx + width * 4] < 210;
               if (!aboveDark && !belowDark) {
+                cleaned[idx] = 255;
+              }
+            }
+            if (vLineMask[idx] || vLineMask[idx - 1] || vLineMask[idx + 1]) {
+              const leftDark =
+                sharpened[idx - 2] < 205 ||
+                sharpened[idx - 3] < 205;
+              const rightDark =
+                sharpened[idx + 2] < 205 ||
+                sharpened[idx + 3] < 205;
+              if (!leftDark && !rightDark) {
                 cleaned[idx] = 255;
               }
             }

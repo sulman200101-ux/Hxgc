@@ -12,3 +12,5 @@ coverage/
 /android/app/src/main/assets/public/
 /downloads/*.apk
 .aistudio/
+-e 
+public/*.apk

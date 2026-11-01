@@ -234,9 +234,9 @@ function normalizeRawVisionItems(rawItems: any[]): {
     const total = parsedQty > 0 ? parsedQty : 1;
 
     const rawRemark = item.remark ? String(item.remark).trim() : '';
-    const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
+    const minusMatch = rawRemark.match(/(?:^\d+\s*[-−–—]\s*(\d+)$|^[-−–—]\s*(\d+)$)/);
     const out = isMissing ? 0 : minusMatch ? Math.min(total, Number(minusMatch[1] || minusMatch[2] || 0)) : 0;
-    const remark = out > 0 ? `-${out}` : rawRemark || undefined;
+    const remark = out > 0 ? `-${out}` : undefined;
 
     const rawDescCandidate = String(
       item.description_en || item.description || item.material_description || item.desc || ''

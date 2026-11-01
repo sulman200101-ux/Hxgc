@@ -1,4 +1,5 @@
-import { mkdir, copyFile, access } from 'node:fs/promises';
+import { mkdir, copyFile, access, readFile, writeFile } from 'node:fs/promises';
+import { gunzipSync } from 'node:zlib';
 
 const root = new URL('../', import.meta.url);
 const files = [
@@ -26,4 +27,19 @@ for (const [source, target] of optionalSimdFiles) {
     // SIMD files optional depending on tesseract.js-core version
   }
 }
-console.log('Packaged local OCR worker, WASM (including SIMD if present), and English + Arabic language data');
+
+// فك ضغط ملفات اللغات (.traineddata) مسبقاً لضمان عملها فوراً في أندرويد (APK Assets) والمتصفح بدون خطأ 404 أو تأخير فك الضغط
+for (const lang of ['eng', 'ara']) {
+  try {
+    const gzUrl = new URL(`public/ocr/lang/${lang}.traineddata.gz`, root);
+    const rawUrl = new URL(`public/ocr/lang/${lang}.traineddata`, root);
+    const gzBuf = await readFile(gzUrl);
+    const uncompressed = gunzipSync(gzBuf);
+    await writeFile(rawUrl, uncompressed);
+  } catch {
+    // المتابعة في حال كانت اللغة الاختيارية غير متوفرة
+  }
+}
+
+console.log('Packaged local OCR worker, WASM (including SIMD if present), and uncompressed + gzipped English + Arabic language data');
+

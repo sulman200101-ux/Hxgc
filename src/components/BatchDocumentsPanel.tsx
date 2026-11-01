@@ -162,7 +162,7 @@ export function BatchDocumentsPanel({
               description_en: row.description_en || 'SPARE PART ASMO',
               description_ar: row.description_ar || '',
               check: row.is_missing === 1 ? 'X' : '',
-              remark: marks.shortage > 0 ? `-${marks.shortage}` : row.remark || '',
+              remark: marks.shortage > 0 ? `-${marks.shortage}` : '',
               reviewed: true,
             };
           });

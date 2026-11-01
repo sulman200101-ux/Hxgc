@@ -52,6 +52,7 @@ jobs:
             cp -f app-debug.apk asmo-inventory-app.apk
             cp -f app-debug.apk asmo-inventory-v1.5.0.apk
             cp -f app-debug.apk asmo-inventory-v1.6.0.apk
+            cp -f app-debug.apk asmo-inventory-v1.7.0.apk
           fi
           cd ..
           echo "=== Generated Native APKs ==="
@@ -61,16 +62,17 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: v1.6.0
-          name: "ASMO Inventory App v1.6.0 (حفظ تلقائي فوري بدون رقم سري + محرك OCR المتوازي)"
+          tag_name: v1.7.0
+          name: "ASMO Inventory App v1.7.0 (إصلاح تعليق القراءة عند 55% + تسريع OCR)"
           body: |
-            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدث v1.6.0)
-            - **الحفظ والاعتماد التلقائي الفوري بعد انتهاء القراءة**: يتم حفظ واعتماد الأصناف المستخرجة مباشرة في قاعدة البيانات والمستندات فور انتهاء المسح الضوئي دون طلب أي رقم سري (PIN).
-            - **محرك القراءة المتوازي المحسن (3 Parallel Workers)**: معالجة 3 شرائح أفقية متداخلة بالتوازي مع تصحيح الأرقام الـ 10 (`1007->1001`, `1900->1000`) واستنتاج المواقع بالساندويتش السياقي.
-            - **توحيد الإضاءة وحذف خطوط الشبكة مع حفظ الحروف** (`Integral Image + Unsharp Mask`).
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدث v1.7.0)
+            - **إصلاح تعليق قراءة النصوص (OCR) عند 55%**: إلغاء تخزين IndexedDB المؤقت الذي كان يسبب التوقف في بعض أجهزة أندرويد وإضافة مؤشر تقدم فعلي متدرج.
+            - **محرك مساند على الخادم**: ضمان استمرار القراءة في كافة الظروف.
+            - **اعتماد علامة الناقص (-) فقط**: إنقاص العدد واستبعاد الزيادة نهائياً.
+            - **المساعد الذكي Gemini**: الترجمة الفورية وحساب المقاسات وتوزيع الأرفف حسب الارتفاع والوزن (FL, A, B, BB, C4, D).
           files: |
+            output_apk/asmo-inventory-v1.7.0.apk
             output_apk/asmo-inventory-v1.6.0.apk
-            output_apk/asmo-inventory-v1.5.0.apk
             output_apk/asmo-inventory-app.apk
             output_apk/app-debug.apk
         env:

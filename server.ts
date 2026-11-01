@@ -57,7 +57,7 @@ let geminiKeyInvalid = false;
 async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null> {
   if (geminiKeyInvalid) return null;
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-  if (!apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.startsWith('AIza')) {
+  if (!apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY') {
     return null;
   }
 
@@ -72,7 +72,7 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
       httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
     });
 
-    const candidateModels = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-3.8-flash'];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3-flash-preview', 'gemini-2.5-flash'];
 
     for (const modelName of candidateModels) {
       try {
@@ -92,7 +92,7 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
 - location_code: رمز الموقع في عمود Storage Bin (مثل N01A1, N15BB2, N11C2, D1، أو اتركه فارغاً إن لم يظهر ليستنتجه النظام من السطور المجاورة).
 - qty_total: الكمية الرقمية في عمود QTY بعد وحدة القياس (EA, SET, PK, PAA, ZYD, SH, KIT).
 - is_missing: ضع 1 فقط إذا وجدت علامة خطأ (X أو ×) صريحة في عمود Check، وضع 0 إذا كانت علامة صح (✓) أو فارغة.
-- remark: الملاحظات المكتوبة باليد مثل -1 أو -4 أو F2 إن وجدت، وإلا نص فارغ.
+- remark: اعتمد علامة الناقص فقط مثل -1 أو -4 لإنقاص العدد، واستبعد أي زيادة (+N أو F1 أو F2) نهائياً بترك الحقل فارغاً "".
 - description_en: الوصف الإنجليزي الكامل للقطعة في عمود Material Description.`,
             },
           ],
@@ -158,8 +158,10 @@ async function getNodeOcrWorker(): Promise<NodeWorkerInstance> {
   if (!nodeOcrWorkerPromise) {
     nodeOcrWorkerPromise = (async () => {
       const langPath = path.resolve(__dirname, 'public', 'ocr', 'lang');
+      const hasUncompressedEng = fs.existsSync(path.join(langPath, 'eng.traineddata'));
       const worker = await createWorker('eng', 1, {
         langPath: fs.existsSync(langPath) ? langPath : undefined,
+        gzip: !hasUncompressedEng,
         cacheMethod: 'none',
       });
       try {
@@ -439,7 +441,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
     }
 
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-    if (geminiKeyInvalid || !apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.startsWith('AIza')) {
+    if (geminiKeyInvalid || !apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY') {
       return res.status(200).json({
         success: false,
         fallbackToLocal: true,
@@ -489,7 +491,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
 
-    const candidateModels = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-3.8-flash'];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3-flash-preview', 'gemini-2.5-flash'];
     for (const modelName of candidateModels) {
       try {
         const response = await ai.models.generateContent({
@@ -553,7 +555,10 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v1.7.0.apk'),
+  path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.6.0.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.7.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.6.0.apk'),
   path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
 ];
@@ -562,16 +567,18 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v1.6.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v1.7.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.6.0/asmo-inventory-v1.6.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.7.0/asmo-inventory-v1.7.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
+app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v1.7.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.6.0.apk', handleApkDownload);
 app.get('/api/download-apk', handleApkDownload);
 

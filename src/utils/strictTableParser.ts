@@ -220,18 +220,18 @@ export function extractStrictMaterialNumber(line: string): string | null {
     return normalizeSapMaterialPrefix(exactMatch[1]);
   }
 
-  const gluedMatch = line.match(/(?:^|[^0-9])(100\d{7})\d{0,2}(?=[^0-9]|$)/);
+  const gluedMatch = line.match(/(?:^|[^0-9])[147|Il!tT[\]]?(100\d{7})\d{0,2}(?=[^0-9]|$)/);
   if (gluedMatch) {
     return normalizeSapMaterialPrefix(gluedMatch[1]);
   }
 
-  const splitMatch = line.match(/\b(100\d{3,6})\s+(\d{1,4})\b/);
+  const splitMatch = line.match(/\b(100\d{2,6})\s+(\d{1,5})\b/);
   if (splitMatch && (splitMatch[1] + splitMatch[2]).length === 10) {
     return normalizeSapMaterialPrefix(splitMatch[1] + splitMatch[2]);
   }
 
   const isSapTableLine =
-    /\b(?:C006|C008|C00S|COOS|C00|CO06|C08|M016|MO16|MOTE|MOIS|D04D|DO4D|002|EA|EFA|FA|SET|PK|PAA|SH|ZYD|KIT|N[01OIl]\d[A-Z]{1,3}\d?)\b/i.test(
+    /\b(?:C006|C008|C00S|COOS|C00|CO06|C08|M016|MO16|MOTE|MOIS|D04D|DO4D|002|EA|EFA|FA|SET|PK|PAA|SH|ZYD|KIT|PCS|ROL|BOX|N[01OIl]\d[A-Z]{1,3}\d?)\b/i.test(
       line
     );
 
@@ -264,10 +264,10 @@ export function extractStrictMaterialNumber(line: string): string | null {
       if (/^100\d{7}$/.test(prefixFixed)) {
         return prefixFixed;
       }
-      if (isSapTableLine && /^[147]100\d{7}$/.test(repaired)) {
+      if (/^[147]100\d{7}$/.test(repaired)) {
         return normalizeSapMaterialPrefix(repaired.slice(1));
       }
-      if (isSapTableLine && /^100\d{7}\d{1,2}$/.test(repaired)) {
+      if (/^100\d{7}\d{1,2}$/.test(repaired)) {
         return normalizeSapMaterialPrefix(repaired.slice(0, 10));
       }
       if (isSapTableLine && /^00[01]\d{6}$/.test(repaired)) {
@@ -419,9 +419,14 @@ export function extractCheckAndRemark(
   const isMissing = /(?:^|\s|\||\[|\])([Xx×✗✘]{1,2})(?=\s|\||\[|\]|$)/.test(afterQty) ? 1 : 0;
   let remark = '';
   let shortage = 0;
-  const minusMatch = afterQty.match(/(?:^|\s|\||\[|\])(?:\d{1,4}\s*-\s*(\d{1,4})|-\s*(\d{1,4}))(?=\s|\||\[|\]|$)/);
+
+  // اعتماد علامة الناقص فقط (-N) لإنقاص العدد واستبعاد الزيادة (+N أو F1/F2) نهائياً
+  const minusMatch =
+    afterQty.match(/(?:^|\s|\||\[|\])(?:\d{1,4}\s*[-−–—]\s*(\d{1,4})|[-−–—]\s*(\d{1,4}))(?=\s|\||\[|\]|$)/) ||
+    afterQty.match(/(?:^|\s|\||\[|\])[-−–—]\s*([Il|!])(?=\s|\||\[|\]|$)/);
   if (minusMatch) {
-    shortage = Number(minusMatch[1] || minusMatch[2] || 0);
+    const rawShortage = minusMatch[1] || minusMatch[2] || '';
+    shortage = /^[Il|!]$/.test(rawShortage) ? 1 : Number(rawShortage || 0);
     if (shortage > 0) {
       remark = `-${shortage}`;
     }
