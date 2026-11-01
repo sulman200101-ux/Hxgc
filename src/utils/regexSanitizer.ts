@@ -3,10 +3,10 @@
  * مصممة خصيصاً لمساعدة Gemini Vision ومحرك القراءة على تحقيق قراءة سريعة ودقيقة 100%:
  * 1. خوارزمية الإصلاح الذكي لرقم القطعة (Smart 10-Digit Material Auto-Repair):
  *    - استخراج الـ 10 أرقام الكاملة حتى لو التصق بها رقم التسلسل (#) أو رمز الوحدة (EA/PK) أو خط الجدول (|)
- *    - تصحيح الحروف المتشابهة بصرياً (O->0, I/l->1, Z->2, S->5, G->6, B->8)
+ *    - تصحيح الحروف المتشابهة بصرياً (O->0, I/l/r/t->1, Z->2, A->4, S->5, G->6, B->8, e/¢->9)
  *    - تصحيح التباس البادئة في خطوط SAP (1007xxxxxx -> 1001xxxxxx, 1900xxxxxx -> 1000xxxxxx, 1090xxxxxx -> 1000xxxxxx)
  * 2. خوارزمية التصحيح والاستنتاج السياقي للمواقع (Smart Storage Bin Normalizer & Sandwich Context Resolver):
- *    - تصحيح الأخطاء الشائعة في رموز المواقع مثل (NIS8B2 -> N15BB2, NOIAT -> N01A1, N1502 -> N15D2, N1101 -> N11D1)
+ *    - تصحيح الأخطاء الشائعة في رموز المواقع مثل (NIS8B2 -> N15BB2, NOIAT -> N01A1, N1502 -> N15D2, N16O1 -> N16D1, Nivar -> N17A1, niva2 -> N17A2, nive1 -> N17B1, N11EL1 -> N11FL1)
  *    - استنتاج رمز الموقع تلقائياً من السطور المجاورة وتنعيم التشتت الفردي (Sandwich Smoothing)
  * 3. خوارزمية التمييز المرن لعلامات اليد (✓ صح = موجودة | × خطأ = غير موجودة) والملاحظات (-N)
  */
@@ -108,15 +108,17 @@ export function repair10DigitMaterialCode(raw: string | null | undefined): strin
     .replace(/\b(?:C006|C008|M016|MO16|D04D)\b/gi, '');
 
   const mapped = strippedPipes
-    .replace(/^(?:aot|aoo|qop|roo|too|loo|ioo|190|109|160|180)/i, '100')
+    .replace(/^(?:aot|aoo|qop|roo|too|loo|ioo|soo|yoo|voo|noo|f00|\+00|190|109|160|180)/i, '100')
+    .replace(/^[Il|!tTrRfFyYvVsSaAnN+74](?=[0OoQD°]{2})/i, '1')
     .toUpperCase()
     .replace(/[OQD°@U]/g, '0')
-    .replace(/[IL!|'"`/]/g, '1')
+    .replace(/[IL!|'"`/RTF+]/g, '1')
     .replace(/[Z?]/g, '2')
+    .replace(/[A<]/g, '4')
     .replace(/[S$§]/g, '5')
     .replace(/[G%]/g, '6')
     .replace(/[B&]/g, '8')
-    .replace(/[¢]/g, '9');
+    .replace(/[¢E]/g, '9');
 
   const exact10 = mapped.match(/(?:^|[^0-9])\d{0,5}(100[01]\d{6})(?=[^0-9]|$)/);
   if (exact10) return normalizeSapMaterialPrefix(exact10[1]);
@@ -206,9 +208,16 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
     return false;
   }
 
-  // صيغة أرفف SAP القياسية: N01A1, N15BB2, N11FL1, N12C2, N16D2 أو بصيغة مفصولة بمسافة
+  // صيغة أرفف SAP القياسية: N01A1, N15BB2, N11FL1, N12C2, N16D2, N17A1, N17B1
+  if (/^[A-Z]\d{2}(?:FL|BB|[A-D])\d{1,2}$/.test(trimmed)) {
+    return true;
+  }
+
   if (/^[A-Z]\d{2}[A-Z]{1,3}\d{0,2}$/.test(trimmed)) {
-    return !['C006', 'M016', 'D04D'].includes(trimmed);
+    if (['C006', 'M016', 'D04D'].includes(trimmed)) return false;
+    // منع قبول حروف غير صالحة كأرفف مثل O1, EL1, RL1 قبل تطبيعها
+    if (/^N\d{2}(?:O|EL|RL)\d$/i.test(trimmed)) return false;
+    return true;
   }
 
   if (/^[A-Z]\d{2}\s+[A-Z]{1,3}\d{0,2}$/.test(trimmed)) {
@@ -234,7 +243,7 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
 /**
  * 2. خوارزمية التصحيح الذكي لأسماء المواقع (Smart SAP Storage Bin Normalizer)
  * تصلح الأخطاء البصرية الشائعة في رموز المواقع مثل:
- * NIS8B2 -> N15BB2 | NOIAT -> N01A1 | NOTAZ -> N01A2 | NOWB1 -> N01B1 | N1502 -> N15D2 | N1101 -> N11D1
+ * NIS8B2 -> N15BB2 | NOIAT -> N01A1 | NOTAZ -> N01A2 | NOWB1 -> N01B1 | N1502 -> N15D2 | N16O1 -> N16D1 | Nivar -> N17A1 | niva2 -> N17A2 | nive1 -> N17B1 | N11EL1 -> N11FL1
  */
 export function dynamicLocationNormalizer(raw: string | null | undefined): string {
   if (!raw) return '';
@@ -255,8 +264,11 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     .replace(/عام/g, '')
     .replace(/غير محدد/g, '')
     .replace(/موقع[:\s]*/g, '')
-    .replace(/[\[\]\(\)\{\}\=\|\&\~\\\@\#\$\%\^\*\+\?\!\;\:\"\'\`<>—\-]/g, ' ')
-    .replace(/\b(002\s*02|0020|002|001|C006|C008|C00S|COOS|C00|M016|MO16|MOTE|MOIS|D04D|DO4D|STORAGE\s*BIN|BIN|LOC)\b/gi, ' ')
+    .replace(/[\[\]\(\)\{\}\=\|\&\~\\\@\#\$\%\^\*\+\?\!\;\:\"\'\`<>—\-_]/g, ' ')
+    .replace(
+      /\b(002\s*02|0020|002T?|001|C006|C008|C00S|COOS|COO6|COOB|COVE|C00|M016|MO16|MOTE|MORE|MOIS|M076|D04D|DO4D|STORAGE\s*BIN|BIN|LOC)\b/gi,
+      ' '
+    )
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -270,33 +282,51 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     return cleaned;
   }
 
-  // إصلاحات مخصصة لأكواد أرفف SAP القياسية (N01..N19)
+  // إصلاحات مخصصة وشاملة لأكواد أرفف SAP القياسية (N01..N19)
   let sapFixed = cleaned
-    .replace(/\bN\s+([01OIl][0-9OIlSsEeGgZz])\b/g, 'N$1')
-    .replace(/\bN[Oo0][Ili|!tT1]/g, 'N01')
-    .replace(/\bN[Oo0]W/g, 'N01')
-    .replace(/\bN[Ili|!tT1][Ss5]/g, 'N15')
-    .replace(/\bN[Ili|!tT1][EeGg6]/g, 'N16')
-    .replace(/\bN[Ili|!tT1MVNA][Ili|!tT1]/g, 'N11')
-    .replace(/\bN[Ili|!tT1][Zz2]/g, 'N12')
+    .replace(/\bN\s+([01OIl][0-9OIlSsEeGgZz7vV])\b/g, 'N$1')
+    // N01 variants (NO1, NOT, NOW, N0W, W01, NOIA, NOTA, NOVER)
+    .replace(/\b[TNW]?N?[Oo0][Ili|!tT1W](?=[A-DF]|BB|FL)/gi, 'N01')
+    .replace(/\bN[Oo0]VER\b/gi, 'N01B1')
+    .replace(/\bN[Oo0]RES\b/gi, 'N01B1')
+    // N17 variants (NI7, NT7, N17, NIV, NAV, NA7, WIV, U7)
+    .replace(/\b[TNW]?N[Ili|!tT1A][7vV](?=[A-DFEe]|BB|FL)/gi, 'N17')
+    .replace(/\b(?:WIV|NIV|NT7|NI7|NA7|U7|A7)A[1Ili|!tTrR]\b/gi, 'N17A1')
+    .replace(/\b(?:WIV|NIV|NT7|NI7|NA7|U7|A7)V?A[2Zz]\d?\b/gi, 'N17A2')
+    .replace(/\b(?:NIV|NT7|NI7)E[1Ili|!tTrR]?\b/gi, 'N17B1')
+    .replace(/\bNAVARA\b/gi, 'N17A1')
+    // N16 variants (N16, NI6, NIG, NIE, NNIE)
+    .replace(/\b(?:NN|T)?N[Ili|!tT1][EeGg6](?=[A-DFOo0]|BB|FL)/gi, 'N16')
+    // N15 variants (N15, NIS, N1S, NNIS)
+    .replace(/\b(?:NN|T)?N[Ili|!tT1][Ss5](?=[A-DFOo0rReE]|BB|FL)/gi, 'N15')
+    // N12 variants (N12, NI2, NT2)
+    .replace(/\b[TNW]?N[Ili|!tT1]2(?=[A-DF]|BB|FL)/gi, 'N12')
+    // N11 variants (N11, NI1, NII, NTI, NU, WN11)
+    .replace(/\b(?:WN|T)?N[Ili|!tT1MVNAU][Ili|!tT1](?=[A-DFEeRr]|BB|FL)/gi, 'N11')
+    .replace(/\bNU(?:FL|IRU|RUR|RS)([12]|\b)/gi, 'N11FL$1')
+    // General digit repairs after aisle letter
     .replace(/\b([A-Z])[Oo](\d)/g, '$10$2')
     .replace(/\b([A-Z]\d)[Oo]/g, '$10')
     .replace(/\b([A-Z])[Il|tT](\d)/g, '$11$2')
     .replace(/\b([A-Z]\d)[Il|tT]([A-Z])/g, '$11$2')
-    // دمج المسافة إن وُجدت بين رقم الممر Nxx ورمز الرف (مثل N01 A1 -> N01A1 أو N15 BB2 -> N15BB2)
+    // دمج المسافة إن وُجدت بين رقم الممر Nxx ورمز الرف
     .replace(/\b(N\d{2})\s+(FL[12Il|!tT]|BB[12Il|!tT]|[A-D][12Il|!tT])\b/g, '$1$2')
-    // إصلاح رمز الرف المزدوج BB (مثل N158B2, N158BR2, N15BR2, N15882 -> N15BB2)
-    .replace(/\b(N\d{2})(?:8B|B8|88|8BR|BR|BBR)([12Il|!tT])\b/g, '$1BB$2')
-    // إصلاح حرف D حين يُقرأ 0 بين رقمين (مثل N1502 -> N15D2 و N1101 -> N11D1)
-    .replace(/\b(N\d{2})0([12])\b/g, '$1D$2')
-    // إصلاح FL1 و FL2 (مثل FLI, FLY, FL4 -> FL1 و FLZ, FLQ, FLe -> FL2)
-    .replace(/\b(N\d{2})F[LI1][Ili|!tTY41]\b/g, '$1FL1')
-    .replace(/\b(N\d{2})F[LI1][ZzQRe2]\b/g, '$1FL2')
-    // إصلاح N01A1 / N01A2 / N01B1
-    .replace(/\b(N\d{2})A[Ili|!tTYLD]\b/g, '$1A1')
-    .replace(/\b(N\d{2})A[ZzR2]\b/g, '$1A2')
-    .replace(/\b(N\d{2})[B8][Ili|!tT1]\b/g, '$1B1')
-    .replace(/\b(N\d{2})[B8][Zz2]\b/g, '$1B2')
+    // إصلاح رمز الرف المزدوج BB (مثل N158B2, N158BR2, N15BR2, N15882, N15AN2, N15EE2 -> N15BB2)
+    .replace(/\b(N\d{2})S?(?:8B|B8|88|8BR|BR|BBR|AN|EE|SS88|SB|BB)([12Il|!tT])\b/g, '$1BB$2')
+    // إصلاح حرف D حين يُقرأ 0 أو O أو Q بين رقم الممر ورقم الرف (مثل N1502 -> N15D2, N16O1 -> N16D1, N1601 -> N16D1, N15O1 -> N15D1)
+    .replace(/\b(N\d{2})[0OoQqV]([12Il|!tT])\b/g, '$1D$2')
+    // إصلاح FL1 و FL2 (بما فيها EL1, RL1, FTR1, FLI, FLY, FL4, FLZ, FLQ, FLe, FU2, EC2, ETA, EUZ)
+    .replace(/\b(N\d{2})(?:F[LI1tTrR]|E[LI1tT]|R[LI1tT]|SE[UT])[Ili|!tTY41sS]\b/g, '$1FL1')
+    .replace(/\b(N\d{2})(?:F[LI1tTrRU]|E[LI1tTC]|R[LI1tT]|SE[UTCA])[ZzQRe2uU]\b/g, '$1FL2')
+    // إصلاح NxxA1 / NxxA2 / NxxB1 / NxxB2 / NxxC1 / NxxC2
+    .replace(/\b(N\d{2})V?A[Ili|!tTYLDrR1]\b/g, '$1A1')
+    .replace(/\b(N\d{2})V?A[ZzR2]\d?\b/g, '$1A2')
+    .replace(/\b(N\d{2})[B8E][Ili|!tTrR1]\b/g, '$1B1')
+    .replace(/\b(N\d{2})[B8E][Zz2]\b/g, '$1B2')
+    .replace(/\b(N\d{2})C[Ili|!tTrR1]\b/g, '$1C1')
+    .replace(/\b(N\d{2})C[ZzE2]\b/g, '$1C2')
+    .replace(/\b(N\d{2})D[Ili|!tTrR1]\b/g, '$1D1')
+    .replace(/\b(N\d{2})D[Zz2]\b/g, '$1D2')
     .replace(/([A-Z]{1,3})[Il|tT]\b/g, '$11')
     .replace(/([A-Z]{1,3})[Oo]\b/g, '$10');
 
@@ -305,9 +335,19 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
     sapFixed = `${splitSapMatch[1]}${splitSapMatch[2]}`;
   }
 
+  const stdSapBinMatch = sapFixed.match(/\b(N\d{2}(?:FL|BB|[A-D])[12])\b/);
+  if (stdSapBinMatch) {
+    const candidate = stdSapBinMatch[1].toUpperCase();
+    LOCATION_CACHE.set(rawStr, candidate);
+    return candidate;
+  }
+
   const compactBinMatch = sapFixed.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{1,2})\b/);
   if (compactBinMatch) {
-    const candidate = compactBinMatch[1].toUpperCase();
+    let candidate = compactBinMatch[1].toUpperCase();
+    candidate = candidate
+      .replace(/^(N\d{2})O([12])$/, '$1D$2')
+      .replace(/^(N\d{2})(?:EL|RL)([12])$/, '$1FL$2');
     if (!['C006', 'M016', 'D04D'].includes(candidate)) {
       LOCATION_CACHE.set(rawStr, candidate);
       return candidate;
@@ -414,20 +454,36 @@ export function resolveSheetLocationsWithContext<T extends { location?: string; 
     }
   }
 
-  // 3. Sandwich Context Smoothing: إذا كان السطر السابق واللاحق لهما نفس الموقع تماماً (مثلاً N01A1 و N01A1)،
-  // فالسطر الأوسط حتماً ينتمي لنفس الرف في جدول SAP المرتب تسلسلياً
-  for (let i = 1; i < normalized.length - 1; i++) {
-    const prevLoc = normalized[i - 1].location_code;
-    const nextLoc = normalized[i + 1].location_code;
-    const currLoc = normalized[i].location_code;
-    if (
-      prevLoc &&
-      prevLoc === nextLoc &&
-      currLoc !== prevLoc &&
-      isValidSpecificLocation(prevLoc)
-    ) {
-      normalized[i].location = prevLoc;
-      normalized[i].location_code = prevLoc;
+  // 3. Sandwich Context Smoothing (نوافذ 1 أو 2 سطر بين سطرين متطابقين في الموقع)
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 1; i < normalized.length - 1; i++) {
+      const prevLoc = normalized[i - 1].location_code;
+      const nextLoc = normalized[i + 1].location_code;
+      const currLoc = normalized[i].location_code;
+      if (
+        prevLoc &&
+        prevLoc === nextLoc &&
+        currLoc !== prevLoc &&
+        isValidSpecificLocation(prevLoc)
+      ) {
+        normalized[i].location = prevLoc;
+        normalized[i].location_code = prevLoc;
+      }
+    }
+    for (let i = 1; i < normalized.length - 2; i++) {
+      const prevLoc = normalized[i - 1].location_code;
+      const afterTwoLoc = normalized[i + 2].location_code;
+      if (
+        prevLoc &&
+        prevLoc === afterTwoLoc &&
+        isValidSpecificLocation(prevLoc) &&
+        (normalized[i].location_code !== prevLoc || normalized[i + 1].location_code !== prevLoc)
+      ) {
+        normalized[i].location = prevLoc;
+        normalized[i].location_code = prevLoc;
+        normalized[i + 1].location = prevLoc;
+        normalized[i + 1].location_code = prevLoc;
+      }
     }
   }
 

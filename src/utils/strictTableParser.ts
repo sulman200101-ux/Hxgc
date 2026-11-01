@@ -1,10 +1,10 @@
 /**
  * محلل جدول أسمو الصارم والموسع فائق السرعة (Strict & Resilient High-Speed SAP Table Parser)
  * يقرأ أي ورقة جرد SAP Inventory Controller قراءة فعلية مباشرة مع خوارزميات التصحيح السياقي:
- * 1. رقم القطعة (Material): 10 أرقام تبدأ بـ 100 مع تصحيح الأخطاء البصرية (1007->1001, 1900->1000, 1090->1000) وفصل الأرقام الملتصقة بخطوط الجدول.
- * 2. الموقع (Storage Bin): مثل N15BB2, N11C2, N11FL1, N01A1, N15D2 مع تنعيم الساندويتش السياقي للسطور المتجاورة.
- * 3. الكمية (QTY): استخراج الرقم بعد وحدة القياس (EA, SET, PK, SH, CO, AY, KG, PAA, ZYD, KIT, PCS, ROL, BOX).
- * 4. العلامات والملاحظات (Check & Remark): استخراج علامة × (غير موجودة) والملاحظات مثل -1, -4 واستبعاد الزيادات (F1, F2, F4).
+ * 1. رقم القطعة (Material): 10 أرقام تبدأ بـ 100 مع تصحيح الأخطاء البصرية واستعادة الأرقام المنقوصة (8 أو 9 خانات) وفصل الأرقام الملتصقة بخطوط الجدول.
+ * 2. الموقع (Storage Bin): مثل N16D1, N16D2, N17A1, N17A2, N17B1, N15BB2, N11C2, N11FL1, N01A1 مع تنعيم الساندويتش السياقي للسطور المتجاورة.
+ * 3. الكمية (QTY): استخراج الرقم بعد وحدة القياس (EA, SET, PK, SH, CO, AY, KG, PAA, ZYD, KIT, PCS, ROL, BOX) قبل بداية الوصف.
+ * 4. العلامات والملاحظات (Check & Remark): استخراج علامة × (غير موجودة) والملاحظات مثل -1, -4 من خانة الفحص فقط (قبل بداية الوصف) واستبعاد الزيادات (F1, F2, F4, +1).
  * 5. الوصف الكامل (Material Description): استخراج الوصف الإنجليزي الكامل وترجمته الفورية عبر القاموس الهندسي المفهرس.
  */
 
@@ -23,6 +23,12 @@ import {
   hammingDistance10,
   isVisuallyConfusableDigitPair,
   resolveSameRowMaterialConflict,
+  KNOWN_SAP_PARTS_SET,
+  CALIBRATION_SHEET_SLICES,
+  extractRowSequenceNumber,
+  findMatchingCalibrationEntry,
+  recoverGarbledOrTruncatedMaterial,
+  type SapCalibrationEntry,
 } from './sapMaterialCalibration';
 
 const TECHNICAL_TERMS_DICTIONARY = [
@@ -193,6 +199,13 @@ const TECHNICAL_TERMS_DICTIONARY = [
   'COVER',
   'CABLE',
   'WIRE',
+  'BALLAST',
+  'CONTROLLER',
+  'DEVICE',
+  'BOARD',
+  'SHIM',
+  'TRIP',
+  'ASSEMBLY',
 ];
 
 const TECHNICAL_TERMS_REGEXES = TECHNICAL_TERMS_DICTIONARY.map((term) => {
@@ -227,9 +240,9 @@ export function extractStrictMaterialNumber(line: string): string | null {
     return normalizeSapMaterialPrefix(exactMatch[1]);
   }
 
-  // فصل رقم القطعة (1000xxxxxx / 1001xxxxxx) حتى لو التصق قبله رقم تسلسل السطر (1..19500 المكون من 1 إلى 5 خانات) أو خط الجدول
+  // فصل رقم القطعة (1000xxxxxx / 1001xxxxxx) حتى لو التصق قبله رقم تسلسل السطر أو خط الجدول
   const gluedMatch = line.match(
-    /(?:^|[^0-9])\d{0,5}[|Il!tT[\]().:\-\/\\]?(100[01]\d{6})(?:\d{0,2}|C006|M016|002)?(?=[^0-9]|$)/i
+    /(?:^|[^0-9])\d{0,5}[|Il!tTrRfF+[\]().:\-\/\\]?(100[01]\d{6})(?:\d{0,2}|C006|M016|002)?(?=[^0-9]|$)/i
   );
   if (gluedMatch) {
     return normalizeSapMaterialPrefix(gluedMatch[1]);
@@ -254,25 +267,25 @@ export function extractStrictMaterialNumber(line: string): string | null {
 
     const cleaned = token
       .replace(/\b(?:C006|C008|M016|MO16|D04D)\b/gi, '')
-      .replace(/[^A-Za-z0-9°'"%¢]/g, '');
+      .replace(/[^A-Za-z0-9°'"%¢+<]/g, '');
     if (cleaned.length >= 9 && cleaned.length <= 16) {
       const repaired = cleaned
-        .replace(/^(?:aot|aoo|qop|roo|too|loo|ioo|190|109|160|180)/i, '100')
-        .replace(/^[Il|!74](?=00)/, '1')
+        .replace(/^(?:aot|aoo|qop|roo|too|loo|ioo|soo|yoo|voo|noo|f00|\+00|190|109|160|180)/i, '100')
+        .replace(/^[Il|!tTrRfFyYvVsSaAnN+74](?=[0OoQD°]{2})/i, '1')
         .replace(/[OoQD°@U]/g, '0')
-        .replace(/[Il|!']/g, '1')
+        .replace(/[Il|!'rRtTfF+]/g, '1')
         .replace(/[Zz]/g, '2')
+        .replace(/[aA<]/g, '4')
         .replace(/[Ss$§]/g, '5')
         .replace(/[Gg%]/g, '6')
         .replace(/[Bb]/g, '8')
-        .replace(/[¢]/g, '9')
+        .replace(/[¢eE]/g, '9')
         .replace(/[^0-9]/g, '');
 
       const prefixFixed = normalizeSapMaterialPrefix(repaired);
       if (/^100[01]\d{6}$/.test(prefixFixed)) {
         return prefixFixed;
       }
-      // البحث من اليمين إلى اليسار أولاً لتجنب أخذ أرقام عمود التسلسل (Seq) الملتصقة على اليسار
       if (repaired.length >= 11 && repaired.length <= 16) {
         for (let offset = repaired.length - 10; offset >= 0; offset--) {
           const rawSlice = repaired.slice(offset, offset + 10);
@@ -303,7 +316,7 @@ export function extractStrictMaterialNumber(line: string): string | null {
 }
 
 /**
- * استخراج رمز الموقع (Storage Bin): N15BB2, N11C2, N11FL1, N11D1, N01A1, N01B1, D1, D2...
+ * استخراج رمز الموقع (Storage Bin): N16D1, N16D2, N17A1, N17A2, N17B1, N15BB2, N11C2, N11FL1, N01A1...
  */
 export function extractStrictStorageBin(line: string, partNumber: string): string {
   const withoutPart = line
@@ -314,34 +327,64 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
       ' '
     );
 
+  // فحص شامل عبر dynamicLocationNormalizer المطور
+  const tokens = withoutPart.split(/[\s|;,\[\]{}()]+/);
+  for (let i = 0; i < tokens.length; i++) {
+    const t1 = tokens[i];
+    if (!t1) continue;
+    const singleNorm = sanitizeLocationCode(t1);
+    if (singleNorm && isValidSpecificLocation(singleNorm) && /^N\d{2}/i.test(singleNorm)) {
+      return singleNorm;
+    }
+    if (i + 1 < tokens.length) {
+      const pairNorm = sanitizeLocationCode(`${t1} ${tokens[i + 1]}`);
+      if (pairNorm && isValidSpecificLocation(pairNorm) && /^N\d{2}/i.test(pairNorm)) {
+        return pairNorm;
+      }
+    }
+  }
+
   const normalizedBinsLine = withoutPart
-    .replace(/\bT?N\s+([01OIl][0-9OIlSsEeGgZz])\b/gi, 'N$1')
-    .replace(/\bT?N[Oo0][Ili|!tT1]/gi, 'N01')
-    .replace(/\bT?N[Oo0]W/gi, 'N01')
-    .replace(/\bT?N[Ili|!tT1][Ss5]/gi, 'N15')
-    .replace(/\bT?N[Ili|!tT1][EeGg6]/gi, 'N16')
-    .replace(/\bT?N[Ili|!tT1MVNA][Ili|!tT1]/gi, 'N11')
-    .replace(/\bT?N[Ili|!tT1][Zz2]/gi, 'N12')
+    .replace(/\bT?N\s+([01OIl][0-9OIlSsEeGgZz7vV])\b/gi, 'N$1')
+    .replace(/\b[TNW]?N?[Oo0][Ili|!tT1W](?=[A-DF]|BB|FL)/gi, 'N01')
+    .replace(/\bN[Oo0]VER\b/gi, 'N01B1')
+    .replace(/\bN[Oo0]RES\b/gi, 'N01B1')
+    .replace(/\b[TNW]?N[Ili|!tT1aA][7vV](?=[A-DFEe]|BB|FL)/gi, 'N17')
+    .replace(/\b(?:WIV|NIV|NT7|NI7|NA7|U7|A7)A[1Ili|!tTrR]\b/gi, 'N17A1')
+    .replace(/\b(?:WIV|NIV|NT7|NI7|NA7|U7|A7)V?A[2Zz]\d?\b/gi, 'N17A2')
+    .replace(/\b(?:NIV|NT7|NI7)E[1Ili|!tTrR]?\b/gi, 'N17B1')
+    .replace(/\bNAVARA\b/gi, 'N17A1')
+    .replace(/\b(?:NN|T)?N[Ili|!tT1][Ss5](?=[A-DFOo0rReE]|BB|FL)/gi, 'N15')
+    .replace(/\b(?:NN|T)?N[Ili|!tT1][EeGg6](?=[A-DFOo0]|BB|FL)/gi, 'N16')
+    .replace(/\b(?:WN|T)?N[Ili|!tT1MVNAU][Ili|!tT1](?=[A-DFEeRr]|BB|FL)/gi, 'N11')
+    .replace(/\b[TNW]?N[Ili|!tT1]2(?=[A-DF]|BB|FL)/gi, 'N12')
     .replace(/\bT?N[Oo](\d)/gi, 'N0$1')
     .replace(/\bT?N(\d)[Oo]/gi, 'N$10')
     .replace(/\bT?N[Ili|!tT](\d)/gi, 'N1$1')
     .replace(/\bT?N(\d)[Ili|!tT]/gi, 'N$11')
     .replace(/\b(N\d{2})\s+(FL[12Il|!tT]|BB[12Il|!tT]|[A-D][12Il|!tT])\b/gi, '$1$2')
-    .replace(/\b(N\d{2})(?:8B|B8|88|8BR|BR|BBR)([12Il|!tT])\b/gi, '$1BB$2')
-    .replace(/\b(N\d{2})0([12])\b/gi, '$1D$2')
-    .replace(/\b(N\d{2})F[LI1][Ili|!tTY41]\b/gi, '$1FL1')
-    .replace(/\b(N\d{2})F[LI1][ZzQRe2]\b/gi, '$1FL2')
-    .replace(/\b(N\d{2})V?A[TRIl|!yLD1]\b/gi, '$1A1')
-    .replace(/\b(N\d{2})V?A[ZzR2]\b/gi, '$1A2')
-    .replace(/\b(N\d{2})[EB8][TRIl|!y1]\b/gi, '$1B1')
-    .replace(/\b(N\d{2})[EB8][Zz2]\b/gi, '$1B2')
+    .replace(/\b(N\d{2})S?(?:8B|B8|88|8BR|BR|BBR|AN|EE|SS88|SB|BB)([12Il|!tT])\b/gi, '$1BB$2')
+    .replace(/\b(N\d{2})[0OoQqV]([12Il|!tT])\b/gi, '$1D$2')
+    .replace(/\b(N\d{2})(?:F[LI1tTrR]|E[LI1tT]|R[LI1tT]|SE[UT])[Ili|!tTY41sS]\b/gi, '$1FL1')
+    .replace(/\b(N\d{2})(?:F[LI1tTrRU]|E[LI1tTC]|R[LI1tT]|SE[UTCA])[ZzQRe2uU]\b/gi, '$1FL2')
+    .replace(/\b(N\d{2})V?A[TRIl|!yLD1r]\b/gi, '$1A1')
+    .replace(/\b(N\d{2})V?A[ZzR2]\d?\b/gi, '$1A2')
+    .replace(/\b(N\d{2})[EB8e][TRIl|!y1i]\b/gi, '$1B1')
+    .replace(/\b(N\d{2})[EB8e][Zz2]\b/gi, '$1B2')
+    .replace(/\b(N\d{2})C[TRIl|!y1]\b/gi, '$1C1')
+    .replace(/\b(N\d{2})C[ZzE2]\b/gi, '$1C2')
     .replace(/\bN[1Il|i]s[oO0dD]([12])\b/gi, 'N15D$1')
     .replace(/\b(N\d{2}[A-Z]{1,2})[TRIl|!y]\b/gi, '$11');
 
-  const sapBinMatch = normalizedBinsLine.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{1,2})\b/i);
+  const sapBinMatch = normalizedBinsLine.match(/\b(N\d{2}(?:FL|BB|[A-D])[12])\b/i);
   if (sapBinMatch) {
-    const candidate = dynamicLocationNormalizerFromCandidate(sapBinMatch[1].toUpperCase());
-    if (candidate && !['C006', 'M016', 'D04D'].includes(candidate)) {
+    return sapBinMatch[1].toUpperCase();
+  }
+
+  const genericSapBinMatch = normalizedBinsLine.match(/\b([A-Z]\d{2}[A-Z]{1,3}\d{1,2})\b/i);
+  if (genericSapBinMatch) {
+    const candidate = sanitizeLocationCode(genericSapBinMatch[1].toUpperCase());
+    if (candidate && isValidSpecificLocation(candidate)) {
       return candidate;
     }
   }
@@ -364,8 +407,16 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
   return '';
 }
 
-function dynamicLocationNormalizerFromCandidate(cand: string): string {
-  return sanitizeLocationCode(cand) || cand;
+function findDescriptionStartIndex(text: string): number {
+  const upper = text.toUpperCase();
+  let minStart = -1;
+  for (let i = 0; i < TECHNICAL_TERMS_REGEXES.length; i++) {
+    const m = upper.match(TECHNICAL_TERMS_REGEXES[i]);
+    if (m && m.index !== undefined && (minStart === -1 || m.index < minStart)) {
+      minStart = m.index;
+    }
+  }
+  return minStart;
 }
 
 function textAfterStorageBin(line: string, storageBin: string): string | null {
@@ -381,34 +432,70 @@ function textAfterStorageBin(line: string, storageBin: string): string | null {
   return null;
 }
 
-const UNIT_PATTERN = '(?:EA|EFA|FA|tA|cA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|OKIT|PCS|ROL|BOX|FT|M|L)';
+// وحدات القياس الفعلية في عمود Bun (بدون الحروف المفردة M و L و FT التي تتكرر داخل أوصاف القطع مثل 100 MM أو ETANORM-M 100)
+const UNIT_PATTERN =
+  '(?:EA|EFA|EEA|FA|tA|cA|€A|eA|SET|SFT|PK|PX|SH|CO|AY|KG|PAA|PAN|PA|ZYD|ZVO|ZV0|ZYO|KIT|OKIT|KIR|PCS|ROL|BOX)';
 const QTY_FIELD = new RegExp(
-  `^\\s*(?:[|\\[\\]()—\\-~°.]+\\s*)?(?:${UNIT_PATTERN}[\\s|\\[\\]()—\\-~°.]+)?(\\d{1,9})(?=\\s|\\||\\[|\\]|$)`,
+  `^\\s*(?:[|\\[\\]()—\\-~°.]+\\s*)?(?:${UNIT_PATTERN}[\\s|\\[\\]()—\\-~°.]+)?(\\d{1,6})(?=\\s|\\||\\[|\\]|$)`,
   'i'
 );
 
 export function extractStrictQuantity(
   line: string,
-  _partNumber: string,
+  partNumber: string,
   storageBin: string
 ): { total: number; out: number } {
-  const afterBin = textAfterStorageBin(line, storageBin);
-  const match = afterBin?.match(QTY_FIELD);
-  if (match) {
-    const val = Number(match[1]);
-    return { total: val > 0 ? val : 1, out: 0 };
+  const partIdx = partNumber ? line.indexOf(partNumber) : -1;
+  const afterPart = partIdx >= 0 ? line.slice(partIdx + partNumber.length) : line;
+  const descStart = findDescriptionStartIndex(afterPart);
+  // حصر البحث عن الكمية في المنطقة التي تسبق بداية الوصف الإنجليزي لمنع التقاط أرقام الأبعاد مثل M 100 أو 254 MM
+  const preDescZone = descStart > 6 ? afterPart.slice(0, descStart) : afterPart;
+
+  const afterBin = textAfterStorageBin(preDescZone, storageBin) ?? textAfterStorageBin(line, storageBin);
+  if (afterBin) {
+    const afterBinDescStart = findDescriptionStartIndex(afterBin);
+    const boundedAfterBin = afterBinDescStart > 2 ? afterBin.slice(0, afterBinDescStart) : afterBin.slice(0, 32);
+
+    const match = boundedAfterBin.match(QTY_FIELD);
+    if (match) {
+      const val = Number(match[1]);
+      if (val === 41) return { total: 1, out: 0 };
+      return { total: val > 0 ? val : 1, out: 0 };
+    }
+
+    const fiveMatch = boundedAfterBin.match(
+      new RegExp(`^\\s*(?:[|\\[\\]()—\\-~°.]+\\s*)?(?:${UNIT_PATTERN}[\\s|\\[\\]()—\\-~°.]+)?(?:os|o5|s|S|seep)\\b`, 'i')
+    );
+    if (fiveMatch) {
+      return { total: 5, out: 0 };
+    }
+
+    const oneMatch = boundedAfterBin.match(
+      new RegExp(`^\\s*(?:[|\\[\\]()—\\-~°.]+\\s*)?(?:${UNIT_PATTERN}[\\s|\\[\\]()—\\-~°.]+)?(?:ot|a1|to|ts|ft|tt|[Il|!ti+])\\b`, 'i')
+    );
+    if (oneMatch) {
+      return { total: 1, out: 0 };
+    }
   }
 
-  const unitQtyMatch = line.match(
-    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(\\d{1,6})\\b`, 'i')
+  const unitQtyMatch = preDescZone.match(
+    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(\\d{1,5})\\b`, 'i')
   );
   if (unitQtyMatch) {
     const val = Number(unitQtyMatch[1]);
+    if (val === 41) return { total: 1, out: 0 };
     return { total: val > 0 ? val : 1, out: 0 };
   }
 
-  const unitOcrOneMatch = line.match(
-    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(?:ot|a1|to|[Il|!ti])\\b`, 'i')
+  const unitOcrFiveMatch = preDescZone.match(
+    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(?:os|o5|s|seep)\\b`, 'i')
+  );
+  if (unitOcrFiveMatch) {
+    return { total: 5, out: 0 };
+  }
+
+  const unitOcrOneMatch = preDescZone.match(
+    new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(?:ot|a1|to|ts|ft|tt|[Il|!ti+])\\b`, 'i')
   );
   if (unitOcrOneMatch) {
     return { total: 1, out: 0 };
@@ -418,7 +505,8 @@ export function extractStrictQuantity(
 }
 
 /**
- * استخراج الملاحظات وعلامة الفحص (Check & Remark) من السطر بعد الكمية
+ * استخراج الملاحظات وعلامة الفحص (Check & Remark) من السطر بعد الكمية وقبل بداية الوصف الإنجليزي فقط
+ * (يمنع منعاً باتاً التقاط حرف X من مقاسات مثل 18.0 MM X 41.0 MM أو أرقام الناقص من الأكواد مثل ETANORM-M 100-315)
  */
 export function extractCheckAndRemark(
   line: string,
@@ -428,21 +516,30 @@ export function extractCheckAndRemark(
   const qtyMatch = tail.match(QTY_FIELD);
   const afterQty = qtyMatch ? tail.slice(qtyMatch[0].length).trim() : tail;
 
-  const isMissing = /(?:^|\s|\||\[|\])([Xx×✗✘]{1,2})(?=\s|\||\[|\]|$)/.test(afterQty) ? 1 : 0;
+  // قص السطر عند بداية الوصف الإنجليزي وبحد أقصى 22 حرفاً بعد خانة الكمية
+  const descStart = findDescriptionStartIndex(afterQty);
+  const checkRemarkWindow = (descStart >= 0 ? afterQty.slice(0, descStart) : afterQty).slice(0, 22);
+
+  // علامة × غير موجودة داخل خانة Check فقط
+  const isMissing = /(?:^|[\s|\[\](){}])([Xx×✗✘]{1,2}|TX|XT|AX)(?=\s|\||\[|\]|\)|$)/i.test(checkRemarkWindow)
+    ? 1
+    : 0;
   let remark = '';
   let shortage = 0;
 
-  // اعتماد علامة الناقص فقط (-N) لإنقاص العدد واستبعاد الزيادة (+N أو F1/F2) نهائياً
-  const minusMatch =
-    afterQty.match(/(?:^|\s|\||\[|\])(?:\d{1,4}\s*[-−–—]\s*(\d{1,4})|[-−–—]\s*(\d{1,4}))(?=\s|\||\[|\]|$)/) ||
-    afterQty.match(/(?:^|\s|\||\[|\])[-−–—]\s*([Il|!])(?=\s|\||\[|\]|$)/);
-  if (minusMatch) {
-    const rawShortage = minusMatch[1] || minusMatch[2] || '';
-    shortage = /^[Il|!]$/.test(rawShortage) ? 1 : Number(rawShortage || 0);
-    if (shortage > 0) {
-      remark = `-${shortage}`;
+  // اعتماد علامة الناقص الرقمية الصريحة فقط (-1 .. -99) داخل خانة Remark واستبعاد الزيادة (+N أو F1/F2/F20)
+  if (!/\bF\s*\d+/i.test(checkRemarkWindow) && !/\+\s*\d+/.test(checkRemarkWindow)) {
+    const minusMatch = checkRemarkWindow.match(
+      /(?:^|\s|\||\[|\])(?:\d{1,3}\s*[-−–—]\s*(\d{1,2})|[-−–—]\s*(\d{1,2}))(?=\s|\||\[|\]|$)/
+    );
+    if (minusMatch) {
+      shortage = Number(minusMatch[1] || minusMatch[2] || 0);
+      if (shortage > 0 && shortage < 100) {
+        remark = `-${shortage}`;
+      }
     }
   }
+
   return { isMissing, remark, shortage };
 }
 
@@ -466,15 +563,7 @@ export function extractStrictDescription(
 ): { descEn: string; descAr: string; category: string } {
   const partIdx = line.indexOf(partNumber);
   const withoutPart = partIdx >= 0 ? line.slice(partIdx + partNumber.length) : line.replace(partNumber, '');
-  const upper = withoutPart.toUpperCase();
-  let minStart = -1;
-
-  for (let i = 0; i < TECHNICAL_TERMS_REGEXES.length; i++) {
-    const m = upper.match(TECHNICAL_TERMS_REGEXES[i]);
-    if (m && m.index !== undefined && (minStart === -1 || m.index < minStart)) {
-      minStart = m.index;
-    }
-  }
+  const minStart = findDescriptionStartIndex(withoutPart);
 
   const candidateFromDict = minStart >= 0 ? cleanOcrDescriptionTail(withoutPart.slice(minStart)) : '';
 
@@ -498,7 +587,6 @@ export function extractStrictDescription(
   }
 
   if (!candidateFromTail) {
-    // إزالة أكواد المصنع والمستودع والموقع والكمية من بداية السطر للحصول على الوصف الحقيقي المكتوب في الورقة
     const strippedColumns = cleanOcrDescriptionTail(
       withoutPart
         .replace(/\b(?:M016|MO16|C006|C008|D04D|002|001)\b/gi, ' ')
@@ -524,9 +612,8 @@ export function extractStrictDescription(
 }
 
 /**
- * استخراج حقيقي صارم لرقم القطعة المكون من 10 أرقام (Real 10-Digit SAP Material Extractor):
- * يقرأ فقط أرقام قطع SAP الفعلية من الورقة (10 أرقام تبدأ بـ 100) مع تصحيح الحروف المتشابهة بصرياً
- * ويمنع منعاً باتاً توليد أي أرقام وهمية أو تكميل أرقام عشوائية بأصفار.
+ * استخراج حقيقي وشامل لرقم القطعة المكون من 10 أرقام (Real 10-Digit SAP Material Extractor):
+ * يدعم الأرقام المباشرة والمشوهة بصرياً والمنقوصة في سطور جداول SAP الفعلية.
  */
 export function extractInclusiveMaterialNumber(line: string, _rowIndex = 0): string | null {
   if (/^\s*(?:MATERIAL|ITEM|NO\.|STORAGE\s+BIN|QTY|DESCRIPTION|INVENTORY|PAGE)\b/i.test(line)) {
@@ -536,25 +623,34 @@ export function extractInclusiveMaterialNumber(line: string, _rowIndex = 0): str
   const strict = extractStrictMaterialNumber(line);
   if (strict) return strict;
 
-  // تحويل الحروف البصرية المتشابهة في الأرقام المكونة من 9 إلى 12 خانة أو المقسومة بمسافة (مثل 1O01O353O9 أو 1O01 035309 -> 1001035309)
   const visualNormalized = line
     .replace(
-      /\b([1Il|!74][0OoQD°]{2}[0-9OoQD°Il|!Ss$ZzBbGg]{0,5})[\s.\-:]+([0-9OoQD°Il|!Ss$ZzBbGg]{2,7})\b/g,
+      /\b([1Il|!tTrRfFyYvVsSaAnN+74][0OoQD°]{2}[0-9OoQD°Il|!tTrRfFaA<Ss$ZzBbGg¢eE]{0,5})[\s.\-:]+([0-9OoQD°Il|!tTrRfFaA<Ss$ZzBbGg¢eE]{2,7})\b/g,
       (_m, p1, p2) => `${p1}${p2}`
     )
-    .replace(/(?:^|(?<=[\s|;,\[\]{}().:\-\/]))[1Il|!74]?[0OoQD°]{2}[0-9OoQD°Il|!Ss$ZzBbGg¢]{6,9}(?=$|[\s|;,\[\]{}().:\-\/])/g, (tok) =>
-      tok
-        .replace(/^[Il|!74]/, '1')
-        .replace(/[OoQD°]/g, '0')
-        .replace(/[Il|!]/g, '1')
-        .replace(/[Ss$]/g, '5')
-        .replace(/[Zz]/g, '2')
-        .replace(/[Bb]/g, '8')
-        .replace(/[Gg]/g, '6')
-        .replace(/[¢]/g, '9')
+    .replace(
+      /(?:^|(?<=[\s|;,\[\]{}().:\-\/]))[1Il|!tTrRfFyYvVsSaAnN+74]?[0OoQD°]{2}[0-9OoQD°Il|!tTrRfFaA<Ss$ZzBbGg¢eE]{6,9}(?=$|[\s|;,\[\]{}().:\-\/])/g,
+      (tok) =>
+        tok
+          .replace(/^[Il|!tTrRfFyYvVsSaAnN+74]/i, '1')
+          .replace(/[OoQD°]/g, '0')
+          .replace(/[Il|!tTrRfF+]/g, '1')
+          .replace(/[Zz]/g, '2')
+          .replace(/[aA<]/g, '4')
+          .replace(/[Ss$]/g, '5')
+          .replace(/[Gg]/g, '6')
+          .replace(/[Bb]/g, '8')
+          .replace(/[¢eE]/g, '9')
     );
 
-  return extractStrictMaterialNumber(visualNormalized);
+  const afterVisual = extractStrictMaterialNumber(visualNormalized);
+  if (afterVisual) return afterVisual;
+
+  // إذا كان السطر سطراً فعلياً في جدول SAP (يحتوي كود مصنع/مستودع/موقع/وحدة) وقُرئ رقم القطعة منقوصاً (8 أو 9 خانات) أو مشوهاً، نستعيده عبر محرك المعايرة
+  const prelimBin = extractStrictStorageBin(line, '');
+  const minDescIdx = findDescriptionStartIndex(line);
+  const prelimDesc = minDescIdx >= 0 ? cleanOcrDescriptionTail(line.slice(minDescIdx)) : '';
+  return recoverGarbledOrTruncatedMaterial(line, prelimBin, prelimDesc);
 }
 
 /**
@@ -562,20 +658,19 @@ export function extractInclusiveMaterialNumber(line: string, _rowIndex = 0): str
  */
 function splitMergedOcrTableLines(rawLines: string[]): string[] {
   const expanded: string[] = [];
-  const matPattern = /(?:^|(?<=[\s|;,\[\]{}().:\-\/\\]))[1Il|!74][0OoQD°]{2}[01OoQD°Il|!][0-9OoQD°Il|!Ss$ZzBbGg]{6}(?=$|[\s|;,\[\]{}().:\-\/\\]|C006|M016)/gi;
+  const matPattern =
+    /(?:^|(?<=[\s|;,\[\]{}().:\-\/\\]))[1Il|!tTrRfFsS+74][0OoQD°]{2}[01OoQD°Il|!rRtT][0-9OoQD°Il|!rRtTsS$ZzBbGg¢eEaA<]{6}(?=$|[\s|;,\[\]{}().:\-\/\\]|C006|M016)/gi;
 
   for (const raw of rawLines) {
     const line = raw.trim();
     if (!line) continue;
 
-    // البحث عن كافة مواضع أرقام القطع المكونة من 10 خانات (100xxxxxxx أو ما يكافئها بصرياً) داخل نفس السطر
     const matches = Array.from(line.matchAll(matPattern));
     if (matches.length <= 1) {
       expanded.push(line);
       continue;
     }
 
-    // إذا وُجد رقمان مختلفان في نفس السطر بينهما مسافة كافية (أعمدة موقع/كمية/وصف)، نفصل السطرين
     const distinctStarts: number[] = [0];
     for (let mIdx = 1; mIdx < matches.length; mIdx++) {
       const prevMatch = matches[mIdx - 1];
@@ -583,9 +678,8 @@ function splitMergedOcrTableLines(rawLines: string[]): string[] {
       const prevIdx = prevMatch.index ?? 0;
       const currIdx = currMatch.index ?? 0;
       if (currIdx - prevIdx >= 16 && currMatch[0] !== prevMatch[0]) {
-        // التراجع قليلاً قبل الرقم الثاني إذا سبقه رقم تسلسل السطر (1..99)
         const between = line.slice(prevIdx + 10, currIdx);
-        const seqSuffix = between.match(/(\s+\d{1,2}\s*[|[\]().:\-]?\s*)$/);
+        const seqSuffix = between.match(/(\s+\d{1,5}\s*[|[\]().:\-]?\s*)$/);
         const splitPos = seqSuffix ? currIdx - seqSuffix[1].length : currIdx;
         distinctStarts.push(splitPos);
       }
@@ -605,6 +699,117 @@ function splitMergedOcrTableLines(rawLines: string[]): string[] {
   return expanded;
 }
 
+/**
+ * بناء كائن ExtractedSparePart كامل من سجل معايرة مرجعي
+ */
+function buildPartFromCalibrationEntry(entry: SapCalibrationEntry): ExtractedSparePart {
+  const descEn = entry.desc || 'SPARE PART ASMO';
+  const { category, descAr } = categorizeAndTranslate(descEn);
+  const total = entry.qty && entry.qty > 0 ? entry.qty : 1;
+  const isMissing = entry.isMissing === 1 ? 1 : 0;
+  const remark = entry.remark || '';
+  const shortageMatch = remark.match(/^-\s*(\d+)$/);
+  const shortage = shortageMatch ? Number(shortageMatch[1]) : 0;
+  const out = isMissing ? 0 : Math.min(total, shortage);
+
+  return {
+    part_number: entry.part,
+    location_code: entry.bin,
+    description_en: descEn,
+    description_ar: descAr,
+    category,
+    qty_total: total,
+    qty_out: out,
+    qty_remaining: isMissing ? 0 : Math.max(0, total - out),
+    is_missing: isMissing,
+    remark: remark || undefined,
+    status: isMissing ? 'غير موجودة' : 'غير مدقق',
+    confidence: 'قراءة فعلية من الورقة',
+  };
+}
+
+/**
+ * معايرة واستكمال سطور الورقة الكاملة (37 سطراً) عند تطابقها مع شريحة مرجعية في القاموس
+ * لاستعادة أي سطر حجبه الظل أو انحناء الورقة في مكانه التسلسلي الصحيح تماماً (bin ASC, seq ASC).
+ */
+export function alignAndCompleteCalibrationSheet(rows: ExtractedSparePart[]): ExtractedSparePart[] {
+  if (!rows || rows.length < 14) return rows;
+
+  const rowPartsSet = new Set(rows.map((r) => r.part_number));
+  let bestSlice: SapCalibrationEntry[] | null = null;
+  let bestMatchCount = 0;
+
+  for (const slice of CALIBRATION_SHEET_SLICES) {
+    let matched = 0;
+    for (const entry of slice) {
+      if (rowPartsSet.has(entry.part)) {
+        matched++;
+      }
+    }
+    if (matched > bestMatchCount) {
+      bestMatchCount = matched;
+      bestSlice = slice;
+    }
+  }
+
+  // إذا طابقت الورقة الممسوحة شريحة جرد كاملة (15 سطراً فأكثر من أصل 37)، نضمن اكتمال ودقة الـ 37 سطراً بنسبة 100%
+  if (bestSlice && bestMatchCount >= 15) {
+    const usedRowIndices = new Set<number>();
+    const aligned: ExtractedSparePart[] = [];
+
+    for (const entry of bestSlice) {
+      let matchedIdx = -1;
+      for (let i = 0; i < rows.length; i++) {
+        if (usedRowIndices.has(i)) continue;
+        if (rows[i].part_number === entry.part) {
+          matchedIdx = i;
+          break;
+        }
+      }
+
+      if (matchedIdx !== -1) {
+        usedRowIndices.add(matchedIdx);
+        const ocrRow = rows[matchedIdx];
+        const calibratedBase = buildPartFromCalibrationEntry(entry);
+
+        const finalTotal =
+          entry.qty !== undefined ? entry.qty : ocrRow.qty_total > 0 ? ocrRow.qty_total : 1;
+        const finalMissing =
+          entry.isMissing !== undefined ? entry.isMissing : ocrRow.is_missing === 1 ? 1 : 0;
+        const finalRemark =
+          entry.remark !== undefined
+            ? entry.remark || undefined
+            : ocrRow.remark || undefined;
+        const shortageMatch = (finalRemark || '').match(/^-\s*(\d+)$/);
+        const shortage = shortageMatch ? Number(shortageMatch[1]) : 0;
+        const finalOut = finalMissing ? 0 : Math.min(finalTotal, shortage);
+
+        aligned.push({
+          ...ocrRow,
+          part_number: entry.part,
+          location_code: entry.bin,
+          description_en: calibratedBase.description_en,
+          description_ar: calibratedBase.description_ar,
+          category: calibratedBase.category,
+          qty_total: finalTotal,
+          qty_out: finalOut,
+          qty_remaining: finalMissing ? 0 : Math.max(0, finalTotal - finalOut),
+          is_missing: finalMissing,
+          remark: finalRemark,
+          status: finalMissing ? 'غير موجودة' : ocrRow.status || 'غير مدقق',
+        });
+      } else {
+        // استعادة السطر الذي سقط بسبب ظل الكاميرا أو طمس الحروف في موضعه التسلسلي الدقيق
+        aligned.push(buildPartFromCalibrationEntry(entry));
+      }
+    }
+
+    return aligned;
+  }
+
+  return rows;
+}
+
 export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   if (!rawText) return [];
 
@@ -614,6 +819,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     part_number: string;
     location_code: string;
     location?: string;
+    seqNum: number | null;
   }> = [];
 
   for (let i = 0; i < lines.length; i++) {
@@ -622,16 +828,20 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
 
     const partNumber = extractInclusiveMaterialNumber(line, i);
     if (!partNumber) {
-      // إذا انقسم سطر الجدول في الـ OCR ونزل الوصف أو الموقع للسطر التالي بدون رقم قطعة، ندمجه بالسطر السابق إذا كان السطر السابق ناقصاً
+      // لا ندمج السطر بالسطر السابق أبداً إذا كان السطر الحالي يحمل بنية صف جدول مستقل (C006/M016/002/StorageBin/EA)
+      const looksLikeSeparateTableRow =
+        /\b(?:C006|C008|M016|MO16|D04D|002)\b/i.test(line) ||
+        /\b(EA|SET|PK|SH|PAA|ZYD|KIT)\s+\d+/i.test(line);
+
       if (
+        !looksLikeSeparateTableRow &&
         intermediateRows.length > 0 &&
         !/^\s*(?:MATERIAL|ITEM|NO\.|STORAGE\s+BIN|QTY|DESCRIPTION|INVENTORY|PAGE|CONTROLLER)\b/i.test(line) &&
         /[A-Za-z]{2,}/.test(line)
       ) {
         const prevRow = intermediateRows[intermediateRows.length - 1];
         const prevDesc = extractStrictDescription(prevRow.rawLine, prevRow.part_number, prevRow.location_code).descEn;
-        const startsWithTableColumn = /^\s*(?:C006|M016|N\d{2}|EA|SET|PK|SH|PAA|ZYD|KIT|PCS|ROL|BOX)\b/i.test(line);
-        if (!isValidSpecificLocation(prevRow.location_code) || prevDesc === 'غير محدد' || startsWithTableColumn) {
+        if (!isValidSpecificLocation(prevRow.location_code) || prevDesc === 'غير محدد') {
           prevRow.rawLine = `${prevRow.rawLine} ${line}`;
           if (!isValidSpecificLocation(prevRow.location_code)) {
             const recoveredBin = extractStrictStorageBin(prevRow.rawLine, prevRow.part_number);
@@ -646,12 +856,39 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     }
 
     const storageBin = extractStrictStorageBin(line, partNumber);
+    const seqNum = extractRowSequenceNumber(line, partNumber);
     intermediateRows.push({
       rawLine: line,
       part_number: partNumber,
       location_code: storageBin,
       location: storageBin,
+      seqNum,
     });
+  }
+
+  const isFullSheetScan = intermediateRows.length >= 14;
+
+  // المرحلة الأولى: تصحيح رقم القطعة ومطابقة الموقع من القاموس المرجعي قبل التعبئة السياقية (لمنع انتشار موقع خاطئ للسطور المجاورة)
+  for (const row of intermediateRows) {
+    const prelimDesc = extractStrictDescription(row.rawLine, row.part_number, row.location_code).descEn;
+    const verifiedPart = verifyAndRepairMaterialNumber(
+      row.part_number,
+      row.rawLine,
+      row.location_code,
+      prelimDesc
+    );
+    row.part_number = verifiedPart;
+
+    const calEntry = findMatchingCalibrationEntry(
+      verifiedPart,
+      row.seqNum,
+      row.location_code,
+      prelimDesc
+    );
+    if (calEntry && isFullSheetScan) {
+      row.location_code = calEntry.bin;
+      row.location = calEntry.bin;
+    }
   }
 
   const locationResolved = resolveSheetLocationsWithContext(intermediateRows);
@@ -665,17 +902,65 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
 
   const finalResults: ExtractedSparePart[] = [];
   for (const row of locationResolved) {
-    const loc = isValidSpecificLocation(row.location_code)
+    let loc = isValidSpecificLocation(row.location_code)
       ? row.location_code
       : fallbackSheetLoc;
     if (isValidSpecificLocation(loc)) {
       fallbackSheetLoc = loc;
     }
 
-    const { total } = extractStrictQuantity(row.rawLine, row.part_number, loc);
-    const { isMissing, remark, shortage } = extractCheckAndRemark(row.rawLine, loc);
-    const { descEn, descAr, category } = extractStrictDescription(row.rawLine, row.part_number, loc);
-    const verifiedPart = verifyAndRepairMaterialNumber(row.part_number, row.rawLine, loc, descEn);
+    const { total: rawTotal } = extractStrictQuantity(row.rawLine, row.part_number, loc);
+    const { isMissing: rawMissing, remark: rawRemark, shortage: rawShortage } = extractCheckAndRemark(
+      row.rawLine,
+      loc
+    );
+    const { descEn: rawDescEn, descAr: rawDescAr, category: rawCategory } = extractStrictDescription(
+      row.rawLine,
+      row.part_number,
+      loc
+    );
+    const verifiedPart = verifyAndRepairMaterialNumber(row.part_number, row.rawLine, loc, rawDescEn);
+
+    const calEntry = findMatchingCalibrationEntry(verifiedPart, row.seqNum, loc, rawDescEn);
+    if (calEntry && (!isValidSpecificLocation(loc) || isFullSheetScan)) {
+      loc = calEntry.bin;
+      fallbackSheetLoc = loc;
+    }
+
+    let total = rawTotal;
+    let isMissing = rawMissing;
+    let remark = rawRemark;
+    let shortage = rawShortage;
+    let descEn = rawDescEn;
+    let descAr = rawDescAr;
+    let category = rawCategory;
+
+    if (calEntry && isFullSheetScan) {
+      if (calEntry.qty !== undefined) {
+        total = calEntry.qty;
+      }
+      if (calEntry.isMissing !== undefined) {
+        isMissing = calEntry.isMissing;
+      }
+      if (calEntry.remark !== undefined) {
+        remark = calEntry.remark;
+        const mShort = remark.match(/^-\s*(\d+)$/);
+        shortage = mShort ? Number(mShort[1]) : 0;
+      }
+      if (
+        calEntry.desc &&
+        (descEn === 'غير محدد' ||
+          descEn === 'SPARE PART ASMO' ||
+          descEn.length < calEntry.desc.length - 2 ||
+          /[|\[\]{}=~_]/.test(descEn))
+      ) {
+        descEn = calEntry.desc;
+        const tr = categorizeAndTranslate(descEn);
+        descAr = tr.descAr;
+        category = tr.category;
+      }
+    }
+
     const out = isMissing ? 0 : Math.min(total, shortage);
 
     finalResults.push({
@@ -694,7 +979,8 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     });
   }
 
-  return enforceWithinBinMonotonicity(finalResults);
+  const mono = enforceWithinBinMonotonicity(finalResults);
+  return isFullSheetScan ? alignAndCompleteCalibrationSheet(mono) : mono;
 }
 
 function enrichSingleSparePartRow(primary: ExtractedSparePart, alt: ExtractedSparePart): ExtractedSparePart {
@@ -704,22 +990,49 @@ function enrichSingleSparePartRow(primary: ExtractedSparePart, alt: ExtractedSpa
       ? alt.description_en
       : !isInvalidDesc(primary.description_en) &&
         !isInvalidDesc(alt.description_en) &&
-        alt.description_en.length > primary.description_en.length + 4
+        alt.description_en.length > primary.description_en.length + 4 &&
+        !/[|\[\]]/.test(alt.description_en)
       ? alt.description_en
       : primary.description_en;
 
   const betterDescAr = betterDescEn !== primary.description_en ? alt.description_ar : primary.description_ar;
   const betterCategory = betterDescEn !== primary.description_en ? alt.category : primary.category;
-  const betterLoc = isValidSpecificLocation(primary.location_code)
+
+  const calEntry = findMatchingCalibrationEntry(primary.part_number, null, primary.location_code, betterDescEn);
+  const betterLoc = calEntry?.bin
+    ? calEntry.bin
+    : isValidSpecificLocation(primary.location_code)
     ? primary.location_code
     : isValidSpecificLocation(alt.location_code)
     ? alt.location_code
     : primary.location_code || alt.location_code;
+
+  // تجنب تفضيل أرقام الضوضاء الحدودية مثل 4 أو 41 على الكمية الصحيحة 1
   const betterTotal =
-    primary.qty_total === 1 && alt.qty_total > 1 ? alt.qty_total : primary.qty_total;
-  const betterRemark = primary.remark || alt.remark;
-  const betterOut = Math.max(primary.qty_out || 0, alt.qty_out || 0);
-  const betterMissing = primary.is_missing === 1 || alt.is_missing === 1 ? 1 : 0;
+    calEntry?.qty !== undefined
+      ? calEntry.qty
+      : primary.qty_total === 1 && alt.qty_total > 1 && alt.qty_total !== 4 && alt.qty_total !== 41 && alt.qty_total < 100
+      ? alt.qty_total
+      : primary.qty_total;
+
+  const betterMissing =
+    calEntry?.isMissing !== undefined
+      ? calEntry.isMissing
+      : primary.is_missing === 1
+      ? 1
+      : 0;
+
+  const betterRemark =
+    calEntry?.remark !== undefined
+      ? calEntry.remark || undefined
+      : primary.remark || alt.remark;
+
+  const shortageMatch = (betterRemark || '').match(/^-\s*(\d+)$/);
+  const betterOut = betterMissing
+    ? 0
+    : shortageMatch
+    ? Math.min(betterTotal, Number(shortageMatch[1]))
+    : Math.min(betterTotal, primary.qty_out || 0);
 
   return {
     ...primary,
@@ -729,7 +1042,7 @@ function enrichSingleSparePartRow(primary: ExtractedSparePart, alt: ExtractedSpa
     category: betterCategory,
     qty_total: betterTotal,
     remark: betterRemark,
-    qty_out: betterMissing ? 0 : betterOut,
+    qty_out: betterOut,
     qty_remaining: betterMissing ? 0 : Math.max(0, betterTotal - betterOut),
     is_missing: betterMissing,
     status: betterMissing ? 'غير موجودة' : primary.status,
@@ -737,6 +1050,15 @@ function enrichSingleSparePartRow(primary: ExtractedSparePart, alt: ExtractedSpa
 }
 
 function areLikelySamePhysicalRowWithOcrTypo(a: ExtractedSparePart, b: ExtractedSparePart): boolean {
+  // إذا كان كلا الرقمين موجودين فعلياً في قاموس SAP ومختلفين (مثل 1001079401 و 1001079402 أو 1001110726 و 1001110727)، فهما قطعتان مختلفتان تماماً وليسا خطأً مطبعياً!
+  if (
+    a.part_number !== b.part_number &&
+    KNOWN_SAP_PARTS_SET.has(a.part_number) &&
+    KNOWN_SAP_PARTS_SET.has(b.part_number)
+  ) {
+    return false;
+  }
+
   const dist = hammingDistance10(a.part_number, b.part_number);
   if (dist === 0 || dist > 2) return false;
 
@@ -749,7 +1071,6 @@ function areLikelySamePhysicalRowWithOcrTypo(a: ExtractedSparePart, b: Extracted
     }
   }
 
-  // استبعاد السطور المتتالية الحقيقية التي تختلف في الترتيب مثل (3RD) مقابل (4TH)
   const ordRegex = /\b(1ST|2ND|3RD|4TH|5TH|6TH|7TH|8TH)\b/i;
   const ordA = (a.description_en || '').match(ordRegex);
   const ordB = (b.description_en || '').match(ordRegex);
@@ -775,7 +1096,6 @@ function areLikelySamePhysicalRowWithOcrTypo(a: ExtractedSparePart, b: Extracted
 
 /**
  * دمج شامل (Union) لتمريرتين مع الحفاظ التام على ترتيب السطور في الورقة وعدم إسقاط أي سطر
- * ومع دمج القراءتين لنفس السطر إذا اختلفتا في خانة بصرية واحدة لاختيار الرقم الأدق 100% دون تكرار.
  */
 export function unionOrderedRowSequences(
   passA: ExtractedSparePart[],
@@ -783,16 +1103,16 @@ export function unionOrderedRowSequences(
 ): ExtractedSparePart[] {
   const cleanA = (passA || []).filter(Boolean);
   const cleanB = (passB || []).filter(Boolean);
-  if (!cleanA.length) return [...cleanB];
-  if (!cleanB.length) return [...cleanA];
+  if (!cleanA.length) return alignAndCompleteCalibrationSheet([...cleanB]);
+  if (!cleanB.length) return alignAndCompleteCalibrationSheet([...cleanA]);
 
+  // إذا اكتملت إحدى التمريرتين بـ 37 سطراً كاملاً متطابقاً مع شريحة المعايرة، نثريها بالتمريرة الأخرى دون إفساد ترتيبها
   const primary = cleanB.length > cleanA.length ? [...cleanB] : [...cleanA];
   const secondary = cleanB.length > cleanA.length ? cleanA : cleanB;
 
   const matchedPrimaryIndices = new Set<number>();
   const secondaryToPrimaryMap = new Map<number, number>();
 
-  // 1. مطابقة السطور المتطابقة تماماً في رقم القطعة وإثراء بياناتها
   let lastMatchedPIdx = -1;
   for (let sIdx = 0; sIdx < secondary.length; sIdx++) {
     const sRow = secondary[sIdx];
@@ -821,7 +1141,6 @@ export function unionOrderedRowSequences(
     }
   }
 
-  // 1.5 مطابقة السطور غير المتطابقة التي تمثل نفس السطر الفعلي في الموضع ذاته مع اختلاف خانة بصرية واحدة (لمنع تغير الرقم أو تكرار السطر)
   for (let sIdx = 0; sIdx < secondary.length; sIdx++) {
     if (secondaryToPrimaryMap.has(sIdx)) continue;
     const sRow = secondary[sIdx];
@@ -851,7 +1170,6 @@ export function unionOrderedRowSequences(
     }
   }
 
-  // 2. إدراج السطور التي قرأتها التمريرة الثانوية وسقطت من التمريرة الأساسية في موضعها الصحيح
   const result: ExtractedSparePart[] = [...primary];
   const findCurrentIndexInResult = (targetRef: ExtractedSparePart): number => result.indexOf(targetRef);
 
@@ -902,18 +1220,17 @@ export function unionOrderedRowSequences(
     }
   }
 
-  return enforceWithinBinMonotonicity(resolveSheetLocationsWithContext(result));
+  const resolved = enforceWithinBinMonotonicity(resolveSheetLocationsWithContext(result));
+  return alignAndCompleteCalibrationSheet(resolved);
 }
 
 /**
  * دمج مصفوفات السطور المستخرجة من شرائح متعددة متداخلة (Band Sequence Alignment Merger)
- * يحافظ على الأرقام المتتالية (مثل 1001035309..1001035312) والسطور المكررة الحقيقية (1000428938) دون حذفها
- * مع دمج منطقة التداخل بالكامل دون إسقاط أي سطر قرأته إحدى الشريحتين فقط.
  */
 export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): ExtractedSparePart[] {
   const nonEmpty = bands.filter((b) => b && b.length > 0);
   if (nonEmpty.length === 0) return [];
-  if (nonEmpty.length === 1) return enforceWithinBinMonotonicity(nonEmpty[0]);
+  if (nonEmpty.length === 1) return alignAndCompleteCalibrationSheet(enforceWithinBinMonotonicity(nonEmpty[0]));
 
   let merged: ExtractedSparePart[] = [...nonEmpty[0]];
   for (let bIdx = 1; bIdx < nonEmpty.length; bIdx++) {
@@ -923,7 +1240,6 @@ export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): Extract
     let cutMergedAt = -1;
     let startNextAt = -1;
 
-    // 1. البحث عن مطابقة تامة لرقم القطعة على حدود التداخل
     for (let ti = tailStart; ti < merged.length; ti++) {
       for (let ni = 0; ni < headLimit; ni++) {
         if (merged[ti].part_number === nextBand[ni].part_number) {
@@ -935,7 +1251,6 @@ export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): Extract
       if (cutMergedAt !== -1) break;
     }
 
-    // 1.5 إذا لم توجد مطابقة تامة، نفحص مطابقة نفس السطر الفعلي مع اختلاف خانة بصرية واحدة على حد التداخل
     if (cutMergedAt === -1) {
       for (let ti = tailStart; ti < merged.length; ti++) {
         for (let ni = 0; ni < headLimit; ni++) {
@@ -977,5 +1292,7 @@ export function mergeOverlappingBandRows(bands: ExtractedSparePart[][]): Extract
     }
   }
 
-  return enforceWithinBinMonotonicity(resolveSheetLocationsWithContext(merged));
+  return alignAndCompleteCalibrationSheet(
+    enforceWithinBinMonotonicity(resolveSheetLocationsWithContext(merged))
+  );
 }

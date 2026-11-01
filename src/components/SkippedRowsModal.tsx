@@ -16,10 +16,14 @@ import { sanitizeLocationCode, isValidSpecificLocation, strict10DigitRegexFilter
 export interface SkippedRow {
   id: string;
   row_number?: number;
+  rowIndex?: number;
   raw_text: string;
   part_number?: string;
+  rawPartNumber?: string;
   location?: string;
+  rawLocation?: string;
   quantity?: number;
+  rawQuantity?: number | string;
   description_en?: string;
   is_missing?: number;
   reason: string;

@@ -95,8 +95,8 @@ export async function authorizeDeletion(action: string): Promise<void> {
 }
 
 export async function authorizeMutation(action: string): Promise<void> {
-  // تفعيل طلب الرقم السري حصرياً عند أي عملية مسح أو حذف أو تصفير لمنع فقدان البيانات، مع إبقاء الحفظ الفوري بدون رقم سري
-  if (/حذف|مسح|إزالة|تصفير|delete|wipe|clear/i.test(action)) {
+  // تفعيل طلب الرقم السري حصرياً عند أي عملية مسح أو حذف أو تصفير لمنع فقدان البيانات، مع إبقاء الحفظ والاستعادة الفورية بدون رقم سري
+  if (!/دون حذف/.test(action) && /حذف|مسح|إزالة|تصفير|delete|wipe|clear/i.test(action)) {
     return authorizeDeletion(action);
   }
   return Promise.resolve();

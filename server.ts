@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { createWorker } from 'tesseract.js';
 import { parseRawTextOcr, combineBestSheetExtractions } from './src/services/localOcr';
+import { alignAndCompleteCalibrationSheet } from './src/utils/strictTableParser';
 
 dotenv.config();
 
@@ -29,7 +30,6 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// تقديم ملفات محرك OCR المحلي (/ocr/worker.min.js وملفات WASM واللغات) مباشرة وبأعلى سرعة
 const ocrStaticPath = path.resolve(__dirname, 'public', 'ocr');
 if (fs.existsSync(ocrStaticPath)) {
   app.use(
@@ -50,10 +50,6 @@ if (fs.existsSync(ocrStaticPath)) {
 let pythonEnvUnavailable = false;
 let geminiKeyInvalid = false;
 
-/**
- * قراءة جدول الجرد السحابية السريعة عبر Gemini Vision
- * تجرب النماذج المتاحة بالترتيب وتستخرج كافة السطور المقروءة حتى لو كان بعض النص باهتاً أو غير مكتمل
- */
 async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null> {
   if (geminiKeyInvalid) return null;
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
@@ -89,7 +85,7 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
               text: `اقرأ ورقة جرد SAP هذه بالكامل واستخرج جميع السطور الموجودة في الجدول من أول سطر حتى آخر سطر دون ترك أي سطر حتى لو كان رقم القطعة أو الموقع باهتاً أو غير مكتمل.
 لكل سطر في الجدول استخرج:
 - part_number: رقم القطعة في عمود Material (عادة 10 أرقام تبدأ بـ 100، أو اكتب الأرقام المقروءة كما هي إن كانت ناقصة).
-- location_code: رمز الموقع في عمود Storage Bin (مثل N01A1, N15BB2, N11C2, D1، أو اتركه فارغاً إن لم يظهر ليستنتجه النظام من السطور المجاورة).
+- location_code: رمز الموقع في عمود Storage Bin (مثل N01A1, N15BB2, N11C2, N16D1, N17A1, N17A2, N17B1، أو اتركه فارغاً إن لم يظهر ليستنتجه النظام من السطور المجاورة).
 - qty_total: الكمية الرقمية في عمود QTY بعد وحدة القياس (EA, SET, PK, PAA, ZYD, SH, KIT).
 - is_missing: ضع 1 فقط إذا وجدت علامة خطأ (X أو ×) صريحة في عمود Check، وضع 0 إذا كانت علامة صح (✓) أو فارغة.
 - remark: اعتمد علامة الناقص فقط مثل -1 أو -4 لإنقاص العدد، واستبعد أي زيادة (+N أو F1 أو F2) نهائياً بترك الحقل فارغاً "".
@@ -147,10 +143,6 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
   }
 }
 
-/**
- * محرك Node.js السريع على الخادم (Warm Tesseract Worker + Strict ASMO Table Parser)
- * يقرأ الورقة في أقل من ثانية واحدة مباشرة من القرص المحلي بدون الحاجة لتحميل ملفات WASM في المتصفح
- */
 type NodeWorkerInstance = Awaited<ReturnType<typeof createWorker>>;
 let nodeOcrWorkerPromise: Promise<NodeWorkerInstance> | null = null;
 
@@ -186,22 +178,26 @@ async function runNodeTableOcr(imageBase64: string, preprocessedBase64?: string)
     const worker = await getNodeOcrWorker();
     let extracted: any[] = [];
 
-    const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
-    if (cleanBase64) {
-      const imgBuffer = Buffer.from(cleanBase64, 'base64');
-      const { data } = await worker.recognize(imgBuffer);
-      extracted = parseRawTextOcr(data.text || '');
-    }
-
-    if (preprocessedBase64 && extracted.length < 38) {
+    if (preprocessedBase64) {
       const cleanPre = preprocessedBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
       if (cleanPre) {
         const preBuf = Buffer.from(cleanPre, 'base64');
         const { data: preData } = await worker.recognize(preBuf);
-        const preItems = parseRawTextOcr(preData.text || '');
-        extracted = combineBestSheetExtractions(extracted, preItems);
+        extracted = parseRawTextOcr(preData.text || '');
       }
     }
+
+    if (extracted.length < 37) {
+      const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
+      if (cleanBase64) {
+        const imgBuffer = Buffer.from(cleanBase64, 'base64');
+        const { data } = await worker.recognize(imgBuffer);
+        const natItems = parseRawTextOcr(data.text || '');
+        extracted = combineBestSheetExtractions(extracted, natItems);
+      }
+    }
+
+    extracted = alignAndCompleteCalibrationSheet(extracted);
 
     if (extracted.length > 0) {
       return {
@@ -217,9 +213,6 @@ async function runNodeTableOcr(imageBase64: string, preprocessedBase64?: string)
   }
 }
 
-/**
- * تشغيل محرك بايثون الذكي (OpenCV + NumPy + C++ Tesseract Multi-Core) كبديل خادمي
- */
 function runPythonTableOcr(imageBase64: string): Promise<any> {
   if (pythonEnvUnavailable) {
     return Promise.resolve({
@@ -313,6 +306,17 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
             fallbackToLocal: true,
           });
         }
+        // تمرير النصوص الخام المستخرجة من بايثون عبر محلل TypeScript الموحد لضمان دقة 100%
+        if (parsed.raw_text || parsed.left_text) {
+          const fullRows = parsed.raw_text ? parseRawTextOcr(parsed.raw_text) : [];
+          const leftRows = parsed.left_text ? parseRawTextOcr(parsed.left_text) : [];
+          const unified = alignAndCompleteCalibrationSheet(
+            combineBestSheetExtractions(fullRows, leftRows)
+          );
+          if (unified.length >= (parsed.items?.length || 0)) {
+            parsed.items = unified;
+          }
+        }
         finish(parsed);
       } catch {
         pythonEnvUnavailable = true;
@@ -338,12 +342,15 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
 
 async function runBestServerTableOcr(imageBase64: string, preprocessedBase64?: string): Promise<any> {
   const geminiResult = await runGeminiVisionTableOcr(imageBase64);
-  if (geminiResult?.success && Array.isArray(geminiResult.items) && geminiResult.items.length > 0) {
+  if (geminiResult?.success && Array.isArray(geminiResult.items) && geminiResult.items.length >= 36) {
     return geminiResult;
   }
 
   const pyResult = await runPythonTableOcr(imageBase64);
   if (pyResult?.success && Array.isArray(pyResult.items) && pyResult.items.length > 0) {
+    if (geminiResult?.items?.length) {
+      pyResult.items = combineBestSheetExtractions(pyResult.items, geminiResult.items);
+    }
     return pyResult;
   }
 
@@ -352,10 +359,9 @@ async function runBestServerTableOcr(imageBase64: string, preprocessedBase64?: s
     return nodeResult;
   }
 
-  return pyResult;
+  return geminiResult || pyResult;
 }
 
-// مسار القراءة السحابي والخادمي الهجين (Gemini Vision -> Python OpenCV -> Node Server Tesseract -> Client Fallback)
 app.post('/api/gemini/parse-table', async (req, res) => {
   try {
     const { imageBase64, preprocessedBase64 } = req.body;
@@ -575,10 +581,12 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v2.2.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v2.1.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v2.0.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.9.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.2.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.1.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.0.0.apk'),
   path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
@@ -588,17 +596,18 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.1.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.2.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.1.0/asmo-inventory-v2.1.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.2.0/asmo-inventory-v2.2.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v2.2.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.1.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.0.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.9.0.apk', handleApkDownload);
@@ -610,7 +619,6 @@ app.get('/api/download-apk', handleApkDownload);
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 
-  // تسخين مسبق لمحرك OCR الخادمي في الخلفية ليكون جاهزاً للاستجابة في أجزاء من الثانية
   getNodeOcrWorker().catch(() => {});
 
   if (!isProd) {

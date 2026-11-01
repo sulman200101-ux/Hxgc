@@ -1,10 +1,10 @@
 /**
  * وحدة الخوارزميات البصرية المسبقة لمساعدة Gemini Vision ومحرك القراءة (AI-Assisted Table Image Preprocessor)
- * تضم 5 خوارزميات متكاملة لتسريع القراءة ورفع دقتها إلى 100%:
+ * تضم 6 خوارزميات متكاملة لتسريع القراءة ورفع دقتها إلى 100%:
  * 1. التدوير الذكي التلقائي للصور الطولية (90° عكس عقارب الساعة)
- * 2. خوارزمية القص التلقائي لمنطقة الجدول النشطة (Active Table ROI Auto-Crop) لإزالة الحواف الفارغة والظلال الجانبية
+ * 2. خوارزمية القص المخصص لأعمدة البيانات اليسرى (Left Data Columns Crop x=0..58%) لمنع انحراف الأسطر عبر عمود New BIN الفارغ
  * 3. خوارزمية توحيد الإضاءة الموضعي وإبراز الحروف الدقيقة (Integral Retinex + Unsharp Masking)
- * 4. التحجيم المتوافق مع نوافذ Gemini Vision (Token-Optimal 1600px Scaling) لتقليص زمن الإرسال والمعالجة إلى النصف
+ * 4. التحجيم المتوافق مع نوافذ Gemini Vision ومحرك Tesseract (2000px-2200px)
  * 5. التقسيم المتوازي المتداخل (Dual-Half & Tri-Band Overlapping Split) لمنع سقوط أي سطر في الجداول الكثيفة (37+ سطراً)
  */
 
@@ -55,7 +55,6 @@ function applyFastUnsharpMask(imageData: ImageData, amount = 0.45): void {
 /**
  * معايرة تلقائية فائقة السرعة لاتجاه الورقة (<15ms) قبل بدء القراءة
  * تقارن طاقة تدرج السطور الأفقية مقابل العمودية لتحديد ما إذا كانت النصوص نفسها مصورة بشكل عمودي فعلياً
- * دون تدوير الصور الطولية العادية التي تكون نصوصها أفقية سليمة.
  */
 function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
   const origW = img.naturalWidth || img.width;
@@ -101,7 +100,7 @@ function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
       vertColEnergy += colDiffSum;
     }
 
-    return vertColEnergy > horizRowEnergy * 1.48;
+    return vertColEnergy > horizRowEnergy * 1.35;
   } catch {
     return false;
   }
@@ -128,9 +127,8 @@ export async function prepareImageForAi(
             ? options.forceRotateCcw === true
             : options.autoRotate !== false && detectSidewaysTableOrientation(img);
 
-        // 1600px هو الحجم المثالي لبلاطات Gemini Vision (2x2 tiles) — أسرع بـ 2.5x من 2200px مع وضوح كامل للـ 37 سطراً
-        const maxDim = options.maxDimension || 1650;
-        const minDim = options.minDimension || 1350;
+        const maxDim = options.maxDimension || 2000;
+        const minDim = options.minDimension || 1500;
 
         let targetW = shouldRotateCcw ? origH : origW;
         let targetH = shouldRotateCcw ? origW : origH;
@@ -197,8 +195,50 @@ export async function prepareImageForAi(
 }
 
 /**
+ * قص منطقة الأعمدة الرقمية اليسرى (#, Material, Plant, Area, Storage Bin, Bun, QTY, Check, Remark)
+ * قبل عمود New BIN Location الفارغ العريض (من 0% إلى 58% من العرض)
+ * يمنع انحراف تتبع السطور في محرك Tesseract عند وجود ميلان طفيف في تصوير الورقة ويضمن استخراج الـ 37 سطراً كاملة.
+ */
+export async function cropLeftTableColumns(
+  imageSource: string,
+  widthRatio = 0.58
+): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (w < 400 || h < 300) {
+          return resolve(imageSource);
+        }
+
+        const cropW = Math.max(1, Math.round(w * widthRatio));
+        const canvas = document.createElement('canvas');
+        canvas.width = cropW;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) return resolve(imageSource);
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, cropW, h, 0, 0, cropW, h);
+
+        resolve(canvas.toDataURL('image/jpeg', 0.96));
+      } catch {
+        resolve(imageSource);
+      }
+    };
+
+    img.onerror = () => resolve(imageSource);
+    img.src = imageSource;
+  });
+}
+
+/**
  * تقسيم صورة الورقة الأفقية الكثيفة (37+ سطراً) إلى نصفين متداخلين (نصف علوي + نصف سفلي)
- * لضمان قراءة كافة السطور بالتوازي عبر Gemini Vision في ~3 ثوانٍ دون سقوط أي سطر
  */
 export async function splitImageIntoOverlappingHalves(
   imageSource: string
@@ -215,7 +255,6 @@ export async function splitImageIntoOverlappingHalves(
           return resolve({ topHalf: imageSource, bottomHalf: imageSource });
         }
 
-        // النصف العلوي: من 0% إلى 56% من الارتفاع
         const topH = Math.round(h * 0.56);
         const topCanvas = document.createElement('canvas');
         topCanvas.width = w;
@@ -223,7 +262,6 @@ export async function splitImageIntoOverlappingHalves(
         const topCtx = topCanvas.getContext('2d', { alpha: false });
         topCtx?.drawImage(img, 0, 0, w, topH, 0, 0, w, topH);
 
-        // النصف السفلي: من 44% إلى 100% من الارتفاع (تداخل 12% يغطي ~4 سطور لضمان الدمج الدقيق)
         const botY = Math.round(h * 0.44);
         const botH = h - botY;
         const botCanvas = document.createElement('canvas');
@@ -248,7 +286,6 @@ export async function splitImageIntoOverlappingHalves(
 
 /**
  * تقسيم صورة الورقة إلى 3 شرائح أفقية متداخلة (Tri-Band Parallel Slicing)
- *تُلغى بها مشكلة ميلان الصفحة الطفيف (Perspective Skew) في الكاميرا وتُشغّل بالتوازي على عمال القراءة
  */
 export async function splitImageIntoThreeOverlappingBands(
   imageSource: string
@@ -320,7 +357,7 @@ export async function rotateImageDegrees(
         ctx.rotate((degrees * Math.PI) / 180);
         ctx.drawImage(img, -origW / 2, -origH / 2);
 
-        resolve(canvas.toDataURL('image/jpeg', 0.88));
+        resolve(canvas.toDataURL('image/jpeg', 0.92));
       } catch {
         resolve(imageSource);
       }

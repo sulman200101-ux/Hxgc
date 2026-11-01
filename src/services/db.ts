@@ -1,5 +1,5 @@
 import { approvalLines, canonicalDocumentId, interpretMark, validateDocument, type StockDocument } from './documents';
-import { authorizeMutation, authorizeDeletion } from './security';
+import { authorizeMutation } from './security';
 import type { InventoryItem, LocationSummary } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
 import {
@@ -428,7 +428,11 @@ class InventoryDatabase {
     let missingCount = 0;
     const toSave: InventoryItem[] = [];
 
+    const batchMap = new Map<string, InventoryItem>();
     for (const raw of items) {
+      if (!raw || (!raw.location_code && !raw.location)) {
+        throw new Error('بيانات القراءة غير مكتملة؛ لم يتغير المخزون');
+      }
       const cleanPart = String(raw.part_number || '').trim();
       if (!/^\d{10}$/.test(cleanPart)) continue;
       const cleanLoc =
@@ -456,23 +460,36 @@ class InventoryDatabase {
       }
       if (isMissing) missingCount++;
 
-      toSave.push({
-        part_number: cleanPart,
-        location_code: cleanLoc,
-        old_location: isMoved && existing ? existing.location_code : existing?.old_location,
-        description_en: descEn,
-        description_ar: raw.description_ar || existing?.description_ar || descAr,
-        category: raw.category || existing?.category || category,
-        qty_total: total,
-        qty_out: out,
-        qty_remaining: remaining,
-        is_moved: isMoved,
-        is_missing: isMissing,
-        remark: raw.remark ?? existing?.remark,
-        status: isMissing ? 'غير موجودة' : raw.status || 'غير مدقق',
-        updated_at: now,
-      });
+      const prevInBatch = batchMap.get(cleanPart);
+      if (prevInBatch) {
+        const combinedTotal = prevInBatch.qty_total + total;
+        const combinedOut = isMissing ? 0 : Math.min(combinedTotal, prevInBatch.qty_out + out);
+        batchMap.set(cleanPart, {
+          ...prevInBatch,
+          qty_total: combinedTotal,
+          qty_out: combinedOut,
+          qty_remaining: isMissing ? 0 : Math.max(0, combinedTotal - combinedOut),
+        });
+      } else {
+        batchMap.set(cleanPart, {
+          part_number: cleanPart,
+          location_code: cleanLoc,
+          old_location: isMoved && existing ? existing.location_code : existing?.old_location,
+          description_en: descEn,
+          description_ar: raw.description_ar || existing?.description_ar || descAr,
+          category: raw.category || existing?.category || category,
+          qty_total: total,
+          qty_out: out,
+          qty_remaining: remaining,
+          is_moved: isMoved,
+          is_missing: isMissing,
+          remark: raw.remark ?? existing?.remark,
+          status: isMissing ? 'غير موجودة' : raw.status || 'غير مدقق',
+          updated_at: now,
+        });
+      }
     }
+    toSave.push(...batchMap.values());
 
     if (toSave.length > 0) {
       await this.commitChanges(toSave, []);
@@ -488,12 +505,12 @@ class InventoryDatabase {
   }
 
   public async deleteItem(partNumber: string): Promise<void> {
-    await authorizeDeletion(`حذف القطعة (${partNumber})`);
+    await authorizeMutation('حذف قطعة');
     await this.commitChanges([], [partNumber]);
   }
 
   public async deleteLocation(locationCode: string): Promise<number> {
-    await authorizeDeletion(`حذف الموقع (${locationCode}) وجميع قطعه`);
+    await authorizeMutation('حذف موقع');
     const items = this.getItemsByLocation(locationCode);
     await this.commitChanges([], items.map(item => item.part_number));
     return items.length;
@@ -987,16 +1004,16 @@ class InventoryDatabase {
   }
 
   public async wipeAllData(): Promise<void> {
-    await authorizeDeletion('مسح المخزون مع إبقاء سجل التدقيق');
+    await authorizeMutation('مسح المخزون مع إبقاء سجل التدقيق');
     await this.commitChanges([], [], true);
   }
 
   /**
    * مسح شامل لكافة بيانات البرنامج (الأصناف، المواقع، أوراق الجرد، طلبات النقل، والسجلات)
-   * بعد طلب الرقم السري لمنع فقدان البيانات، بحيث يعود البرنامج فارغاً بالكامل (0 قطعة و 0 مستند).
+   * بعد طلب اعتماد المشرف، بحيث يعود البرنامج فارغاً بالكامل (0 قطعة و 0 مستند).
    */
   public async fullProgramWipe(): Promise<void> {
-    await authorizeDeletion('المسح الشامل لكافة بيانات البرنامج والمستندات');
+    await authorizeMutation('اعتماد المسح الشامل لكافة بيانات البرنامج والمستندات');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction([STORE_NAME, 'documents', 'audit'], 'readwrite');

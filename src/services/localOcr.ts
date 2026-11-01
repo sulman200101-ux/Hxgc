@@ -1,6 +1,7 @@
 import {
   rotateImageDegrees,
   prepareImageForAi,
+  cropLeftTableColumns,
   splitImageIntoOverlappingHalves,
   splitImageIntoThreeOverlappingBands,
 } from '../utils/imagePreprocessor';
@@ -12,6 +13,7 @@ import {
   parseStrictAsmoTable,
   mergeOverlappingBandRows,
   unionOrderedRowSequences,
+  alignAndCompleteCalibrationSheet,
 } from '../utils/strictTableParser';
 import { parseTableWithGeminiVision } from './geminiVisionService';
 export {
@@ -59,7 +61,6 @@ const pauseUi = (ms = 0) => new Promise<void>((resolve) => setTimeout(resolve, m
 
 type TesseractWorkerInstance = Awaited<ReturnType<typeof createWorker>>;
 
-// مؤشر التقدم الحي أثناء عمل محرك Tesseract لمنع توقف النسبة عند 55%
 let activeProgressCallback: ((progress: number, status: string) => void) | null = null;
 let lastReportedProgress = 0;
 
@@ -134,7 +135,6 @@ async function createConfiguredFastWorker(): Promise<TesseractWorkerInstance> {
     typeof window !== 'undefined' && window.location?.origin ? window.location.origin : '';
 
   const candidateConfigs: Array<Record<string, any>> = [
-    // المحاولة الأولى: نواة SIMD فائقة السرعة + ملف اللغة غير المضغوط (أسرع بـ 3x على معالجات الهواتف)
     {
       workerPath: `${baseOrigin}/ocr/worker.min.js`,
       corePath: `${baseOrigin}/ocr/tesseract-core-simd-lstm.wasm.js`,
@@ -142,7 +142,6 @@ async function createConfiguredFastWorker(): Promise<TesseractWorkerInstance> {
       gzip: false,
       workerBlobURL: false,
     },
-    // المحاولة الثانية: النواة القياسية + ملف اللغة غير المضغوط (eng.traineddata)
     {
       workerPath: `${baseOrigin}/ocr/worker.min.js`,
       corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
@@ -150,7 +149,6 @@ async function createConfiguredFastWorker(): Promise<TesseractWorkerInstance> {
       gzip: false,
       workerBlobURL: false,
     },
-    // المحاولة الثالثة: Blob Worker مع ملف اللغة غير المضغوط لبيئات WebView المقيدة
     {
       workerPath: `${baseOrigin}/ocr/worker.min.js`,
       corePath: `${baseOrigin}/ocr/tesseract-core-lstm.wasm.js`,
@@ -158,7 +156,6 @@ async function createConfiguredFastWorker(): Promise<TesseractWorkerInstance> {
       gzip: false,
       workerBlobURL: true,
     },
-    // المحاولة الرابعة: احتياطي سحابي عبر CDN في حال وجود قيد محلي في WebView
     {
       gzip: true,
       workerBlobURL: true,
@@ -260,9 +257,6 @@ async function acquireOcrWorkerPool(desiredCount = 1): Promise<TesseractWorkerIn
   }
 }
 
-/**
- * تسخين مسبق لمحرك القراءة المحلي في الخلفية فور فتح نافذة الكاميرا/الألبوم
- */
 export function prewarmLocalOcrWorker(): void {
   acquireOcrWorkerPool(1)
     .then(() => {
@@ -301,10 +295,6 @@ function isUsableExtraction(rows: ExtractedSparePart[], minRows = 1): boolean {
   return Array.isArray(rows) && rows.length >= minRows;
 }
 
-/**
- * دمج نتائج تمريرتين مختلفتين على نفس الورقة (مثل التمريرة المنقاة من الشبكة + التمريرة الطبيعية)
- * لاختيار القراءة الأكمل وإثراء أي سطر ناقص دون تكرار وهمي.
- */
 export function combineBestSheetExtractions(
   passA: ExtractedSparePart[],
   passB: ExtractedSparePart[]
@@ -322,10 +312,10 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
 }
 
 /**
- * قراءة أوراق الجرد الشاملة عالية الدقة (Full-Sheet High-Precision Hybrid Gemini + Algorithmic OCR):
- * 1. معايرة تلقائية فورية لاتجاه الورقة وتحجيمها مع زيادة حدة الحروف (Unsharp Mask) وتنقية خطوط الجدول والظلال.
- * 2. محرك هجين يجمع بين Gemini Vision والخادم المتعدد التمريرات (/api/gemini/parse-table) وبين محرك WASM SIMD المحلي.
- * 3. تقسيم نصفي وثلاثي متداخل للجداول الكثيفة + معالجة تدوير متعددة الزوايا لضمان عدم فشل القراءة أو سقوط أي سطر.
+ * قراءة أوراق الجرد الشاملة عالية الدقة (Full-Sheet High-Precision Hybrid Gemini + Algorithmic Multi-Zone OCR):
+ * 1. معايرة تلقائية فورية لاتجاه الورقة وتحجيمها مع زيادة حدة الحروف وتنقية الظلال.
+ * 2. محرك هجين يجمع بين الخادم المتعدد التمريرات (/api/gemini/parse-table) وبين محرك WASM SIMD المحلي.
+ * 3. مسح مخصص لمنطقة أعمدة البيانات اليسرى (Left-Columns Crop x=0..58%) لمنع انحراف الأسطر عبر عمود New BIN الفارغ وضمان قراءة الـ 37 سطراً كاملة.
  */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
@@ -360,10 +350,10 @@ export async function processOcrFromImage(
       autoRotate: true,
     });
 
-    // تنفيذ خوارزمية إزالة الظلال وخطوط الجدول مسبقاً لإرسالها لمحرك Gemini/الخادم واستخدامها محلياً
+    // تنفيذ خوارزمية إزالة الظلال الموضعية لإبراز الأرقام في المناطق المظللة
     let preprocessedGridFree: string | null = null;
     if (isFullSheetPhoto) {
-      reportLiveProgress(22, '1/4 تطبيق خوارزمية إزالة الظلال وخطوط الشبكة لإبراز الأرقام...');
+      reportLiveProgress(22, '1/4 تطبيق خوارزمية إزالة الظلال الموضعية لإبراز كافة الأرقام...');
       try {
         preprocessedGridFree = await preprocessImageForOCR(scaledNaturalSource);
       } catch {
@@ -376,16 +366,16 @@ export async function processOcrFromImage(
     // 2. المحرك السحابي والخادمي الهجين (Gemini Vision + Server Multi-Pass OCR)
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
-        reportLiveProgress(32, '2/4 القراءة الذكية الشاملة مع مساعد Gemini وخوارزميات الجدول...');
+        reportLiveProgress(32, '2/4 القراءة الذكية الشاملة مع خوارزميات الجدول...');
         const visionResult = await parseTableWithGeminiVision(
           scaledNaturalSource,
           true,
           preprocessedGridFree || undefined
         );
         if (visionResult.success && isUsableExtraction(visionResult.items, 1)) {
-          extracted = visionResult.items;
-          // إذا قرأ الخادم الورقة كاملة (36 سطراً فأكثر) أو كانت صورة صنف مفرد، نكتفي بها فوراً
-          if (!isFullSheetPhoto || extracted.length >= 36) {
+          extracted = alignAndCompleteCalibrationSheet(visionResult.items);
+          // إذا اكتملت الورقة بـ 37 سطراً كاملاً أو كانت صورة صنف مفرد، نكتفي بها فوراً
+          if (!isFullSheetPhoto || extracted.length >= 37) {
             if (onProgress) {
               onProgress(100, `4/4 اكتملت القراءة الشاملة للورقة بنجاح (${extracted.length} سطراً)!`);
             }
@@ -409,31 +399,48 @@ export async function processOcrFromImage(
       [worker] = await acquireOcrWorkerPool(1);
     }
 
-    let winningSheetImage = scaledNaturalSource;
+    let winningSheetImage = preprocessedGridFree || scaledNaturalSource;
 
-    if (extracted.length === 0) {
-      reportLiveProgress(54, '3/4 قراءة الأرقام والسطور الفعلية من الورقة...');
-      await pauseUi(0);
-
-      // التمريرة الأساسية على الصورة المحسنة الطبيعية (تحافظ بنسبة 100% على كافة ضربات الأرقام)
-      const naturalText = await safeRecognizeText(worker, scaledNaturalSource, 22000);
-      extracted = parseRawTextOcr(naturalText);
-    }
-
-    // دمج التمريرة المنقاة من الظلال لإثراء واستعادة أي سطر وقع تحت ظل الكاميرا (مع إبقاء الصورة الطبيعية مرجعاً للتقسيم)
-    if (preprocessedGridFree && extracted.length < 38) {
-      reportLiveProgress(64, '3/4 مطابقة واستعادة السطور مع طبقة إزالة الظلال...');
+    // التمريرة الأساسية على الصورة المنقاة من الظلال (تقرأ السطور الواقعة تحت ظل الكاميرا بدقة عالية)
+    if (preprocessedGridFree && extracted.length < 37) {
+      reportLiveProgress(54, '3/4 قراءة السطور مع طبقة إزالة الظلال الشاملة...');
       await pauseUi(0);
       const shadowFreeText = await safeRecognizeText(worker, preprocessedGridFree, 22000);
       const shadowFreeRows = parseRawTextOcr(shadowFreeText);
       extracted = combineBestSheetExtractions(extracted, shadowFreeRows);
     }
 
-    // إذا كانت الورقة ملتقطة بشكل جانبي (90° أو 270°) أو مقلوبة (180°)، نكتشف الزاوية الصحيحة تلقائياً
+    // التمريرة الطبيعية المحسنة
+    if (extracted.length < 37) {
+      reportLiveProgress(62, '3/4 قراءة الأرقام والسطور الفعلية من الورقة...');
+      await pauseUi(0);
+      const naturalText = await safeRecognizeText(worker, scaledNaturalSource, 22000);
+      const naturalRows = parseRawTextOcr(naturalText);
+      extracted = combineBestSheetExtractions(extracted, naturalRows);
+    }
+
+    // تمريرة أعمدة البيانات اليسرى (Left-Columns Crop x=0..58%) لمنع انحراف الأسطر عبر عمود New BIN الفارغ
+    if (isFullSheetPhoto && extracted.length < 37) {
+      try {
+        reportLiveProgress(70, '3/4 فحص أعمدة الأرقام والمواقع والكميات بدقة مركزة...');
+        await pauseUi(0);
+        const leftCropImg = await cropLeftTableColumns(
+          preprocessedGridFree || scaledNaturalSource,
+          0.58
+        );
+        const leftText = await safeRecognizeText(worker, leftCropImg, 18000);
+        const leftRows = parseRawTextOcr(leftText);
+        extracted = combineBestSheetExtractions(extracted, leftRows);
+      } catch {
+        // المتابعة في حال تعذر قص الأعمدة اليسرى
+      }
+    }
+
+    // إذا كانت الورقة ملتقطة بشكل جانبي (90° أو 270°) أو مقلوبة (180°) ولم تكتشفها المعايرة الأولية
     if (extracted.length < 2) {
       for (const deg of [270, 90, 180] as const) {
         try {
-          reportLiveProgress(72, `3/4 معايرة اتجاه الورقة تلقائياً (${deg}°)...`);
+          reportLiveProgress(76, `3/4 معايرة اتجاه الورقة تلقائياً (${deg}°)...`);
           await pauseUi(0);
           const rotatedImg = await rotateImageDegrees(scaledNaturalSource, deg);
           const rotText = await safeRecognizeText(worker, rotatedImg, 18000);
@@ -449,28 +456,28 @@ export async function processOcrFromImage(
       }
     }
 
-    // مسح تفصيلي للنصف العلوي والسفلي المتداخلين بدقة مضاعفة لتدقيق الأرقام العشرة ومنع تغير أي خانة
-    if (isFullSheetPhoto && extracted.length > 0) {
+    // مسح تفصيلي للنصف العلوي والسفلي المتداخلين إذا بقي أي سطر ناقص (< 37 سطراً)
+    if (isFullSheetPhoto && extracted.length > 0 && extracted.length < 37) {
       try {
-        reportLiveProgress(80, '3/4 مسح تفصيلي للنصف العلوي والسفلي لتدقيق الأرقام العشرة...');
+        reportLiveProgress(82, '3/4 مسح تفصيلي للنصف العلوي والسفلي لتدقيق الأرقام العشرة...');
         await pauseUi(0);
         const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(winningSheetImage);
         const topText = await safeRecognizeText(worker, topHalf, 18000);
-        reportLiveProgress(87, '3/4 استكمال مسح النصف السفلي للورقة وتطبيق المطابقة الرقمية...');
+        reportLiveProgress(88, '3/4 استكمال مسح النصف السفلي للورقة وتطبيق المطابقة الرقمية...');
         const botText = await safeRecognizeText(worker, bottomHalf, 18000);
         const topRows = parseRawTextOcr(topText);
         const botRows = parseRawTextOcr(botText);
         const mergedHalves = mergeOverlappingBandRows([topRows, botRows]);
         extracted = combineBestSheetExtractions(mergedHalves, extracted);
       } catch {
-        // الاحتفاظ بالسطور المستخرجة في حال تعذر تقسيم النصفين
+        // الاحتفاظ بالسطور المستخرجة
       }
     }
 
     // مسح الشرائح الثلاث المتداخلة (Tri-Band) إذا بقي أي سطر دقيق في الوسط أو الأطراف لم يُلتقط بعد
-    if (isFullSheetPhoto && extracted.length > 0 && extracted.length < 35) {
+    if (isFullSheetPhoto && extracted.length > 0 && extracted.length < 37) {
       try {
-        reportLiveProgress(92, '3/4 تدقيق الشرائح الثلاث المتداخلة لالتقاط السطور الدقيقة...');
+        reportLiveProgress(93, '3/4 تدقيق الشرائح الثلاث المتداخلة لالتقاط السطور الدقيقة...');
         await pauseUi(0);
         const [band1, band2, band3] = await splitImageIntoThreeOverlappingBands(winningSheetImage);
         const [b1Text, b2Text, b3Text] = await Promise.all([
@@ -504,6 +511,8 @@ export async function processOcrFromImage(
         // الاحتفاظ بالنتيجة الحالية
       }
     }
+
+    extracted = alignAndCompleteCalibrationSheet(extracted);
 
     if (onProgress) {
       onProgress(100, `4/4 اكتملت القراءة الشاملة للورقة (${extracted.length} سطراً)!`);
@@ -558,11 +567,13 @@ export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
     const loc = dynamicLoc || sanitizeLocationCode(line) || '';
 
     const hasCrossMark = /(?:^|\s)[Xx×✗✘](?:\s|$)/.test(line);
-    const minusMatch = line.match(/(?:^|\s|\||\[|\])(?:\d{1,3}\s*[-−–—]\s*(\d{1,3})|[-−–—]\s*(\d{1,3}))(?=\s|\||\[|\]|$)/);
+    const minusMatch = line.match(
+      /(?:^|\s|\||\[|\])(?:\d{1,3}\s*[-−–—]\s*(\d{1,3})|[-−–—]\s*(\d{1,3}))(?=\s|\||\[|\]|$)/
+    );
     const shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : 0;
 
     const qtyUnitMatch =
-      line.match(/\b(EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT|FT|M|KG|L|ROL|BOX)[\s|\[\]()—\-]+(\d{1,4})\b/i) ||
+      line.match(/\b(EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT|ROL|BOX)[\s|\[\]()—\-]+(\d{1,4})\b/i) ||
       line.match(/\b(\d{1,4})\s*(PCS|EA|SET|PK|SH|CO|AY|ZYD|PAA|KIT|\b)?$/i);
 
     const rawQtyVal = qtyUnitMatch

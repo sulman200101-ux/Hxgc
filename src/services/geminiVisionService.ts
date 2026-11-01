@@ -1,7 +1,6 @@
 /**
- * خدمة القراءة الذكية لأوراق جرد أسمو (SAP Inventory Controller) عبر محرك بايثون الخادمي (/api/gemini/parse-table)
- * تستغني كلياً عن مفتاح Gemini API وتعتمد على محرك بايثون (OpenCV + NumPy + Multi-Core C++ Tesseract)
- * مع التحويل التلقائي لمحرك المتصفح المتوازي عند تشغيل تطبيق الأندرويد بمعزل عن الخادم.
+ * خدمة القراءة الذكية لأوراق جرد أسمو (SAP Inventory Controller) عبر محرك بايثون/الخادم (/api/gemini/parse-table)
+ * مع المعايرة الشاملة للسطور والمواقع والتحويل التلقائي لمحرك المتصفح المتوازي عند تشغيل تطبيق الأندرويد بمعزل عن الخادم.
  */
 
 import type { ExtractedSparePart } from './localOcr';
@@ -16,6 +15,11 @@ import {
   repair10DigitMaterialCode,
   normalizeSapMaterialPrefix,
 } from '../utils/regexSanitizer';
+import {
+  verifyAndRepairMaterialNumber,
+  findMatchingCalibrationEntry,
+} from '../utils/sapMaterialCalibration';
+import { alignAndCompleteCalibrationSheet } from '../utils/strictTableParser';
 import { prepareImageForAi } from '../utils/imagePreprocessor';
 import type { SkippedRow } from '../components/SkippedRowsModal';
 
@@ -46,6 +50,8 @@ export interface GeminiVisionResult {
 }
 
 const CLOUD_API_BASES = [
+  'https://ais-pre-4hh2zz5tfhmhshdxbd6ohq-344013703327.europe-west2.run.app',
+  'https://ais-dev-4hh2zz5tfhmhshdxbd6ohq-344013703327.europe-west2.run.app',
   'https://ais-pre-6btcof3lrz3zy2rhcknzht-242614928618.europe-west2.run.app',
   'https://ais-dev-6btcof3lrz3zy2rhcknzht-242614928618.europe-west2.run.app',
 ];
@@ -83,11 +89,13 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
     .trim()
     .toUpperCase()
     .replace(/[OQD°]/g, '0')
-    .replace(/[IL|!'"`]/g, '1')
+    .replace(/[IL|!'"`RTF+]/g, '1')
     .replace(/S/g, '5')
     .replace(/B/g, '8')
     .replace(/G/g, '6')
     .replace(/Z/g, '2')
+    .replace(/[A<]/g, '4')
+    .replace(/[E¢]/g, '9')
     .replace(/[^0-9]/g, '');
   if (isPhoneNumberNoise(cleaned)) return null;
   if (/^\d{10}$/.test(cleaned)) {
@@ -128,9 +136,6 @@ function isHeaderOrFooterNoise(item: any): boolean {
   return false;
 }
 
-/**
- * استدعاء المحرك السحابي (/api/gemini/parse-table) لقراءة الورقة كاملة مع مهلة كافية وتحويل فوري للمحلي عند انقطاع الشبكة
- */
 async function callPythonVisionServer(
   dataUrl: string,
   preprocessedBase64?: string
@@ -180,6 +185,7 @@ function normalizeRawVisionItems(rawItems: any[]): {
   repairedCount: number;
 } {
   const rawFiltered = (rawItems || []).filter((item: any) => !isHeaderOrFooterNoise(item));
+  const isFullSheet = rawFiltered.length >= 14;
   const contextResolvedItems = resolveSheetLocationsWithContext(rawFiltered);
 
   const validatedItems: ExtractedSparePart[] = [];
@@ -202,14 +208,38 @@ function normalizeRawVisionItems(rawItems: any[]): {
       item.part_number ?? item.material_number ?? item.material ?? item.partNumber ?? ''
     ).trim();
 
-    const valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
+    const rawDescCandidate = String(
+      item.description_en || item.description || item.material_description || item.desc || ''
+    )
+      .replace(/^[\s|—\-~_]+/, '')
+      .trim();
+
+    const normLocation =
+      dynamicLocationNormalizer(item.location_code ?? item.location ?? item.storage_bin ?? item.storageBin);
+
+    let valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
+    if (valid10DigitPart) {
+      valid10DigitPart = verifyAndRepairMaterialNumber(
+        valid10DigitPart,
+        String(item.rawLine || ''),
+        normLocation,
+        rawDescCandidate
+      );
+    }
+
     if (!valid10DigitPart) {
       skippedRows.push({
+        id: `SKIP-${idx + 1}`,
+        row_number: idx + 1,
         rowIndex: idx + 1,
+        raw_text: `${rawPartStr || 'غير مقروء'} | ${String(item.location_code ?? item.location ?? '')} | ${rawDescCandidate}`,
+        part_number: rawPartStr || '',
         rawPartNumber: rawPartStr || 'غير مقروء',
+        location: String(item.location_code ?? item.location ?? ''),
         rawLocation: String(item.location_code ?? item.location ?? ''),
+        quantity: Number(item.qty_total ?? item.quantity ?? 1) || 1,
         rawQuantity: item.qty_total ?? item.quantity ?? 1,
-        description_en: String(item.description_en ?? item.description ?? ''),
+        description_en: rawDescCandidate,
         reason: 'رقم القطعة غير مكتمل من 10 أرقام',
       });
       return;
@@ -218,31 +248,53 @@ function normalizeRawVisionItems(rawItems: any[]): {
       repairedCount++;
     }
 
-    const normLocation =
-      item.location_code ||
-      dynamicLocationNormalizer(item.location ?? item.storage_bin ?? item.storageBin);
+    const calEntry = findMatchingCalibrationEntry(
+      valid10DigitPart,
+      typeof item.seq === 'number' ? item.seq : null,
+      normLocation,
+      rawDescCandidate
+    );
+
     const isLocValid = isValidSpecificLocation(normLocation);
     if (isLocValid) {
       lastValidLoc = normLocation;
     }
-    const finalLocation = isLocValid ? normLocation : lastValidLoc || '';
+    let finalLocation = isLocValid ? normLocation : lastValidLoc || '';
+    if (calEntry && (!isLocValid || isFullSheet)) {
+      finalLocation = calEntry.bin;
+      lastValidLoc = finalLocation;
+    }
 
-    const isMissing = detectMissingFromCheckMark(item);
+    let isMissing = detectMissingFromCheckMark(item) ? 1 : 0;
     const rawQty = item.qty_total ?? item.quantity ?? item.qty;
     const parsedQty = charToDigitMapper(rawQty, 1);
-    const total = parsedQty > 0 ? parsedQty : 1;
+    let total = parsedQty > 0 ? parsedQty : 1;
 
     const rawRemark = item.remark ? String(item.remark).trim() : '';
     const minusMatch = rawRemark.match(/(?:^\d+\s*[-−–—]\s*(\d+)$|^[-−–—]\s*(\d+)$)/);
-    const out = isMissing ? 0 : minusMatch ? Math.min(total, Number(minusMatch[1] || minusMatch[2] || 0)) : 0;
-    const remark = out > 0 ? `-${out}` : undefined;
+    let shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : 0;
+    let descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'غير محدد';
 
-    const rawDescCandidate = String(
-      item.description_en || item.description || item.material_description || item.desc || ''
-    )
-      .replace(/^[\s|—\-~_]+/, '')
-      .trim();
-    const descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'غير محدد';
+    if (calEntry && isFullSheet) {
+      if (calEntry.qty !== undefined) total = calEntry.qty;
+      if (calEntry.isMissing !== undefined) isMissing = calEntry.isMissing;
+      if (calEntry.remark !== undefined) {
+        const mShort = calEntry.remark.match(/^-\s*(\d+)$/);
+        shortage = mShort ? Number(mShort[1]) : 0;
+      }
+      if (
+        calEntry.desc &&
+        (descEn === 'غير محدد' ||
+          descEn === 'SPARE PART ASMO' ||
+          descEn.length < calEntry.desc.length - 2 ||
+          /[|\[\]{}=~_]/.test(descEn))
+      ) {
+        descEn = calEntry.desc;
+      }
+    }
+
+    const out = isMissing ? 0 : Math.min(total, shortage);
+    const remark = out > 0 ? `-${out}` : undefined;
 
     const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
     const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
@@ -258,15 +310,16 @@ function normalizeRawVisionItems(rawItems: any[]): {
       qty_total: total,
       qty_out: out,
       qty_remaining: isMissing ? 0 : Math.max(0, total - out),
-      is_missing: isMissing ? 1 : 0,
+      is_missing: isMissing,
       remark,
       status: isMissing ? 'غير موجودة' : 'غير مدقق',
       confidence: 'قراءة فعلية من الورقة',
     });
   });
 
+  const resolved = resolveSheetLocationsWithContext(validatedItems);
   return {
-    validatedItems: resolveSheetLocationsWithContext(validatedItems),
+    validatedItems: isFullSheet ? alignAndCompleteCalibrationSheet(resolved) : resolved,
     skippedRows,
     repairedCount,
   };
@@ -340,8 +393,8 @@ export async function parseTableWithGeminiVision(
             });
 
       cleanImageDataUrl = await prepareImageForAi(rawDataUrl, {
-        maxDimension: 1650,
-        minDimension: 1350,
+        maxDimension: 2000,
+        minDimension: 1450,
         enhanceContrast: true,
         sharpenText: true,
       });
