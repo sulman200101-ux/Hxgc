@@ -218,15 +218,23 @@ export default function App() {
   };
 
   const handleDeleteItem = async (partNumber: string) => {
-    await dbService.deleteItem(partNumber);
-    refreshData();
-    showNotification(`تم حذف القطعة ${partNumber}`, 'info');
+    try {
+      await dbService.deleteItem(partNumber);
+      refreshData();
+      showNotification(`تم حذف القطعة ${partNumber} بعد تأكيد الرقم السري`, 'info');
+    } catch (error) {
+      showNotification((error as Error).message || 'تم إلغاء المسح لحماية البيانات', 'error');
+    }
   };
 
   const handleDeleteLocation = async (locationCode: string) => {
-    const count = await dbService.deleteLocation(locationCode);
-    refreshData();
-    showNotification(`تم حذف الموقع ${locationCode} (${count} قطعة)`, 'info');
+    try {
+      const count = await dbService.deleteLocation(locationCode);
+      refreshData();
+      showNotification(`تم حذف الموقع ${locationCode} (${count} قطعة) بعد تأكيد الرقم السري`, 'info');
+    } catch (error) {
+      showNotification((error as Error).message || 'تم إلغاء المسح لحماية البيانات', 'error');
+    }
   };
 
   const handleRenameLocation = async (oldCode: string, newCode: string) => {

@@ -3,6 +3,7 @@ import { suggestTechnicalTranslation } from '../services/partTranslation';
 import { prepareAudio, playOperationSound } from '../utils/operationSounds';
 import React, { useEffect, useState } from 'react';
 import { dbService } from '../services/db';
+import { authorizeDeletion } from '../services/security';
 import {
   auditSheetCompleteness,
   type DocumentLine,
@@ -90,7 +91,14 @@ export function StockDocumentsPanel({ onRefresh, initialKind, compact = false, o
         <label>Check<select className="bg-stone-800" value={line.check} onChange={e => update(i, { check: e.target.value, reviewed: false })}><option value="">غير مدققة</option><option>✓</option><option>X</option></select></label>
         <label>Remark<input className="bg-stone-800 w-20" value={line.remark} onChange={e => update(i, { remark: e.target.value, reviewed: false })} /></label>
         <label><input type="checkbox" checked={line.reviewed} onChange={e => update(i, { reviewed: e.target.checked })} />راجعت السطر مقابل الأصل</label>
-        <button type="button" onClick={() => setLines(current => current.filter((_, index) => i !== index))}>إزالة من المسودة</button>
+        <button type="button" onClick={async () => {
+          try {
+            await authorizeDeletion(`إزالة السطر #${i + 1} من المسودة`);
+            setLines(current => current.filter((_, index) => i !== index));
+          } catch (err) {
+            setMessage((err as Error).message);
+          }
+        }}>إزالة من المسودة 🔒</button>
       </fieldset>)}
       {lines.some((line, index) => line.part_number && lines.findIndex(candidate => candidate.part_number === line.part_number) !== index) && <label className="block text-amber-200"><input type="checkbox" checked={sumDuplicates} onChange={e => setSumDuplicates(e.target.checked)} />طلب اعتماد جمع سطور القطعة: تضاف الكميات المعتمدة إلى الرصيد الموجود بعد اعتماد المشرف. يبقى السطران محفوظين.</label>}
       <button type="button" className="p-2" onClick={() => setLines(current => [...current, blank()])}>سطر جديد</button>

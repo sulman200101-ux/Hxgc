@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { pinSecurity, resetPendingAuthorization } from '../services/security';
+import { pinSecurity, normalizePinDigits, resetPendingAuthorization } from '../services/security';
+import { ShieldAlert, Lock, CheckCircle2, X } from 'lucide-react';
 
 export function AuthorizationDialog() {
   const [action, setAction] = useState('');
@@ -32,19 +33,30 @@ export function AuthorizationDialog() {
   if (!action) return null;
 
   return (
-    <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4" dir="rtl">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="إدخال الرقم السري لتأكيد المسح"
+      className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"
+      dir="rtl"
+    >
       <form
-        className="bg-stone-900 text-white rounded-2xl p-6 space-y-4 max-w-sm w-full border border-amber-700/50 shadow-2xl"
+        className="bg-[#231611] text-white rounded-2xl p-6 space-y-4 max-w-sm w-full border-2 border-red-600/70 shadow-2xl"
         onSubmit={async (e) => {
           e.preventDefault();
           setBusy(true);
           setError('');
           try {
+            const cleanPin = normalizePinDigits(pin);
+            const cleanConf = normalizePinDigits(confirmation);
+            if (!/^\d{4}$/.test(cleanPin)) {
+              throw new Error('يرجى إدخال رقم سري مكون من 4 أرقام');
+            }
             if (setup) {
-              if (pin !== confirmation) throw new Error('تأكيد الرمز غير متطابق');
-              await pinSecurity.setup(pin);
-            } else if (!(await pinSecurity.verify(pin))) {
-              throw new Error('الرمز غير صحيح');
+              if (cleanPin !== cleanConf) throw new Error('تأكيد الرقم السري غير متطابق');
+              await pinSecurity.setup(cleanPin);
+            } else if (!(await pinSecurity.verify(cleanPin))) {
+              throw new Error('الرقم السري غير صحيح — تم منع المسح لحماية البيانات');
             }
             finish(true);
           } catch (err) {
@@ -54,64 +66,96 @@ export function AuthorizationDialog() {
           }
         }}
       >
-        <h2 className="font-bold text-base text-amber-300">
-          {setup ? 'إعداد رمز المشرف لأول مرة' : 'اعتماد المشرف'} — {action}
-        </h2>
-        <p className="text-xs text-neutral-300">
-          هذا الجهاز يعمل بحساب مشرف محلي واحد (4 أرقام). لا يثبت الرمز هوية مستخدمين متعددين.
+        <div className="flex items-start justify-between gap-2 border-b border-red-900/50 pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-red-950 border border-red-500/60 flex items-center justify-center text-red-400 shrink-0">
+              {setup ? <Lock className="w-5 h-5 text-amber-400" /> : <ShieldAlert className="w-5 h-5 text-red-400" />}
+            </div>
+            <div>
+              <h2 className="font-black text-sm sm:text-base text-amber-300">
+                {setup ? 'تعيين رقم سري لمنع المسح (لأول مرة)' : '🔒 حماية البيانات من المسح'}
+              </h2>
+              <p className="text-xs text-red-200 font-bold mt-0.5">
+                العملية المطلوبة: {action}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => finish(false)}
+            className="p-1.5 rounded-lg bg-stone-800 hover:bg-stone-700 text-neutral-300 cursor-pointer"
+            title="إلغاء"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <p className="text-xs text-neutral-300 leading-relaxed bg-red-950/30 border border-red-800/40 rounded-xl p-2.5">
+          {setup
+            ? 'لمنع فقدان أي بيانات عن طريق الخطأ، اختر رقماً سرياً من 4 أرقام. سيُطلب هذا الرقم قبل أي عملية مسح أو حذف مستقبلاً (الحفظ يتم فوراً بدون رقم سري).'
+            : 'هذه العملية تؤدي إلى مسح بيانات. يُرجى إدخال الرقم السري المكون من 4 أرقام لتأكيد المسح، أو اضغط إلغاء للحفاظ على البيانات.'}
         </p>
-        <label className="block text-xs font-bold space-y-1">
-          <span>الرمز</span>
+
+        <label className="block text-xs font-bold space-y-1.5">
+          <span className="text-amber-200">الرمز (4 أرقام)</span>
           <input
             autoFocus
             aria-label="الرمز"
-            className="bg-stone-800 border border-stone-600 rounded-lg p-2 w-full text-center font-mono text-lg tracking-widest"
+            placeholder="••••"
+            className="bg-[#160E0B] border-2 border-amber-600/60 focus:border-amber-400 rounded-xl p-2.5 w-full text-center font-mono text-xl tracking-[0.5em] text-white outline-none"
             type="password"
             inputMode="numeric"
-            pattern="[0-9]{4}"
             maxLength={4}
             required
             value={pin}
-            onChange={(e) => setPin(e.target.value)}
+            onChange={(e) => setPin(normalizePinDigits(e.target.value))}
           />
         </label>
+
         {setup && (
-          <label className="block text-xs font-bold space-y-1">
-            <span>تأكيد الرمز</span>
+          <label className="block text-xs font-bold space-y-1.5">
+            <span className="text-amber-200">تأكيد الرمز (4 أرقام)</span>
             <input
               aria-label="تأكيد الرمز"
-              className="bg-stone-800 border border-stone-600 rounded-lg p-2 w-full text-center font-mono text-lg tracking-widest"
+              placeholder="••••"
+              className="bg-[#160E0B] border-2 border-amber-600/60 focus:border-amber-400 rounded-xl p-2.5 w-full text-center font-mono text-xl tracking-[0.5em] text-white outline-none"
               type="password"
               inputMode="numeric"
-              pattern="[0-9]{4}"
               maxLength={4}
               required
               value={confirmation}
-              onChange={(e) => setConfirmation(e.target.value)}
+              onChange={(e) => setConfirmation(normalizePinDigits(e.target.value))}
             />
           </label>
         )}
-        <p role="alert" className="text-red-400 text-xs font-bold">
-          {error}
-        </p>
-        <div className="flex items-center gap-2 pt-1">
+
+        {error && (
+          <p role="alert" className="p-2.5 rounded-xl bg-red-950 border border-red-500 text-red-200 text-xs font-bold text-center">
+            {error}
+          </p>
+        )}
+
+        <div className="flex items-center gap-2.5 pt-1">
           <button
             disabled={busy}
             type="submit"
-            className="flex-1 py-2 px-4 rounded-xl bg-amber-700 hover:bg-amber-600 font-bold text-xs cursor-pointer"
+            className="flex-1 py-2.5 px-4 rounded-xl bg-red-700 hover:bg-red-600 disabled:opacity-50 font-black text-xs text-white cursor-pointer flex items-center justify-center gap-1.5 shadow-lg"
           >
-            {busy ? 'جارٍ التحقق' : 'اعتماد'}
+            <CheckCircle2 className="w-4 h-4" />
+            <span>{busy ? 'جارٍ التحقق...' : setup ? 'حفظ الرقم السري وتأكيد المسح' : 'تأكيد الرقم السري وتنفيذ المسح'}</span>
           </button>
           <button
             disabled={busy}
             type="button"
             onClick={() => finish(false)}
-            className="py-2 px-4 rounded-xl bg-stone-800 hover:bg-stone-700 font-bold text-xs cursor-pointer"
+            className="py-2.5 px-4 rounded-xl bg-stone-800 hover:bg-stone-700 font-bold text-xs text-neutral-200 cursor-pointer"
           >
-            إلغاء
+            إلغاء وحفظ البيانات
           </button>
         </div>
       </form>
     </div>
   );
 }
+

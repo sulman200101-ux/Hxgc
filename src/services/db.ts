@@ -1,5 +1,5 @@
 import { approvalLines, canonicalDocumentId, interpretMark, validateDocument, type StockDocument } from './documents';
-import { authorizeMutation } from './security';
+import { authorizeMutation, authorizeDeletion } from './security';
 import type { InventoryItem, LocationSummary } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
 import {
@@ -488,12 +488,12 @@ class InventoryDatabase {
   }
 
   public async deleteItem(partNumber: string): Promise<void> {
-    await authorizeMutation('حذف قطعة');
+    await authorizeDeletion(`حذف القطعة (${partNumber})`);
     await this.commitChanges([], [partNumber]);
   }
 
   public async deleteLocation(locationCode: string): Promise<number> {
-    await authorizeMutation('حذف موقع');
+    await authorizeDeletion(`حذف الموقع (${locationCode}) وجميع قطعه`);
     const items = this.getItemsByLocation(locationCode);
     await this.commitChanges([], items.map(item => item.part_number));
     return items.length;
@@ -987,16 +987,16 @@ class InventoryDatabase {
   }
 
   public async wipeAllData(): Promise<void> {
-    await authorizeMutation('مسح المخزون مع إبقاء سجل التدقيق');
+    await authorizeDeletion('مسح المخزون مع إبقاء سجل التدقيق');
     await this.commitChanges([], [], true);
   }
 
   /**
    * مسح شامل لكافة بيانات البرنامج (الأصناف، المواقع، أوراق الجرد، طلبات النقل، والسجلات)
-   * بعد طلب اعتماد المشرف، بحيث يعود البرنامج فارغاً بالكامل (0 قطعة و 0 مستند).
+   * بعد طلب الرقم السري لمنع فقدان البيانات، بحيث يعود البرنامج فارغاً بالكامل (0 قطعة و 0 مستند).
    */
   public async fullProgramWipe(): Promise<void> {
-    await authorizeMutation('اعتماد المسح الشامل لكافة بيانات البرنامج والمستندات');
+    await authorizeDeletion('المسح الشامل لكافة بيانات البرنامج والمستندات');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction([STORE_NAME, 'documents', 'audit'], 'readwrite');

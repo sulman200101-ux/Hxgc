@@ -1,6 +1,7 @@
 import { ImageSourcePicker } from './ImageSourcePicker';
 import React, { useEffect, useState, useRef } from 'react';
 import { dbService } from '../services/db';
+import { authorizeDeletion } from '../services/security';
 import { interpretMark, auditSheetCompleteness, type DocumentLine, type StockDocument } from '../services/documents';
 import { processOcrFromImage } from '../services/localOcr';
 import { readImageBatch } from '../services/batchOcr';
@@ -379,9 +380,14 @@ export function BatchDocumentsPanel({
             </span>
             <button
               type="button"
-              onClick={() =>
-                setSheets((current) => current.filter((candidate) => candidate.key !== sheet.key))
-              }
+              onClick={async () => {
+                try {
+                  await authorizeDeletion(`إزالة الورقة (${sheet.original.name})`);
+                  setSheets((current) => current.filter((candidate) => candidate.key !== sheet.key));
+                } catch (err) {
+                  setMessage((err as Error).message);
+                }
+              }}
               className="px-2.5 py-1 rounded bg-red-900 hover:bg-red-800 text-white font-bold cursor-pointer shrink-0"
             >
               إزالة
@@ -420,14 +426,19 @@ export function BatchDocumentsPanel({
                 </div>
                 <button
                   type="button"
-                  onClick={() =>
-                    setSheets((current) =>
-                      current.filter((candidate) => candidate.key !== sheet.key)
-                    )
-                  }
+                  onClick={async () => {
+                    try {
+                      await authorizeDeletion(`حذف الورقة المقروءة (${sheet.original.name})`);
+                      setSheets((current) =>
+                        current.filter((candidate) => candidate.key !== sheet.key)
+                      );
+                    } catch (err) {
+                      setMessage((err as Error).message);
+                    }
+                  }}
                   className="text-[11px] text-red-400 hover:text-red-300 font-bold cursor-pointer"
                 >
-                  حذف الورقة
+                  حذف الورقة 🔒
                 </button>
               </div>
 
@@ -542,12 +553,18 @@ export function BatchDocumentsPanel({
                       <span className="truncate max-w-[180px]">{line.description_ar || line.description_en}</span>
                       <button
                         type="button"
+                        title="حذف السطر (يتطلب الرقم السري)"
                         className="px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 hover:bg-red-900 cursor-pointer"
-                        onClick={() =>
-                          patch(sheet.key, {
-                            lines: sheet.lines.filter((_, i) => i !== index),
-                          })
-                        }
+                        onClick={async () => {
+                          try {
+                            await authorizeDeletion(`حذف السطر #${index + 1} (${line.part_number})`);
+                            patch(sheet.key, {
+                              lines: sheet.lines.filter((_, i) => i !== index),
+                            });
+                          } catch (err) {
+                            setMessage((err as Error).message);
+                          }
+                        }}
                       >
                         ×
                       </button>
