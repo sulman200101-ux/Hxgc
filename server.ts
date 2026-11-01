@@ -5,6 +5,8 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
+import { createWorker } from 'tesseract.js';
+import { parseRawTextOcr } from './src/services/localOcr';
 
 dotenv.config();
 
@@ -46,14 +48,16 @@ if (fs.existsSync(ocrStaticPath)) {
 }
 
 let pythonEnvUnavailable = false;
+let geminiKeyInvalid = false;
 
 /**
- * قراءة جدول الجرد السحابية السريعة عبر Gemini Vision (gemini-3.8-flash)
- * تستخرج كافة السطور المقروءة حتى لو كان بعض النص باهتاً أو غير مكتمل
+ * قراءة جدول الجرد السحابية السريعة عبر Gemini Vision
+ * تجرب النماذج المتاحة بالترتيب وتستخرج كافة السطور المقروءة حتى لو كان بعض النص باهتاً أو غير مكتمل
  */
 async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'undefined' || apiKey.trim() === '') {
+  if (geminiKeyInvalid) return null;
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (!apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.startsWith('AIza')) {
     return null;
   }
 
@@ -68,17 +72,21 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
       httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
     });
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: [
-        {
-          inlineData: {
-            mimeType,
-            data: cleanBase64,
-          },
-        },
-        {
-          text: `اقرأ ورقة جرد SAP هذه بالكامل واستخرج جميع السطور الموجودة في الجدول من أول سطر حتى آخر سطر دون ترك أي سطر حتى لو كان رقم القطعة أو الموقع باهتاً أو غير مكتمل.
+    const candidateModels = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-3.8-flash'];
+
+    for (const modelName of candidateModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: [
+            {
+              inlineData: {
+                mimeType,
+                data: cleanBase64,
+              },
+            },
+            {
+              text: `اقرأ ورقة جرد SAP هذه بالكامل واستخرج جميع السطور الموجودة في الجدول من أول سطر حتى آخر سطر دون ترك أي سطر حتى لو كان رقم القطعة أو الموقع باهتاً أو غير مكتمل.
 لكل سطر في الجدول استخرج:
 - part_number: رقم القطعة في عمود Material (عادة 10 أرقام تبدأ بـ 100، أو اكتب الأرقام المقروءة كما هي إن كانت ناقصة).
 - location_code: رمز الموقع في عمود Storage Bin (مثل N01A1, N15BB2, N11C2, D1، أو اتركه فارغاً إن لم يظهر ليستنتجه النظام من السطور المجاورة).
@@ -86,48 +94,109 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
 - is_missing: ضع 1 فقط إذا وجدت علامة خطأ (X أو ×) صريحة في عمود Check، وضع 0 إذا كانت علامة صح (✓) أو فارغة.
 - remark: الملاحظات المكتوبة باليد مثل -1 أو -4 أو F2 إن وجدت، وإلا نص فارغ.
 - description_en: الوصف الإنجليزي الكامل للقطعة في عمود Material Description.`,
-        },
-      ],
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            items: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  part_number: { type: Type.STRING },
-                  location_code: { type: Type.STRING },
-                  qty_total: { type: Type.NUMBER },
-                  is_missing: { type: Type.NUMBER },
-                  remark: { type: Type.STRING },
-                  description_en: { type: Type.STRING },
+            },
+          ],
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                items: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      part_number: { type: Type.STRING },
+                      location_code: { type: Type.STRING },
+                      qty_total: { type: Type.NUMBER },
+                      is_missing: { type: Type.NUMBER },
+                      remark: { type: Type.STRING },
+                      description_en: { type: Type.STRING },
+                    },
+                    required: ['part_number', 'location_code', 'qty_total', 'description_en'],
+                  },
                 },
-                required: ['part_number', 'location_code', 'qty_total', 'description_en'],
               },
+              required: ['items'],
             },
           },
-          required: ['items'],
-        },
-      },
-    });
+        });
 
-    const text = response.text?.trim();
-    if (!text) return null;
-    const parsed = JSON.parse(text);
-    if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0) {
+        const text = response.text?.trim();
+        if (!text) continue;
+        const parsed = JSON.parse(text);
+        if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0) {
+          return {
+            success: true,
+            items: parsed.items,
+            skipped_rows: [],
+          };
+        }
+      } catch (modelErr: any) {
+        const msg = String(modelErr?.message || '');
+        if (msg.includes('API key not valid') || msg.includes('UNAUTHENTICATED')) {
+          geminiKeyInvalid = true;
+          break;
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * محرك Node.js السريع على الخادم (Warm Tesseract Worker + Strict ASMO Table Parser)
+ * يقرأ الورقة في أقل من ثانية واحدة مباشرة من القرص المحلي بدون الحاجة لتحميل ملفات WASM في المتصفح
+ */
+type NodeWorkerInstance = Awaited<ReturnType<typeof createWorker>>;
+let nodeOcrWorkerPromise: Promise<NodeWorkerInstance> | null = null;
+
+async function getNodeOcrWorker(): Promise<NodeWorkerInstance> {
+  if (!nodeOcrWorkerPromise) {
+    nodeOcrWorkerPromise = (async () => {
+      const langPath = path.resolve(__dirname, 'public', 'ocr', 'lang');
+      const worker = await createWorker('eng', 1, {
+        langPath: fs.existsSync(langPath) ? langPath : undefined,
+        cacheMethod: 'none',
+      });
+      try {
+        await worker.setParameters({
+          tessedit_do_invert: '0',
+          tessedit_pageseg_mode: '6' as any,
+        });
+      } catch {
+        // المتابعة في حال عدم دعم المعاملات الاختيارية
+      }
+      return worker;
+    })().catch((err) => {
+      nodeOcrWorkerPromise = null;
+      throw err;
+    });
+  }
+  return nodeOcrWorkerPromise;
+}
+
+async function runNodeTableOcr(imageBase64: string): Promise<any | null> {
+  try {
+    const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
+    if (!cleanBase64) return null;
+    const imgBuffer = Buffer.from(cleanBase64, 'base64');
+    const worker = await getNodeOcrWorker();
+    const { data } = await worker.recognize(imgBuffer);
+    const items = parseRawTextOcr(data.text || '');
+    if (items.length > 0) {
       return {
         success: true,
-        items: parsed.items,
+        items,
         skipped_rows: [],
       };
     }
     return null;
   } catch (err) {
-    console.warn('Gemini Vision OCR fallback notice:', err);
+    console.warn('Node server OCR fallback notice:', err);
     return null;
   }
 }
@@ -185,10 +254,7 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
     let stdoutData = '';
     let stderrData = '';
 
-    // منع خطأ write EPIPE عند إغلاق عملية بايثون مبكراً
-    py.stdin.on('error', () => {
-      // تجاهل خطأ EPIPE بأمان دون إيقاف خادم Node
-    });
+    py.stdin.on('error', () => {});
 
     py.stdout.on('data', (chunk) => {
       stdoutData += chunk.toString();
@@ -254,7 +320,26 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
   });
 }
 
-// مسار القراءة السحابي الهجين (Gemini Vision السريع أولاً ثم بايثون ثم البديل المحلي التلقائي)
+async function runBestServerTableOcr(imageBase64: string): Promise<any> {
+  const geminiResult = await runGeminiVisionTableOcr(imageBase64);
+  if (geminiResult?.success && Array.isArray(geminiResult.items) && geminiResult.items.length > 0) {
+    return geminiResult;
+  }
+
+  const pyResult = await runPythonTableOcr(imageBase64);
+  if (pyResult?.success && Array.isArray(pyResult.items) && pyResult.items.length > 0) {
+    return pyResult;
+  }
+
+  const nodeResult = await runNodeTableOcr(imageBase64);
+  if (nodeResult?.success && Array.isArray(nodeResult.items) && nodeResult.items.length > 0) {
+    return nodeResult;
+  }
+
+  return pyResult;
+}
+
+// مسار القراءة السحابي والخادمي الهجين (Gemini Vision -> Python OpenCV -> Node Server Tesseract -> Client Fallback)
 app.post('/api/gemini/parse-table', async (req, res) => {
   try {
     const { imageBase64 } = req.body;
@@ -267,12 +352,7 @@ app.post('/api/gemini/parse-table', async (req, res) => {
       });
     }
 
-    const geminiResult = await runGeminiVisionTableOcr(String(imageBase64));
-    if (geminiResult && geminiResult.success && Array.isArray(geminiResult.items) && geminiResult.items.length > 0) {
-      return res.status(200).json(geminiResult);
-    }
-
-    const result = await runPythonTableOcr(String(imageBase64));
+    const result = await runBestServerTableOcr(String(imageBase64));
     return res.status(200).json(result);
   } catch (error: any) {
     return res.status(200).json({
@@ -291,7 +371,7 @@ app.post('/api/python/parse-table', async (req, res) => {
     if (!imageBase64) {
       return res.status(200).json({ success: false, items: [], skipped_rows: [] });
     }
-    const result = await runPythonTableOcr(String(imageBase64));
+    const result = await runBestServerTableOcr(String(imageBase64));
     return res.status(200).json(result);
   } catch (error: any) {
     return res.status(200).json({
@@ -310,8 +390,7 @@ app.post('/api/gemini/extract-inventory-table', async (req, res) => {
     if (!imageBase64) {
       return res.status(400).json({ error: 'الصورة غير متوفرة' });
     }
-    const geminiResult = await runGeminiVisionTableOcr(String(imageBase64));
-    const result = geminiResult?.success ? geminiResult : await runPythonTableOcr(String(imageBase64));
+    const result = await runBestServerTableOcr(String(imageBase64));
     if (result?.success && Array.isArray(result.items)) {
       return res.status(200).json(
         result.items.map((item: any) => ({
@@ -335,8 +414,7 @@ app.post('/api/gemini/extract-part', async (req, res) => {
     if (!imageBase64) {
       return res.status(400).json({ error: 'الصورة غير متوفرة' });
     }
-    const geminiResult = await runGeminiVisionTableOcr(String(imageBase64));
-    const result = geminiResult?.success ? geminiResult : await runPythonTableOcr(String(imageBase64));
+    const result = await runBestServerTableOcr(String(imageBase64));
     const first = result?.items?.[0];
     return res.status(200).json({
       part_number: first?.part_number || '',
@@ -361,7 +439,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
     }
 
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-    if (!apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.startsWith('AIza')) {
+    if (geminiKeyInvalid || !apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY' || !apiKey.startsWith('AIza')) {
       return res.status(200).json({
         success: false,
         fallbackToLocal: true,
@@ -411,46 +489,58 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              part_number: { type: Type.STRING },
-              description_ar: { type: Type.STRING },
-              dimensions_calculation_ar: { type: Type.STRING },
-              material_ar: { type: Type.STRING },
-              estimated_weight_kg: { type: Type.NUMBER },
-              weight_label_ar: { type: Type.STRING },
-              size_category: { type: Type.STRING },
-              recommended_shelf_code: { type: Type.STRING },
-              recommended_bin: { type: Type.STRING },
-              placement_reason_ar: { type: Type.STRING },
+    const candidateModels = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-3.8-flash'];
+    for (const modelName of candidateModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  part_number: { type: Type.STRING },
+                  description_ar: { type: Type.STRING },
+                  dimensions_calculation_ar: { type: Type.STRING },
+                  material_ar: { type: Type.STRING },
+                  estimated_weight_kg: { type: Type.NUMBER },
+                  weight_label_ar: { type: Type.STRING },
+                  size_category: { type: Type.STRING },
+                  recommended_shelf_code: { type: Type.STRING },
+                  recommended_bin: { type: Type.STRING },
+                  placement_reason_ar: { type: Type.STRING },
+                },
+              },
             },
           },
-        },
-      },
-    });
+        });
 
-    const text = response.text?.trim();
-    if (!text) {
-      return res.status(200).json({
-        success: false,
-        fallbackToLocal: true,
-        analyses: [],
-      });
+        const text = response.text?.trim();
+        if (!text) continue;
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return res.status(200).json({
+            success: true,
+            analyses: parsed,
+          });
+        }
+      } catch (modelErr: any) {
+        const msg = String(modelErr?.message || '');
+        if (msg.includes('API key not valid') || msg.includes('UNAUTHENTICATED')) {
+          geminiKeyInvalid = true;
+          break;
+        }
+      }
     }
 
-    const parsed = JSON.parse(text);
     return res.status(200).json({
-      success: Array.isArray(parsed) && parsed.length > 0,
-      analyses: Array.isArray(parsed) ? parsed : [],
+      success: false,
+      fallbackToLocal: true,
+      analyses: [],
     });
   } catch (error: any) {
     return res.status(200).json({
@@ -487,6 +577,9 @@ app.get('/api/download-apk', handleApkDownload);
 
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
+
+  // تسخين مسبق لمحرك OCR الخادمي في الخلفية ليكون جاهزاً للاستجابة في أجزاء من الثانية
+  getNodeOcrWorker().catch(() => {});
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');

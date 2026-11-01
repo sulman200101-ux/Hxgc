@@ -46,24 +46,22 @@ export interface GeminiVisionResult {
 }
 
 const CLOUD_API_BASES = [
-  'https://ais-pre-4hh2zz5tfhmhshdxbd6ohq-344013703327.europe-west2.run.app',
-  'https://ais-dev-4hh2zz5tfhmhshdxbd6ohq-344013703327.europe-west2.run.app',
+  'https://ais-pre-6btcof3lrz3zy2rhcknzht-242614928618.europe-west2.run.app',
+  'https://ais-dev-6btcof3lrz3zy2rhcknzht-242614928618.europe-west2.run.app',
 ];
 
 export function getCandidateApiUrls(path: string): string[] {
   if (typeof window === 'undefined') return [path];
-  const host = window.location?.hostname || '';
   const proto = window.location?.protocol || '';
   const isNativeApk =
     proto === 'capacitor:' ||
     proto === 'file:' ||
-    host === 'localhost' ||
     (window as any).Capacitor?.isNativePlatform?.() === true;
 
   if (isNativeApk) {
     return CLOUD_API_BASES.map((base) => `${base}${path}`);
   }
-  return [path, ...CLOUD_API_BASES.map((base) => `${base}${path}`)];
+  return [path];
 }
 
 function isPhoneNumberNoise(digits: string): boolean {

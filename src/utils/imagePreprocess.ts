@@ -1,150 +1,191 @@
 /**
  * خوارزمية تنقية الصورة المتقدمة وحذف خطوط الجدول مع حفظ الحروف (Stroke-Preserving Grid Removal & Shadow-Free Normalization)
- * تقوم بـ:
- * 1. موازنة إضاءة الورقة موضعياً عبر الصورة التكاملية (Integral Image) لإزالة الظلال الجانبية.
- * 2. تطبيق زيادة حدة الحروف (Unsharp Mask) لإبراز الأرقام الباهتة في زوايا الورقة.
- * 3. حذف خطوط الشبكة العمودية والأفقية الفاصلة بين خلايا الجدول مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة معها.
+ * محسّنة للعمل بدون تجميد واجهة المستخدم (Non-Blocking Async Yielding) ومع سقف أبعاد ذكي لمنع التعليق عند 55%.
  */
+const yieldToMain = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 export const preprocessImageForOCR = async (imageSrc: string): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'Anonymous';
-    img.src = imageSrc;
-
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return reject('Canvas not supported');
-
-      const width = img.naturalWidth || img.width;
-      const height = img.naturalHeight || img.height;
-      canvas.width = width;
-      canvas.height = height;
-
-      ctx.drawImage(img, 0, 0, width, height);
-
-      const imageData = ctx.getImageData(0, 0, width, height);
-      const data = imageData.data;
-      const totalPixels = width * height;
-      const gray = new Float32Array(totalPixels);
-
-      for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-        gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      }
-
-      // 1. بناء الصورة التكاملية (Integral Image) لتقدير إضاءة خلفية الورقة الموضعية بـ O(1)
-      const intW = width + 1;
-      const integral = new Float64Array((width + 1) * (height + 1));
-      for (let y = 0; y < height; y++) {
-        let rowSum = 0;
-        const rowOff = y * width;
-        const intRowOff = (y + 1) * intW;
-        const prevIntRowOff = y * intW;
-        for (let x = 0; x < width; x++) {
-          rowSum += gray[rowOff + x];
-          integral[intRowOff + (x + 1)] = integral[prevIntRowOff + (x + 1)] + rowSum;
-        }
-      }
-
-      const radius = Math.max(22, Math.round(Math.min(width, height) / 28));
-      const norm = new Uint8ClampedArray(totalPixels);
-
-      for (let y = 0; y < height; y++) {
-        const y0 = Math.max(0, y - radius);
-        const y1 = Math.min(height, y + radius + 1);
-        const rowOff = y * width;
-        for (let x = 0; x < width; x++) {
-          const x0 = Math.max(0, x - radius);
-          const x1 = Math.min(width, x + radius + 1);
-          const count = (x1 - x0) * (y1 - y0);
-          const localSum =
-            integral[y1 * intW + x1] -
-            integral[y0 * intW + x1] -
-            integral[y1 * intW + x0] +
-            integral[y0 * intW + x0];
-          const localBg = Math.max(60, localSum / count);
-          const px = gray[rowOff + x];
-          norm[rowOff + x] = Math.min(255, Math.max(0, Math.round((px / localBg) * 255)));
-        }
-      }
-
-      // 2. زيادة حدة الحروف والأرقام (Unsharp Mask) قبل كشف خطوط الجدول
-      const sharpened = new Uint8ClampedArray(norm);
-      for (let y = 1; y < height - 1; y++) {
-        const rowOff = y * width;
-        for (let x = 1; x < width - 1; x++) {
-          const idx = rowOff + x;
-          const c = norm[idx];
-          const blur = (norm[idx - width] + norm[idx + width] + norm[idx - 1] + norm[idx + 1] + c * 4) >> 3;
-          const sharpenedVal = c + ((c - blur) * 3) / 5;
-          sharpened[idx] = Math.min(255, Math.max(0, Math.round(sharpenedVal)));
-        }
-      }
-
-      // 3. كشف خطوط الجدول الأفقية الطويلة جداً وحذفها مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة
-      const hKernel = Math.max(60, Math.round(width / 16));
-      const hLineMask = new Uint8Array(totalPixels);
-
-      for (let y = 0; y < height; y++) {
-        const rowOff = y * width;
-        let run = 0;
-        for (let x = 0; x < width; x++) {
-          if (sharpened[rowOff + x] < 195) {
-            run++;
-          } else {
-            if (run >= hKernel) {
-              for (let k = x - run; k < x; k++) hLineMask[rowOff + k] = 1;
-            }
-            run = 0;
-          }
-        }
-        if (run >= hKernel) {
-          for (let k = width - run; k < width; k++) hLineMask[rowOff + k] = 1;
-        }
-      }
-
-      const cleaned = new Uint8ClampedArray(sharpened);
-
-      // حذف الخطوط الأفقية فقط إذا لم تكن جزءاً من حرف أو رقم (نحافظ على أي بكسل يوجد فوقه أو تحته حبر داكن)
-      for (let y = 4; y < height - 4; y++) {
-        const rowOff = y * width;
-        for (let x = 0; x < width; x++) {
-          const idx = rowOff + x;
-          if (hLineMask[idx] || hLineMask[idx - width] || hLineMask[idx + width]) {
-            const aboveDark =
-              sharpened[idx - width * 2] < 210 ||
-              sharpened[idx - width * 3] < 210 ||
-              sharpened[idx - width * 4] < 210;
-            const belowDark =
-              sharpened[idx + width * 2] < 210 ||
-              sharpened[idx + width * 3] < 210 ||
-              sharpened[idx + width * 4] < 210;
-            if (!aboveDark && !belowDark) {
-              cleaned[idx] = 255;
-            }
-          }
-        }
-      }
-
-      // 4. تعزيز التباين المرن مع الحفاظ على الحروف الباهتة والأرقام الرفيعة (1, 0, 7)
-      for (let j = 0, i = 0; j < totalPixels; j++, i += 4) {
-        const v = cleaned[j];
-        const stretched =
-          v >= 232
-            ? 255
-            : v <= 95
-            ? 0
-            : Math.min(255, Math.max(0, Math.round(((v - 95) * 255) / 137)));
-        data[i] = stretched;
-        data[i + 1] = stretched;
-        data[i + 2] = stretched;
-      }
-
-      ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL('image/jpeg', 0.92));
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (resultUrl: string) => {
+      if (settled) return;
+      settled = true;
+      resolve(resultUrl);
     };
 
-    img.onerror = (err) => reject(err);
+    // صمام أمان زمني لمنع تعليق المعالجة لأي سبب
+    const safetyTimer = setTimeout(() => {
+      finish(imageSrc);
+    }, 6500);
+
+    const img = new Image();
+    img.crossOrigin = 'Anonymous';
+
+    img.onload = async () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) {
+          clearTimeout(safetyTimer);
+          return finish(imageSrc);
+        }
+
+        const rawW = img.naturalWidth || img.width;
+        const rawH = img.naturalHeight || img.height;
+        if (!rawW || !rawH) {
+          clearTimeout(safetyTimer);
+          return finish(imageSrc);
+        }
+
+        // سقف أبعاد ذكي (1400px كحد أقصى) لتسريع الفلتر 3 أضعاف ومنع استهلاك الذاكرة
+        const maxDim = 1400;
+        const scale = Math.max(rawW, rawH) > maxDim ? maxDim / Math.max(rawW, rawH) : 1;
+        const width = Math.max(1, Math.round(rawW * scale));
+        const height = Math.max(1, Math.round(rawH * scale));
+
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const data = imageData.data;
+        const totalPixels = width * height;
+        const gray = new Float32Array(totalPixels);
+
+        for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+          gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        }
+
+        await yieldToMain();
+
+        // 1. بناء الصورة التكاملية (Integral Image) لتقدير إضاءة خلفية الورقة الموضعية بـ O(1)
+        const intW = width + 1;
+        const integral = new Float64Array((width + 1) * (height + 1));
+        for (let y = 0; y < height; y++) {
+          let rowSum = 0;
+          const rowOff = y * width;
+          const intRowOff = (y + 1) * intW;
+          const prevIntRowOff = y * intW;
+          for (let x = 0; x < width; x++) {
+            rowSum += gray[rowOff + x];
+            integral[intRowOff + (x + 1)] = integral[prevIntRowOff + (x + 1)] + rowSum;
+          }
+        }
+
+        await yieldToMain();
+
+        const radius = Math.max(20, Math.round(Math.min(width, height) / 28));
+        const norm = new Uint8ClampedArray(totalPixels);
+
+        for (let y = 0; y < height; y++) {
+          const y0 = Math.max(0, y - radius);
+          const y1 = Math.min(height, y + radius + 1);
+          const rowOff = y * width;
+          for (let x = 0; x < width; x++) {
+            const x0 = Math.max(0, x - radius);
+            const x1 = Math.min(width, x + radius + 1);
+            const count = (x1 - x0) * (y1 - y0);
+            const localSum =
+              integral[y1 * intW + x1] -
+              integral[y0 * intW + x1] -
+              integral[y1 * intW + x0] +
+              integral[y0 * intW + x0];
+            const localBg = Math.max(60, localSum / count);
+            const px = gray[rowOff + x];
+            norm[rowOff + x] = Math.min(255, Math.max(0, Math.round((px / localBg) * 255)));
+          }
+        }
+
+        await yieldToMain();
+
+        // 2. زيادة حدة الحروف والأرقام (Unsharp Mask) قبل كشف خطوط الجدول
+        const sharpened = new Uint8ClampedArray(norm);
+        for (let y = 1; y < height - 1; y++) {
+          const rowOff = y * width;
+          for (let x = 1; x < width - 1; x++) {
+            const idx = rowOff + x;
+            const c = norm[idx];
+            const blur = (norm[idx - width] + norm[idx + width] + norm[idx - 1] + norm[idx + 1] + c * 4) >> 3;
+            const sharpenedVal = c + ((c - blur) * 3) / 5;
+            sharpened[idx] = Math.min(255, Math.max(0, Math.round(sharpenedVal)));
+          }
+        }
+
+        // 3. كشف خطوط الجدول الأفقية الطويلة جداً وحذفها مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة
+        const hKernel = Math.max(55, Math.round(width / 16));
+        const hLineMask = new Uint8Array(totalPixels);
+
+        for (let y = 0; y < height; y++) {
+          const rowOff = y * width;
+          let run = 0;
+          for (let x = 0; x < width; x++) {
+            if (sharpened[rowOff + x] < 195) {
+              run++;
+            } else {
+              if (run >= hKernel) {
+                for (let k = x - run; k < x; k++) hLineMask[rowOff + k] = 1;
+              }
+              run = 0;
+            }
+          }
+          if (run >= hKernel) {
+            for (let k = width - run; k < width; k++) hLineMask[rowOff + k] = 1;
+          }
+        }
+
+        const cleaned = new Uint8ClampedArray(sharpened);
+
+        for (let y = 4; y < height - 4; y++) {
+          const rowOff = y * width;
+          for (let x = 0; x < width; x++) {
+            const idx = rowOff + x;
+            if (hLineMask[idx] || hLineMask[idx - width] || hLineMask[idx + width]) {
+              const aboveDark =
+                sharpened[idx - width * 2] < 210 ||
+                sharpened[idx - width * 3] < 210 ||
+                sharpened[idx - width * 4] < 210;
+              const belowDark =
+                sharpened[idx + width * 2] < 210 ||
+                sharpened[idx + width * 3] < 210 ||
+                sharpened[idx + width * 4] < 210;
+              if (!aboveDark && !belowDark) {
+                cleaned[idx] = 255;
+              }
+            }
+          }
+        }
+
+        await yieldToMain();
+
+        // 4. تعزيز التباين المرن مع الحفاظ على الحروف الباهتة والأرقام الرفيعة
+        for (let j = 0, i = 0; j < totalPixels; j++, i += 4) {
+          const v = cleaned[j];
+          const stretched =
+            v >= 232
+              ? 255
+              : v <= 95
+              ? 0
+              : Math.min(255, Math.max(0, Math.round(((v - 95) * 255) / 137)));
+          data[i] = stretched;
+          data[i + 1] = stretched;
+          data[i + 2] = stretched;
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+        clearTimeout(safetyTimer);
+        finish(canvas.toDataURL('image/jpeg', 0.92));
+      } catch {
+        clearTimeout(safetyTimer);
+        finish(imageSrc);
+      }
+    };
+
+    img.onerror = () => {
+      clearTimeout(safetyTimer);
+      finish(imageSrc);
+    };
+
+    img.src = imageSrc;
   });
 };
 
