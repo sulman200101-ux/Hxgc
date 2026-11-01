@@ -57,15 +57,18 @@ export function charToDigitMapper(raw: string | number | null | undefined, defau
  */
 export function normalizeSapMaterialPrefix(code10: string): string {
   if (!/^\d{10}$/.test(code10)) return code10;
-  // في جداول SAP، الرقم الرابع في 1001xxxxxx قد يُقرأ 7 أو 4 أو 3 بسبب زاوية خط الرقم 1
-  if (/^100[743]\d{6}$/.test(code10)) {
+  // في جداول SAP، الرقم الرابع في 1001xxxxxx قد يُقرأ 7 أو 4 أو 3 أو 2 بسبب زاوية خط الرقم 1، أو 8/6/9 في 1000xxxxxx
+  if (/^100[7432]\d{6}$/.test(code10)) {
     return `1001${code10.slice(4)}`;
   }
-  // قد يُقرأ الصفر الأول أو الثاني كـ 9 (1900/1901 أو 1090/1091)
-  if (/^190[01]\d{6}$/.test(code10)) {
+  if (/^100[8695]\d{6}$/.test(code10)) {
+    return `1000${code10.slice(4)}`;
+  }
+  // قد يُقرأ الصفر الأول أو الثاني كـ 9 أو 6 أو 8 (1900/1901 أو 1090/1091 أو 1600/1800)
+  if (/^1[968]0[01]\d{6}$/.test(code10)) {
     return `100${code10.slice(3)}`;
   }
-  if (/^109[01]\d{6}$/.test(code10)) {
+  if (/^10[968][01]\d{6}$/.test(code10)) {
     return `100${code10.slice(3)}`;
   }
   if (/^[74]00[01]\d{6}$/.test(code10)) {
@@ -94,17 +97,21 @@ export function repair10DigitMaterialCode(raw: string | null | undefined): strin
   const directGlued = trimmed.match(/(?:^|[^0-9])(100\d{7})(?=[^0-9]|$)/);
   if (directGlued) return normalizeSapMaterialPrefix(directGlued[1]);
 
-  // 2. إزالة خطوط الجدول الطرفية (|) قبل تحويل الحروف البصرية المتشابهة
-  const strippedPipes = trimmed.replace(/^[|\s]+|[|\s]+$/g, '');
+  // 2. إزالة خطوط الجدول والرموز الطرفية قبل تحويل الحروف البصرية المتشابهة
+  const strippedPipes = trimmed
+    .replace(/^[|\[\](){}.:;,\-_/\\'"`\s]+|[|\[\](){}.:;,\-_/\\'"`\s]+$/g, '')
+    .replace(/\b(?:C006|C008|M016|MO16|D04D)\b/gi, '');
+
   const mapped = strippedPipes
-    .replace(/^(?:aot|aoo|qop|roo|too|190|109)/i, '100')
+    .replace(/^(?:aot|aoo|qop|roo|too|loo|ioo|190|109|160|180)/i, '100')
     .toUpperCase()
-    .replace(/[OQD°]/g, '0')
-    .replace(/[IL!'"`]/g, '1')
-    .replace(/[Z]/g, '2')
+    .replace(/[OQD°@U]/g, '0')
+    .replace(/[IL!|'"`/]/g, '1')
+    .replace(/[Z?]/g, '2')
     .replace(/[S$§]/g, '5')
     .replace(/[G%]/g, '6')
-    .replace(/[B]/g, '8');
+    .replace(/[B&]/g, '8')
+    .replace(/[¢]/g, '9');
 
   const exact10 = mapped.match(/(?:^|[^0-9])(100\d{7})(?=[^0-9]|$)/);
   if (exact10) return normalizeSapMaterialPrefix(exact10[1]);
@@ -114,12 +121,25 @@ export function repair10DigitMaterialCode(raw: string | null | undefined): strin
     const fixed = normalizeSapMaterialPrefix(digitsOnly);
     if (/^100\d{7}$/.test(fixed)) return fixed;
   }
+
+  // البحث بالنافذة المنزلقة عن 10 أرقام تبدأ بـ 1000 أو 1001 إذا التصق رقم التسلسل (1..99) في البداية أو النهاية
+  if (digitsOnly.length >= 11 && digitsOnly.length <= 14) {
+    for (let offset = 0; offset <= digitsOnly.length - 10; offset++) {
+      const sub = normalizeSapMaterialPrefix(digitsOnly.slice(offset, offset + 10));
+      if (/^100[01]\d{6}$/.test(sub)) {
+        return sub;
+      }
+    }
+  }
+
   // إذا التصق رقم واحد في البداية من خط الجدول العمودي (مثل 71001078850 أو 41001087218)
   if (/^[147]100\d{7}$/.test(digitsOnly)) {
     return normalizeSapMaterialPrefix(digitsOnly.slice(1));
   }
-  // ترميم إذا سقط الرقم الأول (1) وبقي 00xxxxxxx (9 أرقام تبدأ بـ 00)
-  if (/^00\d{7}$/.test(digitsOnly)) return normalizeSapMaterialPrefix(`1${digitsOnly}`);
+  // ترميم إذا سقط الرقم الأول (1) وبقي 000xxxxxx أو 001xxxxxx (9 أرقام تبدأ بـ 00)
+  if (/^00[0174]\d{6}$/.test(digitsOnly)) {
+    return normalizeSapMaterialPrefix(`1${digitsOnly}`);
+  }
 
   return null;
 }

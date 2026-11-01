@@ -193,7 +193,7 @@ async function runNodeTableOcr(imageBase64: string, preprocessedBase64?: string)
       extracted = parseRawTextOcr(data.text || '');
     }
 
-    if (preprocessedBase64 && extracted.length < 28) {
+    if (preprocessedBase64 && extracted.length < 38) {
       const cleanPre = preprocessedBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
       if (cleanPre) {
         const preBuf = Buffer.from(cleanPre, 'base64');
@@ -575,13 +575,13 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v2.0.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.9.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.8.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.7.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
-  path.resolve(__dirname, 'public', 'asmo-inventory-v1.6.0.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.0.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.9.0.apk'),
-  path.resolve(__dirname, 'downloads', 'asmo-inventory-v1.8.0.apk'),
   path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
 ];
 
@@ -589,17 +589,18 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v1.9.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.0.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v1.9.0/asmo-inventory-v1.9.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.0.0/asmo-inventory-v2.0.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v2.0.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.9.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.8.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v1.7.0.apk', handleApkDownload);
