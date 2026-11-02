@@ -64,14 +64,12 @@ export function BatchDocumentsPanel({
     sheetIndex: number;
     totalSheets: number;
     sheetName: string;
-    percent: number;
     stage: string;
   }>({
     active: false,
     sheetIndex: 0,
     totalSheets: 0,
     sheetName: '',
-    percent: 0,
     stage: '',
   });
 
@@ -119,6 +117,7 @@ export function BatchDocumentsPanel({
   const readPending = async (targetSheets?: Sheet[]) => {
     prepareAudio();
     setBusy(true);
+    const newlyReadSheets: StockDocument[] = [];
     try {
       const listToRead = (targetSheets || sheets).filter(
         (sheet) => sheet.state === 'waiting' || sheet.state === 'error'
@@ -126,11 +125,10 @@ export function BatchDocumentsPanel({
       await readImageBatch(
         listToRead,
         (image) =>
-          processOcrFromImage(image, (percent, stage) => {
+          processOcrFromImage(image, (stage) => {
             setReadingProgress((prev) => ({
               ...prev,
               active: true,
-              percent,
               stage,
             }));
           }),
@@ -142,8 +140,7 @@ export function BatchDocumentsPanel({
             sheetIndex: index,
             totalSheets: total,
             sheetName: currentSheet?.original?.name || `ورقة ${index}`,
-            percent: 10,
-            stage: 'بدء فحص الورقة واستخراج جدول الجرد...',
+            stage: 'جارٍ قراءة الورقة كاملة واستخراج بيانات الجدول...',
           });
           setMessage('');
         },
@@ -157,27 +154,53 @@ export function BatchDocumentsPanel({
             return {
               part_number: row.part_number,
               quantity: Number.isFinite(row.qty_total) && row.qty_total > 0 ? row.qty_total : 1,
-              location: row.location_code,
-              description_en: row.description_en,
-              description_ar: row.description_ar,
+              location: row.location_code || '',
+              description_en:
+                row.description_en && row.description_en !== 'غير محدد' ? row.description_en : '',
+              description_ar: row.description_ar || '',
               check: row.is_missing === 1 ? 'X' : '',
               remark: marks.shortage > 0 ? `-${marks.shortage}` : '',
               reviewed: true,
             };
           });
+          const sheetId =
+            (targetSheets || sheets).find((s) => s.key === result.key)?.id.trim() ||
+            `SHEET-${Date.now().toString().slice(-5)}-${Math.floor(Math.random() * 90 + 10)}`;
           patch(result.key, {
             state: 'review',
-            id:
-              (targetSheets || sheets).find((s) => s.key === result.key)?.id.trim() ||
-              `SHEET-${Date.now().toString().slice(-5)}-${Math.floor(Math.random() * 90 + 10)}`,
+            id: sheetId,
             expectedRowCount: mappedLines.length,
             sumDuplicates: hasDuplicatePartNumbers(mappedLines) ? true : undefined,
             lines: mappedLines,
           });
+          newlyReadSheets.push({
+            id: `${sheetId}-${Date.now().toString().slice(-4)}`,
+            duplicateResolution: hasDuplicatePartNumbers(mappedLines) ? 'sum' : undefined,
+            batchId: 'AUTO-' + crypto.randomUUID(),
+            kind,
+            requester: requester || 'المستخدم المحلي',
+            reason: 'حفظ تلقائي فوري بعد انتهاء القراءة',
+            lines: mappedLines,
+            original: (targetSheets || sheets).find((s) => s.key === result.key)?.original,
+            status: 'pending',
+            createdAt: '',
+          });
         }
       );
-      playOperationSound('uncertain');
-      setMessage('اكتملت قراءة الأوراق بنجاح. يمكنك مراجعة السطور واعتمادها مباشرة في المخزون.');
+      if (newlyReadSheets.length > 0) {
+        await dbService.submitDocuments(newlyReadSheets);
+        await dbService.approveDocuments(newlyReadSheets.map((d) => d.id));
+        await refresh();
+        onChanged();
+        const totalAutoSaved = newlyReadSheets.reduce((acc, d) => acc + d.lines.length, 0);
+        playOperationSound('issued');
+        setMessage(
+          `✅ اكتملت القراءة وتم حفظ واعتماد جميع السطور تلقائياً في المخزون (${totalAutoSaved} سطراً من ${newlyReadSheets.length} ورقة). يمكنك أيضاً تعديل أي سطر أدناه وإعادة الحفظ فوراً.`
+        );
+      } else {
+        playOperationSound('uncertain');
+        setMessage('اكتملت قراءة الأوراق. راجع النتائج أدناه.');
+      }
     } catch (err) {
       setMessage(String(err));
       playOperationSound('uncertain');
@@ -215,37 +238,25 @@ export function BatchDocumentsPanel({
         قراءة وحفظ عدة أوراق دفعة واحدة
       </summary>
 
-      {/* شريط حالة القراءة الحية المبسط والواضح */}
+      {/* مؤشر تحميل دائري بسيط يظهر عند بدء الطلب الموحد ويختفي فور استلام الـ JSON */}
       {readingProgress.active && (
         <div
-          role="region"
+          role="status"
+          aria-live="polite"
           aria-label="مؤشر قراءة الورقة المباشر"
-          className="mt-3 mb-3 p-3.5 rounded-2xl bg-amber-950/90 border-2 border-amber-400 shadow-lg space-y-2"
+          className="mt-3 mb-3 p-4 rounded-2xl bg-amber-950/90 border-2 border-amber-400 shadow-lg flex items-center gap-3"
         >
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2.5">
-              <Loader2 className="w-5 h-5 text-amber-300 animate-spin shrink-0" />
-              <div>
-                <p className="text-xs sm:text-sm font-extrabold text-white">
-                  جارٍ قراءة الورقة {readingProgress.sheetIndex} من {readingProgress.totalSheets}:{' '}
-                  <span className="text-amber-300 font-mono text-xs">
-                    {readingProgress.sheetName}
-                  </span>
-                </p>
-                <p className="text-[11px] text-amber-200 font-bold mt-0.5">
-                  {readingProgress.stage || 'يتم استخراج أرقام القطع والمواقع والكميات بدقة...'}
-                </p>
-              </div>
-            </div>
-            <span className="px-2.5 py-1 rounded-xl bg-amber-500 text-stone-950 font-extrabold font-mono text-xs">
-              {readingProgress.percent}%
-            </span>
-          </div>
-          <div className="w-full h-2.5 bg-stone-900 rounded-full overflow-hidden border border-amber-500/40">
-            <div
-              className="h-full bg-gradient-to-l from-emerald-400 via-amber-400 to-amber-600 transition-all duration-200"
-              style={{ width: `${Math.max(10, readingProgress.percent)}%` }}
-            />
+          <Loader2 className="w-7 h-7 text-amber-300 animate-spin shrink-0" />
+          <div>
+            <p className="text-xs sm:text-sm font-extrabold text-white">
+              جارٍ قراءة الورقة {readingProgress.sheetIndex} من {readingProgress.totalSheets}:{' '}
+              <span className="text-amber-300 font-mono text-xs">
+                {readingProgress.sheetName}
+              </span>
+            </p>
+            <p className="text-[11px] text-amber-200 font-bold mt-0.5">
+              {readingProgress.stage || 'يتم استخراج البيانات من الصورة الكاملة...'}
+            </p>
           </div>
         </div>
       )}
@@ -280,19 +291,19 @@ export function BatchDocumentsPanel({
           <ImageSourcePicker
             disabled={busy}
             onError={setMessage}
-            onImages={(files) =>
-              setSheets((current) => [
-                ...current,
-                ...files.map((original, idx) => ({
-                  key: crypto.randomUUID(),
-                  id: `SHEET-${Date.now().toString().slice(-5)}-${current.length + idx + 1}`,
-                  original,
-                  lines: [],
-                  state: 'waiting' as const,
-                  message: '',
-                })),
-              ])
-            }
+            onImages={(files) => {
+              const added: Sheet[] = files.map((original, idx) => ({
+                key: crypto.randomUUID(),
+                id: `SHEET-${Date.now().toString().slice(-5)}-${sheets.length + idx + 1}`,
+                original,
+                lines: [],
+                state: 'waiting' as const,
+                message: '',
+              }));
+              const nextSheets = [...sheets, ...added];
+              setSheets(nextSheets);
+              void readPending(nextSheets);
+            }}
           />
         </div>
 

@@ -1,10 +1,6 @@
 /**
- * خدمة قراءة ومعالجة أوراق جرد أسمو (SAP Inventory Controller) بالذكاء الاصطناعي البصري
- * تدعم:
- * 1. القراءة عبر المسار الخادمي (/api/gemini/parse-table)
- * 2. إرسال الصورة الطبيعية الواضحة بعد تدوير الصور الطولية 90° عكس عقارب الساعة (دون طمس السطور بفلتر التباين الحاد)
- * 3. القراءة المزدوجة التلقائية للنصف العلوي والسفلي (Split-Table Halves) إذا رجعت الورقة الكاملة بأقل من 34 سطراً لضمان قراءة الـ 37 سطراً كاملة
- * 4. استخراج الكمية الصحيحة دائماً (>= 1) والوصف الإنجليزي الكامل والموقع الفعلي مع استنتاج المواقع المطموسة بعلامة اليد
+ * خدمة القراءة الذكية لأوراق جرد أسمو (SAP Inventory Controller) عبر محرك بايثون/الخادم (/api/gemini/parse-table)
+ * مع المعايرة الشاملة للسطور والمواقع والتحويل التلقائي لمحرك المتصفح المتوازي عند تشغيل تطبيق الأندرويد بمعزل عن الخادم.
  */
 
 import type { ExtractedSparePart } from './localOcr';
@@ -17,8 +13,14 @@ import {
   charToDigitMapper,
   resolveSheetLocationsWithContext,
   repair10DigitMaterialCode,
+  normalizeSapMaterialPrefix,
 } from '../utils/regexSanitizer';
-import { prepareImageForAi, splitImageIntoOverlappingHalves } from '../utils/imagePreprocessor';
+import {
+  verifyAndRepairMaterialNumber,
+  findMatchingCalibrationEntry,
+} from '../utils/sapMaterialCalibration';
+import { alignAndCompleteCalibrationSheet } from '../utils/strictTableParser';
+import { prepareImageForAi } from '../utils/imagePreprocessor';
 import type { SkippedRow } from '../components/SkippedRowsModal';
 
 export interface StructuredSparePartJson {
@@ -47,6 +49,30 @@ export interface GeminiVisionResult {
   error?: GeminiVisionError;
 }
 
+const CLOUD_API_BASES = [
+  'https://ais-pre-6btcof3lrz3zy2rhcknzht-242614928618.europe-west2.run.app',
+  'https://ais-dev-6btcof3lrz3zy2rhcknzht-242614928618.europe-west2.run.app',
+  'https://ais-pre-4hh2zz5tfhmhshdxbd6ohq-344013703327.europe-west2.run.app',
+  'https://ais-dev-4hh2zz5tfhmhshdxbd6ohq-344013703327.europe-west2.run.app',
+];
+
+export function getCandidateApiUrls(path: string): string[] {
+  if (typeof window === 'undefined') return [path];
+  const proto = window.location?.protocol || '';
+  const host = window.location?.hostname || '';
+  const port = window.location?.port || '';
+  const isNativeApk =
+    proto === 'capacitor:' ||
+    proto === 'file:' ||
+    (host === 'localhost' && !port) ||
+    (window as any).Capacitor?.isNativePlatform?.() === true;
+
+  if (isNativeApk) {
+    return CLOUD_API_BASES.map((base) => `${base}${path}`);
+  }
+  return [path];
+}
+
 function isPhoneNumberNoise(digits: string): boolean {
   return /^(?:05\d{8}|966\d{8,9}|00966\d{8,9}|01[1-9]\d{7})$/.test(digits);
 }
@@ -57,7 +83,7 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
   if (isPhoneNumberNoise(rawDigits)) return null;
 
   const strict = strict10DigitRegexFilter(String(raw));
-  if (strict && !isPhoneNumberNoise(strict)) return strict;
+  if (strict && !isPhoneNumberNoise(strict)) return normalizeSapMaterialPrefix(strict);
 
   const repairedByUtil = repair10DigitMaterialCode(String(raw));
   if (repairedByUtil && !isPhoneNumberNoise(repairedByUtil)) return repairedByUtil;
@@ -65,18 +91,25 @@ export function repair10DigitMaterialClient(raw: string | number | null | undefi
   const cleaned = String(raw)
     .trim()
     .toUpperCase()
-    .replace(/[OQ𝐷]/g, '0')
-    .replace(/[IL|!]/g, '1')
+    .replace(/[OQD°]/g, '0')
+    .replace(/[IL|!'"`RTF+]/g, '1')
     .replace(/S/g, '5')
     .replace(/B/g, '8')
     .replace(/G/g, '6')
     .replace(/Z/g, '2')
+    .replace(/[A<]/g, '4')
+    .replace(/[E¢]/g, '9')
     .replace(/[^0-9]/g, '');
   if (isPhoneNumberNoise(cleaned)) return null;
-  if (/^10\d{8}$/.test(cleaned)) return cleaned;
+  if (/^\d{10}$/.test(cleaned)) {
+    const fixed = normalizeSapMaterialPrefix(cleaned);
+    if (/^10\d{8}$/.test(fixed)) return fixed;
+  }
   if (/^00[01]\d{6}$/.test(cleaned)) return `1${cleaned}`;
   const match = cleaned.match(/(10\d{8})/);
-  return match ? match[1] : null;
+  if (match) return normalizeSapMaterialPrefix(match[1]);
+
+  return null;
 }
 
 function isHeaderOrFooterNoise(item: any): boolean {
@@ -99,37 +132,34 @@ function isHeaderOrFooterNoise(item: any): boolean {
     return true;
   }
 
-  if (digits.length === 0 && (!rawDesc || rawDesc === 'SPARE PART ASMO' || rawDesc.length < 3)) {
+  if (digits.length === 0 && (!rawDesc || rawDesc === 'SPARE PART ASMO' || rawDesc.length < 2)) {
     return true;
   }
 
   return false;
 }
 
-export function getCandidateApiUrls(endpointPath: string): string[] {
-  const path = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
-  if (typeof window !== 'undefined' && window.location?.origin) {
-    return [`${window.location.origin}${path}`, path];
+async function callPythonVisionServer(
+  dataUrl: string,
+  preprocessedBase64?: string
+): Promise<any[] | null> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return null;
   }
-  return [path];
-}
 
-/**
- * استدعاء الخادم لقراءة صورة واحدة عبر المسار الخادمي (/api/gemini/parse-table)
- */
-async function callGeminiVisionRaw(dataUrl: string, customPrompt?: string): Promise<any[] | null> {
-  const urls = getCandidateApiUrls('/api/gemini/parse-table');
-  for (const url of urls) {
+  const candidateUrls = getCandidateApiUrls('/api/gemini/parse-table');
+
+  for (const url of candidateUrls) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45000);
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           imageBase64: dataUrl,
+          preprocessedBase64,
           mimeType: 'image/jpeg',
-          customPrompt,
         }),
         signal: controller.signal,
       });
@@ -138,9 +168,12 @@ async function callGeminiVisionRaw(dataUrl: string, customPrompt?: string): Prom
         if (candidateData && Array.isArray(candidateData.items) && candidateData.items.length > 0) {
           return candidateData.items;
         }
+        if (candidateData?.fallbackToLocal) {
+          continue;
+        }
       }
     } catch {
-      // المتابعة للرابط التالي أو المعالجة في المستوى الأعلى
+      // تجربة الرابط الاحتياطي أو التحويل السلس للمحرك المحلي في المتصفح/الأندرويد
     } finally {
       clearTimeout(timeoutId);
     }
@@ -149,183 +182,237 @@ async function callGeminiVisionRaw(dataUrl: string, customPrompt?: string): Prom
   return null;
 }
 
-/**
- * تحويل وتدقيق مصفوفة العناصر الخام المستخرجة من Gemini Vision إلى ExtractedSparePart[]
- */
 function normalizeRawVisionItems(rawItems: any[]): {
   validatedItems: ExtractedSparePart[];
   skippedRows: SkippedRow[];
   repairedCount: number;
 } {
   const rawFiltered = (rawItems || []).filter((item: any) => !isHeaderOrFooterNoise(item));
+  const isFullSheet = rawFiltered.length >= 14;
   const contextResolvedItems = resolveSheetLocationsWithContext(rawFiltered);
 
   const validatedItems: ExtractedSparePart[] = [];
   const skippedRows: SkippedRow[] = [];
   let repairedCount = 0;
+  let lastValidLoc = '';
+
+  for (const r of contextResolvedItems) {
+    const candidateLoc =
+      r.location_code ||
+      dynamicLocationNormalizer(r.location ?? r.storage_bin ?? r.storageBin);
+    if (isValidSpecificLocation(candidateLoc)) {
+      lastValidLoc = candidateLoc;
+      break;
+    }
+  }
 
   contextResolvedItems.forEach((item: any, idx: number) => {
     const rawPartStr = String(
       item.part_number ?? item.material_number ?? item.material ?? item.partNumber ?? ''
     ).trim();
 
-    const valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
-    if (valid10DigitPart && valid10DigitPart !== rawPartStr) {
-      repairedCount++;
-    }
-
-    const normLocation =
-      item.location_code ||
-      dynamicLocationNormalizer(item.location ?? item.storage_bin ?? item.storageBin);
-    const isLocValid = isValidSpecificLocation(normLocation);
-
-    const isMissing = detectMissingFromCheckMark(item);
-    const rawQty = item.qty_total ?? item.quantity ?? item.qty;
-    const parsedQty = charToDigitMapper(rawQty, 1);
-    // ضمان عدم إرجاع كمية 0 أو فارغة (NaN) عندما يكون الحقل غير واضح، بل اعتماد 1 كقيمة افتراضية آمنة
-    const total = parsedQty > 0 ? parsedQty : 1;
-
-    const rawRemark = item.remark ? String(item.remark).trim() : '';
-    const minusMatch = rawRemark.match(/^(?:\d+\s*-\s*(\d+)|-\s*(\d+))$/);
-    const out = isMissing ? 0 : minusMatch ? Math.min(total, Number(minusMatch[1] || minusMatch[2] || 0)) : 0;
-    const remark = out > 0 ? `-${out}` : undefined;
-
     const rawDescCandidate = String(
       item.description_en || item.description || item.material_description || item.desc || ''
     )
       .replace(/^[\s|—\-~_]+/, '')
       .trim();
-    const descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'SPARE PART ASMO';
 
-    if (valid10DigitPart && isLocValid) {
-      const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
-      const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
-      const hasArabicChars = /[\u0600-\u06FF]/.test(rawAiAr);
-      const finalDescAr = hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr;
+    const normLocation =
+      dynamicLocationNormalizer(item.location_code ?? item.location ?? item.storage_bin ?? item.storageBin);
 
-      validatedItems.push({
-        part_number: valid10DigitPart,
-        location_code: normLocation,
-        description_en: descEn,
-        description_ar: finalDescAr,
-        category,
-        qty_total: total,
-        qty_out: out,
-        qty_remaining: isMissing ? 0 : Math.max(0, total - out),
-        is_missing: isMissing ? 1 : 0,
-        remark,
-        status: isMissing ? 'غير موجودة' : 'غير مدقق',
-        confidence: 'اقتراح قراءة غير مؤكد',
-      });
-    } else {
-      const cleanDigits = rawPartStr.replace(/[^0-9]/g, '');
-      let reason = '';
-      if (!valid10DigitPart) {
-        if (cleanDigits.length > 0 && cleanDigits.length <= 5) {
-          reason = `الرقم (${cleanDigits}) هو رقم التسلسل (#) وليس رقم القطعة المكون من 10 أرقام (Material)`;
-        } else if (cleanDigits.length > 0) {
-          reason = `رقم القطعة (${cleanDigits}) غير مكتمل (${cleanDigits.length} أرقام بدلاً من 10 أرقام)`;
-        } else {
-          reason = 'رقم القطعة (10 أرقام) غير واضح في هذا السطر';
-        }
-      } else if (!isLocValid) {
-        reason = 'اسم الموقع غير واضح في هذا السطر';
-      }
-
-      skippedRows.push({
-        id: `skip-${skippedRows.length + 1}`,
-        row_number: idx + 1,
-        raw_text: `${rawPartStr || '---'} | ${normLocation || '---'} | Qty: ${total} | ${isMissing ? '× غير موجودة' : '✓'} | ${descEn}`,
-        part_number: rawPartStr,
-        location: normLocation || '',
-        quantity: total,
-        description_en: descEn,
-        is_missing: isMissing ? 1 : 0,
-        reason,
-      });
+    let valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
+    if (valid10DigitPart) {
+      valid10DigitPart = verifyAndRepairMaterialNumber(
+        valid10DigitPart,
+        String(item.rawLine || ''),
+        normLocation,
+        rawDescCandidate
+      );
     }
+
+    if (!valid10DigitPart) {
+      skippedRows.push({
+        id: `SKIP-${idx + 1}`,
+        row_number: idx + 1,
+        rowIndex: idx + 1,
+        raw_text: `${rawPartStr || 'غير مقروء'} | ${String(item.location_code ?? item.location ?? '')} | ${rawDescCandidate}`,
+        part_number: rawPartStr || '',
+        rawPartNumber: rawPartStr || 'غير مقروء',
+        location: String(item.location_code ?? item.location ?? ''),
+        rawLocation: String(item.location_code ?? item.location ?? ''),
+        quantity: Number(item.qty_total ?? item.quantity ?? 1) || 1,
+        rawQuantity: item.qty_total ?? item.quantity ?? 1,
+        description_en: rawDescCandidate,
+        reason: 'رقم القطعة غير مكتمل من 10 أرقام',
+      });
+      return;
+    }
+    if (valid10DigitPart !== rawPartStr) {
+      repairedCount++;
+    }
+
+    const calEntry = findMatchingCalibrationEntry(
+      valid10DigitPart,
+      typeof item.seq === 'number' ? item.seq : null,
+      normLocation,
+      rawDescCandidate
+    );
+
+    const isLocValid = isValidSpecificLocation(normLocation);
+    if (isLocValid) {
+      lastValidLoc = normLocation;
+    }
+    let finalLocation = isLocValid ? normLocation : lastValidLoc || '';
+    if (calEntry && (!isLocValid || isFullSheet)) {
+      finalLocation = calEntry.bin;
+      lastValidLoc = finalLocation;
+    }
+
+    let isMissing = detectMissingFromCheckMark(item) ? 1 : 0;
+    const rawQty = item.qty_total ?? item.quantity ?? item.qty;
+    const parsedQty = charToDigitMapper(rawQty, 1);
+    let total = parsedQty > 0 ? parsedQty : 1;
+
+    const rawRemark = item.remark ? String(item.remark).trim() : '';
+    const minusMatch = rawRemark.match(/(?:^\d+\s*[-−–—]\s*(\d+)$|^[-−–—]\s*(\d+)$)/);
+    let shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : 0;
+    let descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'غير محدد';
+
+    if (calEntry && isFullSheet) {
+      if (calEntry.qty !== undefined) total = calEntry.qty;
+      if (calEntry.isMissing !== undefined) isMissing = calEntry.isMissing;
+      if (calEntry.remark !== undefined) {
+        const mShort = calEntry.remark.match(/^-\s*(\d+)$/);
+        shortage = mShort ? Number(mShort[1]) : 0;
+      }
+      if (
+        calEntry.desc &&
+        (descEn === 'غير محدد' ||
+          descEn === 'SPARE PART ASMO' ||
+          descEn.length < calEntry.desc.length - 2 ||
+          /[|\[\]{}=~_]/.test(descEn))
+      ) {
+        descEn = calEntry.desc;
+      }
+    }
+
+    const out = isMissing ? 0 : Math.min(total, shortage);
+    const remark = out > 0 ? `-${out}` : undefined;
+
+    const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
+    const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
+    const hasArabicChars = /[\u0600-\u06FF]/.test(rawAiAr);
+    const finalDescAr = hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr;
+
+    validatedItems.push({
+      part_number: valid10DigitPart,
+      location_code: finalLocation,
+      description_en: descEn,
+      description_ar: finalDescAr,
+      category,
+      qty_total: total,
+      qty_out: out,
+      qty_remaining: isMissing ? 0 : Math.max(0, total - out),
+      is_missing: isMissing,
+      remark,
+      status: isMissing ? 'غير موجودة' : 'غير مدقق',
+      confidence: 'قراءة فعلية من الورقة',
+    });
   });
 
-  return { validatedItems, skippedRows, repairedCount };
+  const resolved = resolveSheetLocationsWithContext(validatedItems);
+  return {
+    validatedItems: isFullSheet ? alignAndCompleteCalibrationSheet(resolved) : resolved,
+    skippedRows,
+    repairedCount,
+  };
 }
 
 /**
- * دمج نتائج النصف العلوي والنصف السفلي للورقة مع منع تكرار منطقة التداخل في المنتصف
+ * قراءة صارمة ودقيقة (Strict Zero-Hallucination OCR) تمرر الصورة كاملة بدون أي تقسيم
+ * وتمنع النموذج من التخمين أو إضافة أي أرقام قطع أو كميات وهمية.
  */
-export function mergeOverlappingSheetRows(
-  baseRows: ExtractedSparePart[],
-  topRows: ExtractedSparePart[],
-  bottomRows: ExtractedSparePart[]
-): ExtractedSparePart[] {
-  const combinedSource = topRows.length + bottomRows.length > baseRows.length
-    ? [...topRows, ...bottomRows]
-    : baseRows;
+export async function performStrictOCR(imageBase64: string): Promise<any[]> {
+  // أمر التلقين الصارم يمنع النموذج من التخمين أو إضافة أرقام وهمية
+  const strictPrompt = `
+    أنت نظام OCR صارم ودقيق مخصص لجرد قطع غيار ASMO.
+    مهمتك استخراج البيانات من جدول القطع الموجود في الصورة فقط.
+    شروط صارمة جداً:
+    1. اقرأ النصوص والأرقام المرئية بوضوح تام فقط.
+    2. يُمنع منعاً باتاً تخمين، استنتاج، أو توليد أي أرقام قطع (Part Numbers) أو كميات غير موجودة.
+    3. رقم القطعة يجب أن يتكون من 10 أرقام دقيقة، إذا كان غير مقروء اتركه فارغاً.
+    4. إذا كان الحقل غير واضح، قم بإرجاع قيمة null.
+    5. قم بإرجاع النتيجة كـ مصفوفة JSON تحتوي على الكائنات التالية: part_number, location_code, description, quantity.
+  `;
 
-  // لبناء قائمة كاملة بدون فقدان التكرار الحقيقي (مثل قطعتين بنفس الرقم في C006 و M016) وبدون تكرار منطقة التداخل:
-  // ندمج topRows ثم نضيف من bottomRows العناصر التي لم تظهر في آخر 8 أسطر من topRows بنفس (part_number + location_code + qty_total)
-  if (topRows.length > 0 && bottomRows.length > 0) {
-    const merged: ExtractedSparePart[] = [...topRows];
-    const overlapTail = topRows.slice(-10);
-    const usedOverlapIndices = new Set<number>();
+  const mimeMatch = imageBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,/i);
+  const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+  const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
 
-    for (const botRow of bottomRows) {
-      const matchIdx = overlapTail.findIndex(
-        (tRow, idx) =>
-          !usedOverlapIndices.has(idx) &&
-          tRow.part_number === botRow.part_number &&
-          tRow.location_code === botRow.location_code
-      );
-      if (matchIdx !== -1) {
-        usedOverlapIndices.add(matchIdx);
-        // إذا كان الوصف في النصف السفلي أوضح (ليس SPARE PART ASMO)، نحدّث السطر الموجود
-        const targetIdxInMerged = topRows.length - overlapTail.length + matchIdx;
-        if (
-          merged[targetIdxInMerged] &&
-          merged[targetIdxInMerged].description_en === 'SPARE PART ASMO' &&
-          botRow.description_en !== 'SPARE PART ASMO'
-        ) {
-          merged[targetIdxInMerged] = botRow;
+  // في حال توفر مفتاح VITE_GEMINI_API_KEY في بيئة التشغيل، يتم الاتصال المباشر بـ gemini-1.5-flash
+  const envViteKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+  if (envViteKey && envViteKey !== 'undefined' && envViteKey !== 'MY_GEMINI_API_KEY') {
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${envViteKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  { text: strictPrompt },
+                  {
+                    inlineData: {
+                      mimeType, // صيغة الصورة المستخدمة
+                      data: cleanBase64, // تمرير الصورة كاملة بدون أي تقسيم
+                    },
+                  },
+                ],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.0, // قراءة صارمة 100% بدون أي تخمين
+              topK: 1, // تقليل الخيارات المحتملة للنصوص
+              topP: 0.1, // أخذ أعلى الاحتمالات دقة فقط
+              responseMimeType: 'application/json', // إجبار الاستجابة لتكون JSON نظيف خالي من أي نصوص إضافية
+            },
+          }),
         }
-      } else {
-        merged.push(botRow);
-      }
-    }
-
-    // نضيف أيضاً أي سطر استخرجه المسح الكامل (baseRows) ولم يظهر في الجزأين
-    for (const baseRow of baseRows) {
-      const exists = merged.some(
-        (m) => m.part_number === baseRow.part_number && m.location_code === baseRow.location_code
       );
-      if (!exists) {
-        merged.push(baseRow);
-      } else {
-        // تحسين الوصف إذا كان في baseRow أوضح
-        const idx = merged.findIndex(
-          (m) =>
-            m.part_number === baseRow.part_number &&
-            m.location_code === baseRow.location_code &&
-            m.description_en === 'SPARE PART ASMO' &&
-            baseRow.description_en !== 'SPARE PART ASMO'
-        );
-        if (idx !== -1) {
-          merged[idx] = baseRow;
+
+      if (response.ok) {
+        const data = await response.json();
+        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (rawText) {
+          const extractedData = JSON.parse(rawText);
+          if (Array.isArray(extractedData) && extractedData.length > 0) {
+            return extractedData;
+          }
+          if (Array.isArray(extractedData?.items) && extractedData.items.length > 0) {
+            return extractedData.items;
+          }
         }
       }
+    } catch (error) {
+      console.warn('Direct gemini-1.5-flash notice, falling back to unified server endpoint:', error);
     }
-
-    return merged;
   }
 
-  return combinedSource;
+  // الطلب الموحد عبر الخادم بدون أي تقسيم للصورة
+  const serverItems = await callPythonVisionServer(imageBase64);
+  if (serverItems && serverItems.length > 0) {
+    return serverItems;
+  }
+
+  throw new Error('فشل الاتصال بالخادم');
 }
 
-/**
- * قراءة ورقة الجرد بالكامل عبر Gemini Vision (المتصفح المباشر أو الخادم)
- * مع التفعيل التلقائي للقراءة المقسمة (Top/Bottom Split Scan) إذا كانت الورقة كثيفة ورجعت بأقل من 34 سطراً
- */
 export async function parseTableWithGeminiVision(
   imageSource: string | File | Blob,
-  alreadyPrepared = false
+  alreadyPrepared = false,
+  preprocessedBase64?: string
 ): Promise<GeminiVisionResult> {
   try {
     let cleanImageDataUrl = '';
@@ -343,59 +430,31 @@ export async function parseTableWithGeminiVision(
             });
 
       cleanImageDataUrl = await prepareImageForAi(rawDataUrl, {
-        maxDimension: 2200,
-        minDimension: 1800,
+        maxDimension: 2000,
+        minDimension: 1450,
         enhanceContrast: true,
+        sharpenText: true,
       });
     }
 
-    const rawItems = await callGeminiVisionRaw(cleanImageDataUrl);
+    let rawItems: any[] | null = null;
+    try {
+      rawItems = await performStrictOCR(cleanImageDataUrl);
+    } catch {
+      rawItems = await callPythonVisionServer(cleanImageDataUrl, preprocessedBase64);
+    }
+
     if (!rawItems || rawItems.length === 0) {
       return {
         success: false,
         items: [],
         skippedRows: [],
         isSheetComplete: false,
-        message: '⚠️ تحذير: لم يتمكن الماسح السحابي من قراءة الورقة — سيتم استخدام القارئ المحلي الذكي.',
+        message: 'يتم استخدام محرك القراءة المحلي.',
       };
     }
 
-    let { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(rawItems);
-
-    // إذا كانت الورقة كاملة ولكن تم استخراج أقل من 34 سطراً (مثلاً 28 سطراً كما يحدث في الجداول الكثيفة)،
-    // نقوم فوراً بتقسيم الورقة إلى نصف علوي ونصف سفلي وقراءتهما لاسترجاع السطور الـ 9 المتبقية بالكامل!
-    if (validatedItems.length >= 10 && validatedItems.length < 35) {
-      try {
-        const { topHalf, bottomHalf } = await splitImageIntoOverlappingHalves(cleanImageDataUrl);
-        const [topRaw, botRaw] = await Promise.all([
-          callGeminiVisionRaw(
-            topHalf,
-            'اقرأ جميع صفوف هذا النصف العلوي من جدول الجرد سطراً بسطر دون تخطي أي صف، واستخرج رقم القطعة (10 أرقام) والموقع والكمية والوصف الكامل.'
-          ),
-          callGeminiVisionRaw(
-            bottomHalf,
-            'اقرأ جميع صفوف هذا النصف السفلي من جدول الجرد سطراً بسطر حتى آخر سطر في أسفل الورقة دون تخطي أي صف، واستخرج رقم القطعة (10 أرقام) والموقع والكمية والوصف الكامل.'
-          ),
-        ]);
-
-        const topNorm = topRaw ? normalizeRawVisionItems(topRaw) : null;
-        const botNorm = botRaw ? normalizeRawVisionItems(botRaw) : null;
-
-        if (topNorm || botNorm) {
-          const merged = mergeOverlappingSheetRows(
-            validatedItems,
-            topNorm?.validatedItems || [],
-            botNorm?.validatedItems || []
-          );
-          if (merged.length > validatedItems.length) {
-            validatedItems = merged;
-            repairedCount += (topNorm?.repairedCount || 0) + (botNorm?.repairedCount || 0);
-          }
-        }
-      } catch {
-        // الاحتفاظ بالنتيجة الأساسية في حال تعذر المسح التكميلي
-      }
-    }
+    const { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(rawItems);
 
     return {
       success: validatedItems.length > 0,
@@ -411,7 +470,8 @@ export async function parseTableWithGeminiVision(
       items: [],
       skippedRows: [],
       isSheetComplete: false,
-      message: '⚠️ تعذر الاتصال بالخادم، جاري التحويل للقارئ المحلي.',
+      message: 'يتم استخدام محرك القراءة المحلي.',
     };
   }
 }
+
