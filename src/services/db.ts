@@ -56,12 +56,10 @@ class InventoryDatabase {
         const documents = db.objectStoreNames.contains('documents')
           ? request.transaction!.objectStore('documents')
           : db.createObjectStore('documents', { keyPath: 'id' });
-        // Images are evidence, not record identity. Changed part numbers must remain saveable.
         if (documents.indexNames.contains('originalHash')) documents.deleteIndex('originalHash');
         if (!db.objectStoreNames.contains('audit'))
           db.createObjectStore('audit', { keyPath: 'id', autoIncrement: true });
 
-        // Enrich existing records in the upgrade transaction without changing stock or originals.
         const audit = request.transaction!.objectStore('audit');
         const cursorRequest = store.openCursor();
         cursorRequest.onsuccess = () => {
@@ -118,9 +116,6 @@ class InventoryDatabase {
     });
   }
 
-  /**
-   * تحميل البيانات في الفهرس السريع (O(1) Map) وتنظيف أي بيانات قديمة تالفة
-   */
   private async loadAndCleanCache(): Promise<void> {
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
     const items = await new Promise<InventoryItem[]>((resolve, reject) => {
@@ -130,7 +125,6 @@ class InventoryDatabase {
       tx.onabort = () => reject(tx.error);
       tx.onerror = () => reject(tx.error);
     });
-    // Enrich existing records with the latest industrial Arabic dictionary while preserving custom translations, quantities and status
     const enrichedItems = items.map((item) => {
       if (typeof item.description_en === 'string' && item.description_en.trim()) {
         const needsDescEnrich =
@@ -324,9 +318,6 @@ class InventoryDatabase {
       .sort((a, b) => b.count - a.count);
   }
 
-  /**
-   * بحث فائق السرعة يدعم 4,000 إلى 100,000 قطعة في أقل من 2 مللي ثانية
-   */
   public searchItems(
     query: string,
     categoryFilter?: string,
@@ -585,9 +576,6 @@ class InventoryDatabase {
     return this.getItemByPartNumber(partNumber) || null;
   }
 
-  /**
-   * نقل كافة القطع الثقيلة (كبير / ثقيل) الموجودة خارج موقع D إلى موقع D المعتمد دفعة واحدة بعد اعتماد المشرف
-   */
   public async relocateAllHeavyItemsToLocationD(targetDBinOverride?: string): Promise<InventoryItem[]> {
     const allItems = this.ensureInternalCache();
     const suggestions = suggestHeavyItemsToLocationD(allItems);
@@ -646,9 +634,6 @@ class InventoryDatabase {
       .filter((i): i is InventoryItem => Boolean(i));
   }
 
-  /**
-   * فرز وتجميع القطع الأغلى سعراً في رف موحد (بحد أقصى 15 صنفاً فقط لكل رف) بعد اعتماد المشرف
-   */
   public async relocateTopExpensiveItemsToShelf(targetShelfOverride?: string): Promise<InventoryItem[]> {
     const allItems = this.ensureInternalCache();
     const plans = buildHighValueConsolidationPlans(allItems, new Set(), targetShelfOverride);
@@ -749,9 +734,6 @@ class InventoryDatabase {
     this.isCacheDirty = true;
   }
 
-  /**
-   * استيراد دفعات ضخمة بسرعة فائقة (4,000+ قطعة دون أي تعليق أو انهيار)
-   */
   public async batchImport(items: InventoryItem[]): Promise<number> {
     await authorizeMutation('batchImport');
     if (!this.db || items.length === 0) return 0;
@@ -786,7 +768,6 @@ class InventoryDatabase {
           store.clear();
         };
       } else if (isMassiveBatch) {
-        // مسار فائق السرعة للدفعات الضخمة (مثل 4,000 قطعة) لتجنب 4,000 قراءة فردية متزامنة
         for (let i = 0; i < items.length; i++) {
           store.put(items[i]);
         }
@@ -904,7 +885,6 @@ class InventoryDatabase {
         failure = error instanceof Error ? error : new Error(String(error));
         tx.abort();
       };
-      // Read each line after the preceding write, including shared parts across different sheets.
       const processDocument = (documentIndex: number) => {
         if (documentIndex >= ids.length) return;
         const id = ids[documentIndex];
@@ -982,8 +962,6 @@ class InventoryDatabase {
     const marks = interpretMark(line.check, line.remark);
     const { category, descAr } = categorizeAndTranslate(line.description_en);
     let after: InventoryItem;
-    // If the item already exists in inventory, an F remark (Found extra) is excluded from replacing book stock.
-    // If the item does not exist yet (!before), create it with its printed sheet quantity and preserve the F remark.
     if (doc.kind === 'inventory' && marks.excludedIncrease && before) return;
     if ((doc.kind === 'issue' || doc.kind === 'transfer') && !before)
       throw new Error('رقم غير موجود: ' + line.part_number);
@@ -1042,7 +1020,6 @@ class InventoryDatabase {
         doc.duplicateResolution === 'sum' &&
         doc.lines.filter((row) => row.part_number === line.part_number).length > 1
       ) {
-        // Explicit supervisor-approved additional stock; retain issued history and source rows.
         base = {
           ...before,
           qty_total: before.qty_total + line.quantity,
@@ -1066,7 +1043,6 @@ class InventoryDatabase {
       const nextRemaining = isMissing ? 0 : base.qty_remaining - marks.shortage;
       const cleanRemark =
         marks.shortage > 0 ? `-${marks.shortage}` : marks.excludedIncrease ? '' : line.remark;
-      // Existing book stock is never replaced by an inventory OCR quantity; increases (F / +) are permanently excluded.
       after = {
         ...base,
         status: marks.status,
@@ -1183,7 +1159,6 @@ class InventoryDatabase {
           store.put(item);
         };
       }
-      // Preserve existing document IDs, especially approvals, to prevent replay after restoration.
       const docs = tx.objectStore('documents');
       for (const doc of documents) {
         const req = docs.get(doc.id);
@@ -1213,10 +1188,6 @@ class InventoryDatabase {
     await this.commitChanges([], [], true);
   }
 
-  /**
-   * مسح شامل لكافة بيانات البرنامج (الأصناف، المواقع، أوراق الجرد، طلبات النقل، والسجلات)
-   * بعد طلب اعتماد المشرف، بحيث يعود البرنامج فارغاً بالكامل (0 قطعة و 0 مستند).
-   */
   public async fullProgramWipe(): Promise<void> {
     await authorizeMutation('اعتماد المسح الشامل لكافة بيانات البرنامج والمستندات');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
@@ -1241,4 +1212,3 @@ class InventoryDatabase {
 }
 
 export const dbService = new InventoryDatabase();
-

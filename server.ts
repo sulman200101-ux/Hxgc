@@ -50,12 +50,25 @@ if (fs.existsSync(ocrStaticPath)) {
 let pythonEnvUnavailable = false;
 let geminiKeyInvalid = false;
 
-async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null> {
+function getServerGeminiClient(): GoogleGenAI | null {
   if (geminiKeyInvalid) return null;
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY') {
     return null;
   }
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
+async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: string): Promise<any | null> {
+  const ai = getServerGeminiClient();
+  if (!ai) return null;
 
   try {
     const mimeMatch = imageBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,/i);
@@ -63,12 +76,15 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
     if (!cleanBase64) return null;
 
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-    });
-
-    const candidateModels = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash'];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+    const defaultPrompt = `اقرأ ورقة جرد SAP هذه بالكامل واستخرج جميع السطور الموجودة في الجدول من أول سطر حتى آخر سطر دون ترك أي سطر (حوالي 37 سطراً).
+لكل سطر في الجدول استخرج:
+- part_number: رقم القطعة المكون من 10 أرقام في عمود Material (يبدأ بـ 1000 أو 1001). لا تخمن ولا تضع أي رقم وهمي.
+- location_code: رمز الموقع في عمود Storage Bin (مثل N07A1, N07A2, N07B1, N07B2, N07BB1, N01A1, N15BB2, N11C2, N16D1, N17A1).
+- qty_total: الكمية الرقمية الصحيحة في عمود QTY بعد وحدة القياس (EA, SET, PK, PAA, ZYD, SH, KIT).
+- is_missing: ضع 1 فقط إذا وجدت علامة خطأ (X أو ×) صريحة بخط اليد في عمود Check، وضع 0 إذا كانت علامة صح (✓) أو فارغة.
+- remark: اعتمد علامة الناقص فقط مثل -1 أو -2 لإنقاص العدد، واستبعد أي زيادة (+N أو F1 أو F2) بترك الحقل فارغاً "".
+- description_en: الوصف الإنجليزي الكامل للقطعة في عمود Material Description.`;
 
     for (const modelName of candidateModels) {
       try {
@@ -82,14 +98,7 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
               },
             },
             {
-              text: `اقرأ ورقة جرد SAP هذه بالكامل واستخرج جميع السطور الموجودة في الجدول من أول سطر حتى آخر سطر دون ترك أي سطر حتى لو كان رقم القطعة أو الموقع باهتاً أو غير مكتمل.
-لكل سطر في الجدول استخرج:
-- part_number: رقم القطعة في عمود Material (عادة 10 أرقام تبدأ بـ 100، أو اكتب الأرقام المقروءة كما هي إن كانت ناقصة).
-- location_code: رمز الموقع في عمود Storage Bin (مثل N01A1, N15BB2, N11C2, N16D1, N17A1, N17A2, N17B1، أو اتركه فارغاً إن لم يظهر ليستنتجه النظام من السطور المجاورة).
-- qty_total: الكمية الرقمية في عمود QTY بعد وحدة القياس (EA, SET, PK, PAA, ZYD, SH, KIT).
-- is_missing: ضع 1 فقط إذا وجدت علامة خطأ (X أو ×) صريحة في عمود Check، وضع 0 إذا كانت علامة صح (✓) أو فارغة.
-- remark: اعتمد علامة الناقص فقط مثل -1 أو -4 لإنقاص العدد، واستبعد أي زيادة (+N أو F1 أو F2) نهائياً بترك الحقل فارغاً "".
-- description_en: الوصف الإنجليزي الكامل للقطعة في عمود Material Description.`,
+              text: customPrompt ? `${defaultPrompt}\n\n${customPrompt}` : defaultPrompt,
             },
           ],
           config: {
@@ -187,14 +196,12 @@ async function runNodeTableOcr(imageBase64: string, preprocessedBase64?: string)
       }
     }
 
-    if (extracted.length < 37) {
-      const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
-      if (cleanBase64) {
-        const imgBuffer = Buffer.from(cleanBase64, 'base64');
-        const { data } = await worker.recognize(imgBuffer);
-        const natItems = parseRawTextOcr(data.text || '');
-        extracted = combineBestSheetExtractions(extracted, natItems);
-      }
+    const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
+    if (cleanBase64) {
+      const imgBuffer = Buffer.from(cleanBase64, 'base64');
+      const { data } = await worker.recognize(imgBuffer);
+      const natItems = parseRawTextOcr(data.text || '');
+      extracted = combineBestSheetExtractions(extracted, natItems);
     }
 
     extracted = alignAndCompleteCalibrationSheet(extracted);
@@ -306,7 +313,6 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
             fallbackToLocal: true,
           });
         }
-        // تمرير النصوص الخام المستخرجة من بايثون عبر محلل TypeScript الموحد لضمان دقة 100%
         if (parsed.raw_text || parsed.left_text) {
           const fullRows = parsed.raw_text ? parseRawTextOcr(parsed.raw_text) : [];
           const leftRows = parsed.left_text ? parseRawTextOcr(parsed.left_text) : [];
@@ -340,8 +346,12 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
   });
 }
 
-async function runBestServerTableOcr(imageBase64: string, preprocessedBase64?: string): Promise<any> {
-  const geminiResult = await runGeminiVisionTableOcr(imageBase64);
+async function runBestServerTableOcr(
+  imageBase64: string,
+  preprocessedBase64?: string,
+  customPrompt?: string
+): Promise<any> {
+  const geminiResult = await runGeminiVisionTableOcr(imageBase64, customPrompt);
   if (geminiResult?.success && Array.isArray(geminiResult.items) && geminiResult.items.length >= 36) {
     return geminiResult;
   }
@@ -364,7 +374,7 @@ async function runBestServerTableOcr(imageBase64: string, preprocessedBase64?: s
 
 app.post('/api/gemini/parse-table', async (req, res) => {
   try {
-    const { imageBase64, preprocessedBase64 } = req.body;
+    const { imageBase64, preprocessedBase64, customPrompt } = req.body;
     if (!imageBase64) {
       return res.status(200).json({
         success: false,
@@ -376,7 +386,8 @@ app.post('/api/gemini/parse-table', async (req, res) => {
 
     const result = await runBestServerTableOcr(
       String(imageBase64),
-      preprocessedBase64 ? String(preprocessedBase64) : undefined
+      preprocessedBase64 ? String(preprocessedBase64) : undefined,
+      customPrompt ? String(customPrompt) : undefined
     );
     return res.status(200).json(result);
   } catch (error: any) {
@@ -466,24 +477,15 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
       });
     }
 
-    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-    if (geminiKeyInvalid || !apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY') {
+    const ai = getServerGeminiClient();
+    if (!ai) {
       return res.status(200).json({
         success: false,
         fallbackToLocal: true,
         analyses: [],
-        message: 'يتم استخدام المساعد الهندسي المحلي الذكي للترجمة وحسبة المقاسات والأوزان.',
+        message: 'يتم استخدام المساعد الهندسي المحلي الذكي للترجمة وحسبة المقاسات بالملم وتوجيه الثقيل لموقع D.',
       });
     }
-
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
 
     const inputSummary = parts.slice(0, 45).map((p: any, idx: number) => ({
       index: idx + 1,
@@ -494,30 +496,23 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
     }));
 
     const prompt = `أنت مساعد هندسي ذكي (Gemini Industrial Assistant) متخصص في مستودعات قطع الغيار الصناعية (SAP Inventory Controller - ASMO).
-المطلوب لكل قطعة في القائمة المرفقة:
-1. "description_ar": ترجمة عربية هندسية دقيقة وواضحة لوصف القطعة الإنجليزي مع ذكر وظيفتها.
-2. "dimensions_calculation_ar": حسبة تفصيلية للمقاسات والأبعاد المذكورة في الوصف مع تحويل الوحدات:
-   - حول أي مقاس بالبوصة (IN أو ") إلى المليمتر (MM) والسنتيمتر (CM) بدقة (1 بوصة = 25.4 ملم).
-   - حول البوصة المربعة (SQ IN) إلى سم² (1 بوصة مربعة = 6.45 سم²).
-   - وضح القطر الخارجي (OD)، القطر الداخلي (ID)، السماكة (THK)، الطول (LG)، العرض (WD)، مقاس القلاووظ (مثل M10×45 ملم)، أو القدرة الكهربائية (أمبير A / فولت V).
-3. "material_ar": نوع المعدن أو المادة بالعربية (مثل: ستانلس ستيل 316، صلب كربوني، برونز، حديد زهر، سبيكة إنكونيل، تفلون PTFE، مطاط نيتريل، نايلون).
-4. "estimated_weight_kg": تقدير الوزن التقريبي للقطعة الواحدة بالكيلوجرام (رقم عشري مثل 18.5 أو 2.4 أو 0.05) بناءً على نوع القطعة ومعدنها وأبعادها.
-5. "weight_label_ar": نص يوضح الوزن التقريبي للقطعة وإجمالي الوزن للكمية (مثال: "القطعة ~8.5 كجم | الإجمالي ~17 كجم").
+المطلوب لكل قطعة في القائمة المرفقة (مع التركيز التام على المتشابهات بالصنف والحجم والمليمتر MM وبدون أي ارتفاع مواقع):
+1. "description_ar": ترجمة عربية هندسية دقيقة وواضحة لوصف القطعة الإنجليزي مع ذكر الصنف والمقاس بالملم.
+2. "dimensions_calculation_ar": حسبة تفصيلية للمقاسات والأبعاد المذكورة في الوصف مع تحويل أي مقاس بالبوصة (IN أو ") إلى المليمتر (MM) بدقة (1 بوصة = 25.4 ملم).
+3. "material_ar": نوع المعدن أو المادة بالعربية.
+4. "estimated_weight_kg": تقدير الوزن التقريبي للقطعة الواحدة بالكيلوجرام.
+5. "weight_label_ar": نص يوضح الوزن التقريبي للقطعة وإجمالي الوزن للكمية.
 6. "size_category": تصنيف الحجم والوزن ويجب أن يكون أحد القيم الثلاث فقط: "كبير / ثقيل" أو "متوسط الحجم" أو "صغير / خفيف".
-7. "recommended_shelf_code": رمز ارتفاع الرف الأنسب للقطعة حسب القاعدة المعتمدة في المستودع:
-   - "FL": الرف على الأرض (0 متر) — للقطع الثقيلة والكبيرة (أكثر من 10 كجم أو صمامات/مضخات/محامل كبيرة/أعمدة/حلقات تآكل ثقيلة).
-   - "A": يرتفع 1 متر عن الأرض — للقطع المتوسطة المائلة للثقل (من 4 إلى 10 كجم).
-   - "B": يرتفع مترين (2 متر) عن الأرض — للقطع متوسطة الحجم والوزن (من 1.5 إلى 4 كجم).
-   - "BB": يرتفع 3 متر عن الأرض — للقطع المتوسطة الخفيفة (من 0.5 إلى 1.5 كجم).
-   - "C": يرتفع 4 متر عن الأرض — للقطع الخفيفة والصغيرة (من 0.15 إلى 0.5 كجم مثل الجازكيت والبراغي والفيوزات).
-   - "D": يرتفع 5 متر عن الأرض — للقطع الصغيرة والخفيفة جداً (أقل من 0.15 كجم مثل حلقات O-Ring وأربطة الكابلات).
-8. "recommended_bin": رمز الموقع المقترح كاملاً مع الحفاظ على رقم الممر الحالي للقطعة (مثال: إذا كانت في N11D1 وهي ثقيلة اقترح "N11FL1" أو "N11A1").
-9. "placement_reason_ar": سبب اختيار هذا الرف والمكان بناءً على حسبة الحجم والوزن والارتفاع بالمتر.
+7. "recommended_shelf_code": رمز الموقع الأنسب للقطعة حسب القاعدة المعتمدة:
+   - "D" و "C": مخصصان للقطع الثقيلة جداً والكبيرة ("كبير / ثقيل") بحد أقصى 15 صنفاً لكل رف، وتجمع القطع الأغلى سعراً في رف واحد بحد أقصى 15 صنفاً فقط لكل رف.
+   - "A" أو "B" أو "BB" أو "C": لتجميع القطع المتشابهة من نفس الصنف والحجم والمقاس بالملم (MM).
+8. "recommended_bin": رمز الموقع المقترح كاملاً (مثال: إذا كانت القطعة ثقيلة في الممر N11 اقترح "N11D1" أو "D1").
+9. "placement_reason_ar": سبب اختيار هذا الموقع بناءً على الصنف والحجم والمقاس بالملم (أو نقل الثقيل إلى الموقع D).
 
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
 
-    const candidateModels = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash'];
+    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
     for (const modelName of candidateModels) {
       try {
         const response = await ai.models.generateContent({
@@ -575,48 +570,33 @@ ${JSON.stringify(inputSummary)}`;
       success: false,
       fallbackToLocal: true,
       analyses: [],
-      message: error?.message || 'تم تفعيل المحلل الهندسي المحلي لحسبة المقاسات والأوزان.',
+      message: error?.message || 'تم تفعيل المحلل الهندسي المحلي لحسبة المقاسات بالملم وتوجيه الثقيل لموقع D.',
     });
   }
 });
 
 const apkCandidates = [
-  path.resolve(__dirname, 'public', 'asmo-inventory-v2.3.0.apk'),
-  path.resolve(__dirname, 'public', 'asmo-inventory-v2.2.0.apk'),
-  path.resolve(__dirname, 'public', 'asmo-inventory-v2.1.0.apk'),
-  path.resolve(__dirname, 'public', 'asmo-inventory-v2.0.0.apk'),
-  path.resolve(__dirname, 'public', 'asmo-inventory-v1.9.0.apk'),
+  path.resolve(__dirname, 'public', 'asmo-inventory-v2.4.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
-  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.3.0.apk'),
-  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.2.0.apk'),
-  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.1.0.apk'),
-  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.0.0.apk'),
-  path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.4.0.apk'),
 ];
 
 const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.3.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.4.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.3.0/asmo-inventory-v2.3.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.4.0/asmo-inventory-v2.4.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
-app.get('/asmo-inventory-v2.3.0.apk', handleApkDownload);
-app.get('/asmo-inventory-v2.2.0.apk', handleApkDownload);
-app.get('/asmo-inventory-v2.1.0.apk', handleApkDownload);
-app.get('/asmo-inventory-v2.0.0.apk', handleApkDownload);
-app.get('/asmo-inventory-v1.9.0.apk', handleApkDownload);
-app.get('/asmo-inventory-v1.8.0.apk', handleApkDownload);
-app.get('/asmo-inventory-v1.7.0.apk', handleApkDownload);
-app.get('/asmo-inventory-v1.6.0.apk', handleApkDownload);
+app.get('/asmo-inventory-v2.4.0.apk', handleApkDownload);
 app.get('/api/download-apk', handleApkDownload);
 
 async function startServer() {

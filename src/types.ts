@@ -26,6 +26,7 @@ export interface InventoryItem {
   is_moved: number; // 0 or 1
   is_missing?: number; // 0 or 1 (1 = علامة × بخط اليد في الجدول أي غير موجودة)
   remark?: string; // ملاحظات العمود Remark مثل F1, -4, F2
+  unit_price?: number; // السعر التقديري أو الفعلي للقطعة بالريال
   status: ItemStatus;
   updated_at?: string;
 }

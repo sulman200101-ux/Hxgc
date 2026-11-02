@@ -156,9 +156,6 @@ export interface HighValueShelfPlan {
 
 const SIZE_PROFILE_CACHE = new Map<string, PartSizeProfile>();
 
-/**
- * فحص ما إذا كان الموقع ينتمي إلى موقع القطع الثقيلة D (مثل D, D1, D2, N11D1, N11D2, N16D1, N16D2)
- */
 export function isDLocation(locationCode: string | null | undefined): boolean {
   const clean = (locationCode || '').trim().toUpperCase().replace(/\s+/g, '');
   if (!clean) return false;
@@ -167,9 +164,6 @@ export function isDLocation(locationCode: string | null | undefined): boolean {
   return /^[A-Z]\d{2}D\d*$/.test(clean);
 }
 
-/**
- * فحص ما إذا كان الموقع ينتمي إلى موقع القطع الثقيلة الرديف C (مثل C, C1, C2, N11C1, N11C2, N07C1)
- */
 export function isCLocation(locationCode: string | null | undefined): boolean {
   const clean = (locationCode || '').trim().toUpperCase().replace(/\s+/g, '');
   if (!clean) return false;
@@ -178,16 +172,10 @@ export function isCLocation(locationCode: string | null | undefined): boolean {
   return /^[A-Z]\d{2}C\d*$/.test(clean);
 }
 
-/**
- * فحص ما إذا كان الموقع ينتمي إلى مواقع القطع الثقيلة المعتمدة (D أو C)
- */
 export function isHeavyDutyDOrCLocation(locationCode: string | null | undefined): boolean {
   return isDLocation(locationCode) || isCLocation(locationCode);
 }
 
-/**
- * تحديد قائمة رفوف القطع الثقيلة (D ثم C) في نفس الممر لتوزيع القطع الثقيلة بحيث لا يتجاوز أي رف 15 صنفاً
- */
 export function getHeavyCandidateShelvesForLocation(
   currentLocation: string,
   allBins: string[] = [],
@@ -220,9 +208,6 @@ export function getHeavyCandidateShelvesForLocation(
   return candidates;
 }
 
-/**
- * تحديد الموقع D أو C المستهدف لأي قطعة ثقيلة مع مراعاة عدم تجاوز 15 صنفاً في الرف الواحد
- */
 export function resolveTargetDLocation(
   currentLocation: string,
   allBins: string[] = [],
@@ -287,10 +272,6 @@ function parseInchToMm(rawInch: string): number | null {
   return null;
 }
 
-/**
- * تقدير سعر القطعة الواحدة بالريال السعودي (SAR) بناءً على الصنف الصناعي والسبيكة المعدنية والمقاس والقدرة الكهربائية
- * لفرز القطع الأغلى سعراً وتجميعها في رف واحد (بحد أقصى 15 صنفاً لكل رف)
- */
 export function estimatePartUnitPriceSar(descUpper: string, primaryMm: number, sizeScore: number): number {
   let basePrice = 180;
 
@@ -399,7 +380,6 @@ export function estimatePartUnitPriceSar(descUpper: string, primaryMm: number, s
     basePrice = 45;
   }
 
-  // معاملات السبائك النادرة والمواد الخاصة
   let alloyMultiplier = 1.0;
   if (descUpper.includes('INCONEL 718') || descUpper.includes('INCONEL')) {
     alloyMultiplier = 1.65;
@@ -413,20 +393,15 @@ export function estimatePartUnitPriceSar(descUpper: string, primaryMm: number, s
     alloyMultiplier = 1.2;
   }
 
-  // معامل المقاس والحجم
   const mmFactor = primaryMm >= 200 ? 1.28 : primaryMm >= 100 ? 1.14 : 1.0;
   const sizeFactor = sizeScore >= 75 ? 1.2 : sizeScore >= 65 ? 1.1 : 1.0;
 
   return Math.max(15, Math.round((basePrice * alloyMultiplier * mmFactor * sizeFactor) / 5) * 5);
 }
 
-/**
- * تحليل الصنف والحجم والمقاس بالمليمتر (ملم) والسعر التقديري لكل قطعة
- * مع توجيه القطع الثقيلة جداً إلى الموقعين D و C
- */
 export function estimatePartSizeProfile(item: InventoryItem): PartSizeProfile {
-  const desc = (item.description_en || (item as any).description || '').trim().toUpperCase();
-  const loc = (item.location_code || (item as any).location || '').trim().toUpperCase();
+  const desc: string = String(item.description_en || (item as any).description || '').trim().toUpperCase();
+  const loc: string = String(item.location_code || (item as any).location || '').trim().toUpperCase();
   const qtyRem = Math.max(1, Number(item.qty_remaining ?? item.qty_total ?? 1));
   const cacheKey = `${desc}|${loc}|${qtyRem}`;
   const cached = SIZE_PROFILE_CACHE.get(cacheKey);
@@ -621,10 +596,8 @@ export function estimatePartSizeProfile(item: InventoryItem): PartSizeProfile {
   const sizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف' =
     finalScore >= 65 ? 'كبير / ثقيل' : finalScore >= 38 ? 'متوسط الحجم' : 'صغير / خفيف';
 
-  // توجيه الثقيلة جداً إلى D و C
   const targetHeavyLocation = resolveTargetDLocation(loc, [], undefined, finalScore >= 65 && finalScore < 72);
 
-  // تقدير السعر بالريال السعودي للفرز حسب الأغلى سعراً
   const estimatedPriceSar = estimatePartUnitPriceSar(desc, primaryMm, finalScore);
   const totalValueSar = estimatedPriceSar * qtyRem;
   const priceCategory: 'أغلى سعراً / قيمة عالية' | 'متوسط السعر' | 'سعر اقتصادي' =
@@ -737,10 +710,6 @@ function family(item: InventoryItem): string | undefined {
   return detectTechnicalFamily(item);
 }
 
-/**
- * استخراج جميع القطع الثقيلة جداً والكبيرة الموجودة خارج مواقع الثقيلة وتوزيعها على الموقعين (D و C)
- * مع ضمان عدم تجاوز كل رف 15 صنفاً (إذا امتلأ D بـ 15 صنفاً ينتقل الفائض تلقائياً إلى C بحد 15 صنفاً)
- */
 export function suggestHeavyItemsToLocationD(
   items: InventoryItem[],
   pendingParts: Set<string> = new Set()
@@ -749,7 +718,6 @@ export function suggestHeavyItemsToLocationD(
     new Set(items.map((i) => (i.location_code || '').trim().toUpperCase()).filter(Boolean))
   );
 
-  // حساب الإشغال الحالي في رفوف D و C لضمان سقف 15 صنفاً لكل رف
   const shelfOccupancy = new Map<string, number>();
   for (const it of items) {
     if (it.qty_remaining <= 0 || it.is_missing === 1) continue;
@@ -759,7 +727,6 @@ export function suggestHeavyItemsToLocationD(
     }
   }
 
-  // ترتيب القطع الثقيلة من الأثقل والأغلى سعراً أولاً بحيث يأخذ الرف D القطع الأثقل أولاً ثم الرف C
   const heavyCandidates: Array<{ item: InventoryItem; sizeProf: PartSizeProfile }> = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -819,9 +786,6 @@ export function suggestHeavyItemsToLocationD(
   return results;
 }
 
-/**
- * بناء خطة فرز وتجميع القطع الأغلى سعراً في رف واحد (بحد أقصى 15 صنفاً فقط لكل رف)
- */
 export function buildHighValueConsolidationPlans(
   items: InventoryItem[],
   pendingParts: Set<string> = new Set(),
@@ -836,7 +800,6 @@ export function buildHighValueConsolidationPlans(
     new Set(available.map((i) => i.location_code.trim().toUpperCase()).filter(Boolean))
   );
 
-  // فرز جميع القطع تنازلياً حسب سعر القطعة الواحدة ثم القيمة الإجمالية
   const enriched = available
     .map((item) => ({
       item,
@@ -848,14 +811,12 @@ export function buildHighValueConsolidationPlans(
         b.sizeProfile.totalValueSar - a.sizeProfile.totalValueSar
     );
 
-  // نأخذ القطع الأغلى سعراً (أو أعلى القطع قيمة في المخزون) ونقسمها إلى رفوف سعة كل رف 15 صنفاً كحد أقصى
   const highValueCandidates = enriched.filter((e) => e.sizeProfile.estimatedPriceSar >= 600);
   const selectedPool =
     highValueCandidates.length >= 3
       ? highValueCandidates
       : enriched.slice(0, Math.min(MAX_ITEMS_PER_SHELF, enriched.length));
 
-  // تحديد الرف الموحد للقطع الأغلى سعراً (الأكثر احتواءً على القطع الغالية أو المحدد من المستخدم)
   const top15 = selectedPool.slice(0, MAX_ITEMS_PER_SHELF);
   const binFreq = new Map<string, number>();
   for (const entry of top15) {
@@ -888,7 +849,6 @@ export function buildHighValueConsolidationPlans(
     const targetBin = defaultShelves[bIdx] || `${primaryZone}A${bIdx + 1}`;
     const slicePartSet = new Set(slice.map((s) => s.item.part_number));
 
-    // إذا كان الرف المستهدف يحتوي على قطع أخرى رخيصة تزيد العدد عن 15 صنفاً، نقترح إخراجها لرف مجاور
     const currentOccupantsInTarget = available.filter(
       (i) => i.location_code.trim().toUpperCase() === targetBin && !slicePartSet.has(i.part_number)
     );
@@ -949,9 +909,6 @@ export function buildHighValueConsolidationPlans(
   return plans;
 }
 
-/**
- * اقتراح نقل وتجميع المتشابهات مع توجيه الثقيلة جداً إلى D و C ومراعاة سقف 15 صنفاً لكل رف
- */
 export function suggestTransfers(
   items: InventoryItem[],
   pendingParts: Set<string> = new Set(),
@@ -1107,12 +1064,6 @@ function getMmBucketLabel(primaryMm: number, mmLabel: string): string {
   return `${primaryMm} ملم (ثقيل > 150 ملم)`;
 }
 
-/**
- * بناء خطة متكاملة لتجميع المتشابهات من كل صنف حسب:
- * 1. الصنف (Category) + الحجم (Size) + المليمتر (MM) + السعر التقديري (SAR)
- * 2. توجيه القطع الثقيلة جداً إلى الموقعين D و C
- * 3. الالتزام الصارم بحد 15 صنفاً كحد أقصى لكل رف (MAX_ITEMS_PER_SHELF = 15) وتوزيع أي فائض على الرف المجاور
- */
 export function buildSimilaritySwapPlans(
   items: InventoryItem[],
   pendingParts: Set<string> = new Set(),
@@ -1248,7 +1199,6 @@ export function buildSimilaritySwapPlans(
     const recommendedBin = targetBin;
     const adjacentBins = getAdjacentStorageBins(targetBin, allBins, 8);
 
-    // تقسيم أصناف المجموعة إلى دفعات لا تتجاوز 15 صنفاً لكل رف (MAX_ITEMS_PER_SHELF = 15)
     const candidateShelvesForBatches =
       groupSizeCategory === 'كبير / ثقيل'
         ? [targetBin, ...getHeavyCandidateShelvesForLocation(targetBin, allBins, false).filter((b) => b !== targetBin)]
@@ -1320,7 +1270,6 @@ export function buildSimilaritySwapPlans(
         };
       });
 
-    // توزيع عمليات الدمج بحيث لا يتجاوز الرف الأول 15 صنفاً وينتقل الفائض للرف الرديف (مثل D2 أو C1)
     const consolidations: SwapConsolidationStep[] = [];
     for (const batch of shelfBatches) {
       for (const { item: simItem, sizeProfile: sizeProf } of batch.items) {
@@ -1402,9 +1351,6 @@ function detectMaterialArabic(descUpper: string): string {
   return 'معدن صناعي قياسي';
 }
 
-/**
- * تحليل هندسي ومالي محلي فوري لأي قطعة (يشمل الترجمة، المقاس بالملم، الوزن، السعر بالريال، وتوجيه الثقيلة إلى D و C)
- */
 export function computeLocalPartEngineeringAnalysis(
   item: Partial<InventoryItem> & { part_number: string; description_en: string; location_code?: string }
 ): GeminiPartAnalysis {
@@ -1522,4 +1468,3 @@ export async function analyzePartsWithGeminiAssistant(
 
   return localAnalyses;
 }
-

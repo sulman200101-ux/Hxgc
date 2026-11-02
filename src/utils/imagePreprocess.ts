@@ -1,10 +1,47 @@
 /**
- * خوارزمية تنقية الصورة المتقدمة وحذف خطوط الجدول مع حفظ الحروف (Stroke-Preserving Grid Removal & Shadow-Free Normalization)
+ * خوارزمية تنقية الصورة المتقدمة مع عزل حبر القلم الأزرق عن أعمدة الأرقام وحذف خطوط الشبكة (Blue-Ink Suppressed & Grid-Free Adaptive Preprocessor)
  * تقوم بـ:
- * 1. موازنة إضاءة الورقة موضعياً عبر الصورة التكاملية (Integral Image) لإزالة الظلال الجانبية.
- * 2. تطبيق زيادة حدة الحروف (Unsharp Mask) لإبراز الأرقام الباهتة في زوايا الورقة.
- * 3. حذف خطوط الشبكة العمودية والأفقية الفاصلة بين خلايا الجدول مع الحفاظ التام على ضربات الحروف والأرقام المتقاطعة معها.
+ * 1. كبت آثار القلم الأزرق (Blue Ballpoint Ink Suppression) في أعمدة البيانات المطبوعة (#, Material, Plant, Area, Storage Bin, BUn, QTY)
+ *    مع الحفاظ التام على وضوح علامات القلم اليدوية (✓ و × و -N) في عمودي Check و Remark (من 42% إلى 53% من العرض).
+ * 2. موازنة إضاءة الورقة موضعياً عبر تمريرتين للصورة التكاملية (2-Pass Integral Image Box Blur) لإزالة الظلال الجانبية.
+ * 3. حذف خطوط الجدول الأفقية والعمودية الطويلة لمنع انحراف الأسطر عبر عمود New BIN الفارغ ومنع التصاق خط الجدول بالرقم الأول من Material.
  */
+
+function boxBlurIntegral(src: Float32Array, width: number, height: number, radius: number): Float32Array {
+  const intW = width + 1;
+  const integral = new Float64Array((width + 1) * (height + 1));
+
+  for (let y = 0; y < height; y++) {
+    let rowSum = 0;
+    const rowOff = y * width;
+    const intRowOff = (y + 1) * intW;
+    const prevIntRowOff = y * intW;
+    for (let x = 0; x < width; x++) {
+      rowSum += src[rowOff + x];
+      integral[intRowOff + (x + 1)] = integral[prevIntRowOff + (x + 1)] + rowSum;
+    }
+  }
+
+  const dst = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const y0 = Math.max(0, y - radius);
+    const y1 = Math.min(height, y + radius + 1);
+    const rowOff = y * width;
+    for (let x = 0; x < width; x++) {
+      const x0 = Math.max(0, x - radius);
+      const x1 = Math.min(width, x + radius + 1);
+      const count = (x1 - x0) * (y1 - y0);
+      const sum =
+        integral[y1 * intW + x1] -
+        integral[y0 * intW + x1] -
+        integral[y1 * intW + x0] +
+        integral[y0 * intW + x0];
+      dst[rowOff + x] = sum / count;
+    }
+  }
+  return dst;
+}
+
 export const preprocessImageForOCR = async (imageSrc: string): Promise<string> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -26,155 +63,104 @@ export const preprocessImageForOCR = async (imageSrc: string): Promise<string> =
       const imageData = ctx.getImageData(0, 0, width, height);
       const data = imageData.data;
       const totalPixels = width * height;
-      const gray = new Float32Array(totalPixels);
+      const hybridGray = new Float32Array(totalPixels);
 
-      for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-        gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      }
+      // عمودا Check و Remark يقعان بين 42% و 53% من عرض الورقة
+      const checkColStart = Math.round(width * 0.42);
+      const checkColEnd = Math.round(width * 0.53);
 
-      // 1. بناء الصورة التكاملية (Integral Image) لتقدير إضاءة خلفية الورقة الموضعية بـ O(1)
-      const intW = width + 1;
-      const integral = new Float64Array((width + 1) * (height + 1));
       for (let y = 0; y < height; y++) {
-        let rowSum = 0;
         const rowOff = y * width;
-        const intRowOff = (y + 1) * intW;
-        const prevIntRowOff = y * intW;
         for (let x = 0; x < width; x++) {
-          rowSum += gray[rowOff + x];
-          integral[intRowOff + (x + 1)] = integral[prevIntRowOff + (x + 1)] + rowSum;
+          const j = rowOff + x;
+          const i = j * 4;
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+
+          if (x >= checkColStart && x <= checkColEnd) {
+            // في عمودي Check و Remark نحتفظ بشدة حبر القلم الأزرق (X و -N) كاملة
+            hybridGray[j] = 0.299 * r + 0.587 * g + 0.114 * b;
+          } else {
+            // في أعمدة الأرقام والنصوص المطبوعة نكبت حبر القلم الأزرق العارض المتقاطع مع الأرقام
+            const blueExcess = Math.max(0, b - r);
+            hybridGray[j] = Math.min(255, b + blueExcess * 0.6);
+          }
         }
       }
 
-      const radius = Math.max(22, Math.round(Math.min(width, height) / 28));
+      // 2-Pass Box Blur لتقدير الخلفية الموضعية بنعومة مماثلة لـ Gaussian Blur وإزالة الظلال
+      const radius = Math.max(24, Math.round(Math.min(width, height) / 38));
+      const pass1Bg = boxBlurIntegral(hybridGray, width, height, radius);
+      const localBg = boxBlurIntegral(pass1Bg, width, height, radius);
+
       const norm = new Uint8ClampedArray(totalPixels);
-
-      for (let y = 0; y < height; y++) {
-        const y0 = Math.max(0, y - radius);
-        const y1 = Math.min(height, y + radius + 1);
-        const rowOff = y * width;
-        for (let x = 0; x < width; x++) {
-          const x0 = Math.max(0, x - radius);
-          const x1 = Math.min(width, x + radius + 1);
-          const count = (x1 - x0) * (y1 - y0);
-          const localSum =
-            integral[y1 * intW + x1] -
-            integral[y0 * intW + x1] -
-            integral[y1 * intW + x0] +
-            integral[y0 * intW + x0];
-          const localBg = Math.max(60, localSum / count);
-          const px = gray[rowOff + x];
-          norm[rowOff + x] = Math.min(255, Math.max(0, Math.round((px / localBg) * 255)));
-        }
+      for (let j = 0; j < totalPixels; j++) {
+        const bgVal = Math.max(60, localBg[j]);
+        norm[j] = Math.min(255, Math.max(0, Math.round((hybridGray[j] / bgVal) * 245)));
       }
 
-      // 2. زيادة حدة الحروف والأرقام (Unsharp Mask) قبل كشف خطوط الجدول
-      const sharpened = new Uint8ClampedArray(norm);
-      for (let y = 1; y < height - 1; y++) {
-        const rowOff = y * width;
-        for (let x = 1; x < width - 1; x++) {
-          const idx = rowOff + x;
-          const c = norm[idx];
-          const blur = (norm[idx - width] + norm[idx + width] + norm[idx - 1] + norm[idx + 1] + c * 4) >> 3;
-          const sharpenedVal = c + ((c - blur) * 3) / 5;
-          sharpened[idx] = Math.min(255, Math.max(0, Math.round(sharpenedVal)));
-        }
-      }
+      // كشف خطوط الشبكة الأفقية (طول >= 85) والعمودية (طول >= 55 في القسم الأيسر x < 34%)
+      const hKernel = Math.max(45, Math.round(width / 28));
+      const vKernel = Math.max(32, Math.round(height / 32));
+      const vCutoffX = Math.round(width * 0.34);
 
-      // 3. كشف خطوط الجدول الأفقية والعمودية الطويلة وحذفها دون مسح الحروف المتقاطعة معها
-      const hKernel = Math.max(38, Math.round(width / 26));
-      const vKernel = Math.max(32, Math.round(height / 26));
-      const hLineMask = new Uint8Array(totalPixels);
-      const vLineMask = new Uint8Array(totalPixels);
+      const gridMask = new Uint8Array(totalPixels);
 
-      // كشف الخطوط الأفقية
+      // 1D Horizontal Opening
       for (let y = 0; y < height; y++) {
         const rowOff = y * width;
         let run = 0;
         for (let x = 0; x < width; x++) {
-          if (sharpened[rowOff + x] < 205) {
+          if (norm[rowOff + x] < 210) {
             run++;
           } else {
             if (run >= hKernel) {
-              for (let k = x - run; k < x; k++) hLineMask[rowOff + k] = 1;
+              for (let k = x - run; k < x; k++) gridMask[rowOff + k] = 1;
             }
             run = 0;
           }
         }
         if (run >= hKernel) {
-          for (let k = width - run; k < width; k++) hLineMask[rowOff + k] = 1;
+          for (let k = width - run; k < width; k++) gridMask[rowOff + k] = 1;
         }
       }
 
-      // كشف الخطوط العمودية الفاصلة بين الأعمدة
-      for (let x = 0; x < width; x++) {
+      // 1D Vertical Opening (في منطقة الأعمدة الرقمية اليسرى فقط لحماية الفاصل بين QTY و Check)
+      for (let x = 0; x < vCutoffX; x++) {
         let run = 0;
         for (let y = 0; y < height; y++) {
-          if (sharpened[y * width + x] < 205) {
+          if (norm[y * width + x] < 210) {
             run++;
           } else {
             if (run >= vKernel) {
-              for (let k = y - run; k < y; k++) vLineMask[k * width + x] = 1;
+              for (let k = y - run; k < y; k++) {
+                gridMask[k * width + x] = 1;
+                if (x + 1 < vCutoffX) gridMask[k * width + (x + 1)] = 1;
+              }
             }
             run = 0;
           }
         }
         if (run >= vKernel) {
-          for (let k = height - run; k < height; k++) vLineMask[k * width + x] = 1;
-        }
-      }
-
-      const cleaned = new Uint8ClampedArray(sharpened);
-
-      // حذف الخطوط الأفقية مع الحفاظ الكامل على ضربات الحروف العمودية المتقاطعة (حيث توجد بكسلات داكنة أعلى وأسفل الخط)
-      for (let y = 4; y < height - 4; y++) {
-        const rowOff = y * width;
-        for (let x = 0; x < width; x++) {
-          const idx = rowOff + x;
-          if (
-            hLineMask[idx] ||
-            hLineMask[idx - width] ||
-            hLineMask[idx + width] ||
-            hLineMask[idx - width * 2] ||
-            hLineMask[idx + width * 2]
-          ) {
-            const aboveDark = sharpened[idx - width * 3] < 200 || sharpened[idx - width * 4] < 200;
-            const belowDark = sharpened[idx + width * 3] < 200 || sharpened[idx + width * 4] < 200;
-            if (!(aboveDark && belowDark)) {
-              cleaned[idx] = 255;
-            }
+          for (let k = height - run; k < height; k++) {
+            gridMask[k * width + x] = 1;
+            if (x + 1 < vCutoffX) gridMask[k * width + (x + 1)] = 1;
           }
         }
       }
 
-      // حذف الخطوط العمودية الفاصلة بين الأعمدة لمنع قراءتها كـ | أو 1 أو 7
-      for (let y = 0; y < height; y++) {
-        const rowOff = y * width;
-        for (let x = 2; x < width - 2; x++) {
-          const idx = rowOff + x;
-          if (
-            vLineMask[idx] ||
-            vLineMask[idx - 1] ||
-            vLineMask[idx + 1] ||
-            vLineMask[idx - 2] ||
-            vLineMask[idx + 2]
-          ) {
-            cleaned[idx] = 255;
-          }
-        }
-      }
-
-      // 4. تعزيز التباين النهائي بحيث تصبح الخلفية نقية تماماً (255) والحروف سوداء واضحة
+      // تبييض خطوط الشبكة وتطبيق تباين خطي متوازن يحفظ الحروف الرمادية والرفيعة
       for (let j = 0, i = 0; j < totalPixels; j++, i += 4) {
-        const v = cleaned[j];
-        const stretched = v >= 215 ? 255 : Math.min(255, Math.max(0, Math.round(((v - 110) * 255) / 130)));
+        const v = gridMask[j] ? 248 : norm[j];
+        const stretched = Math.min(255, Math.max(0, Math.round((v - 190) * 1.8 + 190)));
         data[i] = stretched;
         data[i + 1] = stretched;
         data[i + 2] = stretched;
       }
 
       ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL('image/jpeg', 0.92));
+      resolve(canvas.toDataURL('image/jpeg', 0.94));
     };
 
     img.onerror = (err) => reject(err);

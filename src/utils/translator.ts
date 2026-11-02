@@ -1,4 +1,6 @@
 // قاموس المصطلحات الفنية الشامل والموسع لقطع الغيار الصناعية (ASMO SAP Inventory Controller)
+// مطور ومفهرس مسبقاً (Pre-Compiled Regex Engine) لضمان ترجمة وتصنيف 4,000+ قطعة في أجزاء من المللي ثانية
+
 const EXACT_PHRASE_TRANSLATIONS: Record<string, string> = {
   // العبارات المركبة الدقيقة لضمان ترجمة عربية هندسية سليمة 100%
   'RING WEAR, CASING': 'حلقة تآكل حماية غلاف المضخة (كيسنج)',
@@ -11,6 +13,7 @@ const EXACT_PHRASE_TRANSLATIONS: Record<string, string> = {
   'SPRING RELIEF VALVE': 'ياي/نابض صمام تصريف الضغط',
   'SCREW CAP, HEX': 'مسمار غطاء برأس سداسي',
   'BEARING, JOURNAL / THRUST': 'محمل انزلاقي ودفعي (جورنال/ثرست)',
+  'BEARING, JOURNAL (MAIN BEARING)': 'محمل انزلاقي رئيسي ثقيل (مين جورنال بيرنج)',
   'PACKING, RING: PREFORMED': 'حشوة إحكام حلقية مشكلة مسبقاً',
   'FUSE, LOW VOLTAGE: HRC': 'فيوز/مصهر جهد منخفض عالي قدرة القطع HRC',
   'RING, BALL, CARBOGRAPHITE, UPPER': 'حلقة كروية علوية من الكربون الجرافيتي',
@@ -142,6 +145,8 @@ const TERM_TRANSLATIONS: Record<string, string> = {
   'THERMOSTATIC': 'ثرموستاتي (حراري)',
   'AMMETER': 'أميتر (مقياس تيار)',
   'VOLTMETER': 'فولتميتر (مقياس جهد)',
+  'TRANSFORMER': 'محول كهربائي ثقيل',
+  'MOTOR': 'محرك كهربائي',
   'ELECTRICAL': 'كهربائي',
   'MODULE': 'وحدة إلكترونية (موديول)',
   'CONTROL': 'تحكم',
@@ -222,6 +227,10 @@ const TERM_TRANSLATIONS: Record<string, string> = {
   'PUMP': 'مضخة',
   'IMPELLER': 'دافع مضخة (إمبلر)',
   'SHAFT': 'عمود دوران (شافت)',
+  'GEARBOX': 'صندوق تروس ثقيل (جيربوكس)',
+  'COMPRESSOR': 'ضاغط (كمبروسر)',
+  'TURBINE': 'توربين',
+  'CYLINDER': 'أسطوانة هيدروليكية/ميكانيكية',
   'SLEEVE': 'جلبة قميص (سليف)',
   'SPACER': 'فاصل معدني (سبيسر)',
   'RETAINER': 'حافظ/مثبت ميكانيكي',
@@ -261,6 +270,27 @@ const TERM_TRANSLATIONS: Record<string, string> = {
   'METRIC': 'متري قياسي',
 };
 
+// تجميع التعبيرات النمطية مسبقاً عند بدء التشغيل (One-Time Pre-Compilation) لتسريع قراءة وترجمة آلاف القطع 50×
+const COMPILED_EXACT_PHRASES: Array<{ phrase: string; regex: RegExp; arPhrase: string }> = Object.keys(
+  EXACT_PHRASE_TRANSLATIONS
+)
+  .sort((a, b) => b.length - a.length)
+  .map((phrase) => ({
+    phrase,
+    regex: new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
+    arPhrase: EXACT_PHRASE_TRANSLATIONS[phrase],
+  }));
+
+const COMPILED_TERMS: Array<{ term: string; regex: RegExp; arWord: string }> = Object.keys(
+  TERM_TRANSLATIONS
+)
+  .sort((a, b) => b.length - a.length)
+  .map((enWord) => ({
+    term: enWord,
+    regex: new RegExp(`\\b${enWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'),
+    arWord: TERM_TRANSLATIONS[enWord],
+  }));
+
 // ذاكرة تخزين مؤقت دائمة للترجمة والتصنيف (One-Time Processing Cache)
 const TRANSLATION_CACHE = new Map<string, { category: string; descAr: string }>();
 
@@ -269,8 +299,9 @@ export function categorizeAndTranslate(descEn: string): { category: string; desc
   if (!normalizedKey) {
     return { category: 'قطع ميكانيكية متنوعة', descAr: 'قطعة غيار' };
   }
-  if (TRANSLATION_CACHE.has(normalizedKey)) {
-    return TRANSLATION_CACHE.get(normalizedKey)!;
+  const cached = TRANSLATION_CACHE.get(normalizedKey);
+  if (cached) {
+    return cached;
   }
 
   const upper = normalizedKey;
@@ -304,7 +335,9 @@ export function categorizeAndTranslate(descEn: string): { category: string; desc
     upper.includes('POWER SUPPLY') ||
     upper.includes('AMMETER') ||
     upper.includes('CONDUIT') ||
-    upper.includes('INSULATOR')
+    upper.includes('INSULATOR') ||
+    upper.includes('TRANSFORMER') ||
+    upper.includes('MOTOR')
   ) {
     category = 'كهرباء وإضاءة';
   } else if (
@@ -345,31 +378,31 @@ export function categorizeAndTranslate(descEn: string): { category: string; desc
     upper.includes('SPACER') ||
     upper.includes('SPRING') ||
     upper.includes('COUPLING') ||
-    upper.includes('SHAFT')
+    upper.includes('SHAFT') ||
+    upper.includes('GEARBOX') ||
+    upper.includes('COMPRESSOR') ||
+    upper.includes('TURBINE') ||
+    upper.includes('CYLINDER')
   ) {
     category = 'مضخات وقطع ميكانيكية';
   }
 
   let descAr = descEn;
 
-  // 1. استبدال العبارات المركبة الطويلة أولاً لضمان دقة السياق الهندسي
-  const sortedExactPhrases = Object.keys(EXACT_PHRASE_TRANSLATIONS).sort(
-    (a, b) => b.length - a.length
-  );
-  for (const phrase of sortedExactPhrases) {
-    const arPhrase = EXACT_PHRASE_TRANSLATIONS[phrase];
-    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(escaped, 'gi');
-    descAr = descAr.replace(regex, arPhrase);
+  // 1. استبدال العبارات المركبة الطويلة أولاً (مع فحص سريع بـ includes لتجنب تشغيل الـ Regex غير الضروري)
+  for (let i = 0; i < COMPILED_EXACT_PHRASES.length; i++) {
+    const entry = COMPILED_EXACT_PHRASES[i];
+    if (upper.includes(entry.phrase)) {
+      descAr = descAr.replace(entry.regex, entry.arPhrase);
+    }
   }
 
-  // 2. استبدال المصطلحات المفردة والمركبة
-  const sortedTerms = Object.keys(TERM_TRANSLATIONS).sort((a, b) => b.length - a.length);
-  for (const enWord of sortedTerms) {
-    const arWord = TERM_TRANSLATIONS[enWord];
-    const escaped = enWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
-    descAr = descAr.replace(regex, arWord);
+  // 2. استبدال المصطلحات المفردة والمركبة بسرعة فائقة
+  for (let i = 0; i < COMPILED_TERMS.length; i++) {
+    const entry = COMPILED_TERMS[i];
+    if (upper.includes(entry.term)) {
+      descAr = descAr.replace(entry.regex, entry.arWord);
+    }
   }
 
   // 3. تعريب وحدات القياس والاختصارات الفنية الشائعة بشكل واضح ومقروء

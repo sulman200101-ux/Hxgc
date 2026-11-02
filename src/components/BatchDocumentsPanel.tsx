@@ -1,7 +1,6 @@
 import { ImageSourcePicker } from './ImageSourcePicker';
 import React, { useEffect, useState, useRef } from 'react';
 import { dbService } from '../services/db';
-import { authorizeDeletion } from '../services/security';
 import { interpretMark, auditSheetCompleteness, type DocumentLine, type StockDocument } from '../services/documents';
 import { processOcrFromImage } from '../services/localOcr';
 import { readImageBatch } from '../services/batchOcr';
@@ -120,7 +119,6 @@ export function BatchDocumentsPanel({
   const readPending = async (targetSheets?: Sheet[]) => {
     prepareAudio();
     setBusy(true);
-    const newlyReadSheets: StockDocument[] = [];
     try {
       const listToRead = (targetSheets || sheets).filter(
         (sheet) => sheet.state === 'waiting' || sheet.state === 'error'
@@ -158,54 +156,28 @@ export function BatchDocumentsPanel({
             const marks = interpretMark('', row.remark || '');
             return {
               part_number: row.part_number,
-              quantity: row.qty_total > 0 ? row.qty_total : 1,
-              location: row.location_code || '',
-              description_en: row.description_en && row.description_en !== 'غير محدد' ? row.description_en : '',
-              description_ar: row.description_ar || '',
+              quantity: Number.isFinite(row.qty_total) && row.qty_total > 0 ? row.qty_total : 1,
+              location: row.location_code,
+              description_en: row.description_en,
+              description_ar: row.description_ar,
               check: row.is_missing === 1 ? 'X' : '',
               remark: marks.shortage > 0 ? `-${marks.shortage}` : '',
               reviewed: true,
             };
           });
-          const sheetId =
-            (targetSheets || sheets).find((s) => s.key === result.key)?.id.trim() ||
-            `SHEET-${Date.now().toString().slice(-5)}-${Math.floor(Math.random() * 90 + 10)}`;
           patch(result.key, {
             state: 'review',
-            id: sheetId,
+            id:
+              (targetSheets || sheets).find((s) => s.key === result.key)?.id.trim() ||
+              `SHEET-${Date.now().toString().slice(-5)}-${Math.floor(Math.random() * 90 + 10)}`,
             expectedRowCount: mappedLines.length,
             sumDuplicates: hasDuplicatePartNumbers(mappedLines) ? true : undefined,
             lines: mappedLines,
           });
-          newlyReadSheets.push({
-            id: `${sheetId}-${Date.now().toString().slice(-4)}`,
-            duplicateResolution: hasDuplicatePartNumbers(mappedLines) ? 'sum' : undefined,
-            batchId: 'AUTO-' + crypto.randomUUID(),
-            kind,
-            requester: requester || 'المستخدم المحلي',
-            reason: 'حفظ تلقائي فوري بعد انتهاء القراءة',
-            lines: mappedLines,
-            original: (targetSheets || sheets).find((s) => s.key === result.key)?.original,
-            status: 'pending',
-            createdAt: '',
-          });
         }
       );
-
-      if (newlyReadSheets.length > 0) {
-        await dbService.submitDocuments(newlyReadSheets);
-        await dbService.approveDocuments(newlyReadSheets.map((d) => d.id));
-        await refresh();
-        onChanged();
-        const totalAutoSaved = newlyReadSheets.reduce((acc, d) => acc + d.lines.length, 0);
-        playOperationSound('issued');
-        setMessage(
-          `✅ اكتملت القراءة وتم حفظ واعتماد جميع السطور تلقائياً في المخزون (${totalAutoSaved} سطراً من ${newlyReadSheets.length} ورقة). يمكنك أيضاً تعديل أي سطر أدناه وإعادة الحفظ فوراً.`
-        );
-      } else {
-        playOperationSound('uncertain');
-        setMessage('اكتملت قراءة الأوراق. راجع النتائج أدناه.');
-      }
+      playOperationSound('uncertain');
+      setMessage('اكتملت قراءة الأوراق بنجاح. يمكنك مراجعة السطور واعتمادها مباشرة في المخزون.');
     } catch (err) {
       setMessage(String(err));
       playOperationSound('uncertain');
@@ -380,14 +352,9 @@ export function BatchDocumentsPanel({
             </span>
             <button
               type="button"
-              onClick={async () => {
-                try {
-                  await authorizeDeletion(`إزالة الورقة (${sheet.original.name})`);
-                  setSheets((current) => current.filter((candidate) => candidate.key !== sheet.key));
-                } catch (err) {
-                  setMessage((err as Error).message);
-                }
-              }}
+              onClick={() =>
+                setSheets((current) => current.filter((candidate) => candidate.key !== sheet.key))
+              }
               className="px-2.5 py-1 rounded bg-red-900 hover:bg-red-800 text-white font-bold cursor-pointer shrink-0"
             >
               إزالة
@@ -426,19 +393,14 @@ export function BatchDocumentsPanel({
                 </div>
                 <button
                   type="button"
-                  onClick={async () => {
-                    try {
-                      await authorizeDeletion(`حذف الورقة المقروءة (${sheet.original.name})`);
-                      setSheets((current) =>
-                        current.filter((candidate) => candidate.key !== sheet.key)
-                      );
-                    } catch (err) {
-                      setMessage((err as Error).message);
-                    }
-                  }}
+                  onClick={() =>
+                    setSheets((current) =>
+                      current.filter((candidate) => candidate.key !== sheet.key)
+                    )
+                  }
                   className="text-[11px] text-red-400 hover:text-red-300 font-bold cursor-pointer"
                 >
-                  حذف الورقة 🔒
+                  حذف الورقة
                 </button>
               </div>
 
@@ -457,6 +419,12 @@ export function BatchDocumentsPanel({
                       {completeness.missingMarkLines.map((r) => r.part_number).join('، ')}
                     </p>
                   )}
+                  {completeness.incompleteLines.length > 0 && (
+                    <p className="text-red-200">
+                      • سطور تحتاج استكمال ({completeness.incompleteLines.length}):{' '}
+                      {completeness.incompleteLines.map((r) => `${r.part_number} (${r.issues.join('، ')})`).join(' | ')}
+                    </p>
+                  )}
                   {completeness.shortageLines.length > 0 && (
                     <p className="text-amber-200">
                       • نقص بالكمية ({completeness.shortageLines.length} سطر):{' '}
@@ -469,29 +437,16 @@ export function BatchDocumentsPanel({
               )}
 
               <div className="max-h-72 overflow-y-auto space-y-1.5 pr-1">
-                {sheet.lines.map((line, index) => {
-                  const isRepairedRow = Boolean(line.description_ar?.startsWith('⚠️'));
-                  return (
+                {sheet.lines.map((line, index) => (
                   <div
                     key={index}
-                    className={`border py-1.5 px-2 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs ${
-                      isRepairedRow
-                        ? 'border-amber-500/80 bg-amber-950/40'
-                        : 'border-stone-800 bg-stone-900/50'
-                    }`}
+                    className="border border-stone-800 py-1.5 px-2 rounded-lg bg-stone-900/50 flex flex-wrap items-center justify-between gap-2 text-xs"
                   >
                     <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[10px] font-mono text-neutral-400 w-5 text-center">
-                        {index + 1}
-                      </span>
                       <input
                         required
                         pattern="[0-9]{10}"
-                        className={`px-1.5 py-1 w-28 rounded font-mono ${
-                          isRepairedRow
-                            ? 'bg-amber-900/60 text-amber-200 border border-amber-400/60'
-                            : 'bg-stone-800 text-amber-300'
-                        }`}
+                        className="bg-stone-800 px-1.5 py-1 w-28 rounded font-mono text-amber-300"
                         value={line.part_number}
                         onChange={(e) =>
                           patchLine(sheet.key, index, {
@@ -553,25 +508,18 @@ export function BatchDocumentsPanel({
                       <span className="truncate max-w-[180px]">{line.description_ar || line.description_en}</span>
                       <button
                         type="button"
-                        title="حذف السطر (يتطلب الرقم السري)"
                         className="px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 hover:bg-red-900 cursor-pointer"
-                        onClick={async () => {
-                          try {
-                            await authorizeDeletion(`حذف السطر #${index + 1} (${line.part_number})`);
-                            patch(sheet.key, {
-                              lines: sheet.lines.filter((_, i) => i !== index),
-                            });
-                          } catch (err) {
-                            setMessage((err as Error).message);
-                          }
-                        }}
+                        onClick={() =>
+                          patch(sheet.key, {
+                            lines: sheet.lines.filter((_, i) => i !== index),
+                          })
+                        }
                       >
                         ×
                       </button>
                     </div>
                   </div>
-                  );
-                })}
+                ))}
               </div>
             </div>
           );
@@ -586,39 +534,67 @@ export function BatchDocumentsPanel({
               setBusy(true);
               try {
                 const batchId = 'BATCH-' + crypto.randomUUID();
-                const preparedDocs: StockDocument[] = reviewedSheets.map((sheet, idx) => ({
-                  id: `SHEET-${Date.now().toString().slice(-6)}-${idx + 1}`,
-                  duplicateResolution:
-                    sheet.sumDuplicates || hasDuplicatePartNumbers(sheet.lines)
-                      ? 'sum'
-                      : undefined,
-                  batchId,
-                  kind,
-                  requester: requester || 'المستخدم المحلي',
-                  reason: 'حفظ واعتماد كامل سطور الورقة في المخزون',
-                  lines: sheet.lines.map((l) => ({
-                    ...l,
-                    quantity: Number.isFinite(l.quantity) && l.quantity >= 0 ? Math.round(l.quantity) : 1,
-                    location: (l.location || 'N01A1').trim().toUpperCase() || 'N01A1',
-                    description_en: (l.description_en || 'SPARE PART ASMO').trim() || 'SPARE PART ASMO',
-                    reviewed: true,
-                  })),
-                  original: sheet.original,
-                  status: 'pending',
-                  createdAt: '',
-                }));
+                const preparedDocs: StockDocument[] = reviewedSheets.map((sheet, idx) => {
+                  const firstByPart = new Map<string, { location: string; check: string }>();
+                  const normalizedLines = sheet.lines.map((l) => {
+                    const cleanPart = l.part_number.trim();
+                    const safeQty = Number.isFinite(l.quantity) && l.quantity >= 0 ? Math.floor(l.quantity) : 1;
+                    const safeLoc = (l.location || '').trim().toUpperCase() || 'N01A1';
+                    const safeDescEn = (l.description_en || '').trim() || 'SPARE PART ASMO';
+                    const existingFirst = firstByPart.get(cleanPart);
+                    if (!existingFirst) {
+                      firstByPart.set(cleanPart, { location: safeLoc, check: l.check });
+                      return {
+                        ...l,
+                        part_number: cleanPart,
+                        quantity: safeQty,
+                        location: safeLoc,
+                        description_en: safeDescEn,
+                        reviewed: true,
+                      };
+                    }
+                    return {
+                      ...l,
+                      part_number: cleanPart,
+                      quantity: safeQty,
+                      location: existingFirst.location,
+                      check: existingFirst.check,
+                      description_en: safeDescEn,
+                      reviewed: true,
+                    };
+                  });
+                  return {
+                    id:
+                      sheet.id.trim() ||
+                      `SHEET-${Date.now().toString().slice(-5)}-${idx + 1}`,
+                    duplicateResolution:
+                      sheet.sumDuplicates || hasDuplicatePartNumbers(normalizedLines)
+                        ? 'sum'
+                        : undefined,
+                    batchId,
+                    kind,
+                    requester: requester || 'المستخدم المحلي',
+                    reason: 'حفظ واعتماد كامل سطور الورقة في المخزون',
+                    lines: normalizedLines,
+                    original: sheet.original,
+                    status: 'pending',
+                    createdAt: '',
+                  };
+                });
                 await dbService.submitDocuments(preparedDocs);
                 await dbService.approveDocuments(preparedDocs.map((d) => d.id));
                 await refresh();
                 onChanged();
-                playOperationSound('issued');
                 const totalRowsSaved = preparedDocs.reduce((acc, d) => acc + d.lines.length, 0);
                 setMessage(
-                  `✅ تم حفظ واعتماد جميع السطور (${totalRowsSaved} سطراً من ${preparedDocs.length} ورقة) في المخزون بنجاح بدون رقم سري.`
+                  `تم حفظ واعتماد جميع السطور (${totalRowsSaved} سطراً من ${preparedDocs.length} ورقة) في المخزون بنجاح.`
                 );
                 setSheets([]);
               } catch (err) {
                 setMessage((err as Error).message);
+                if ((err as Error).message.includes('تم حفظها مسبقًا')) {
+                  playOperationSound('duplicate');
+                }
               } finally {
                 setBusy(false);
               }

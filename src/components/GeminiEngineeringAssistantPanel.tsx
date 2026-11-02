@@ -4,6 +4,7 @@ import { dbService } from '../services/db';
 import {
   analyzePartsWithGeminiAssistant,
   computeLocalPartEngineeringAnalysis,
+  MAX_ITEMS_PER_SHELF,
   type GeminiPartAnalysis,
 } from '../services/transferSuggestions';
 import {
@@ -32,10 +33,9 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
   const [analysesMap, setAnalysesMap] = useState<Record<string, GeminiPartAnalysis>>({});
   const [isAnalyzingAi, setIsAnalyzingAi] = useState(false);
   const [isUpdatingTranslations, setIsUpdatingTranslations] = useState(false);
-  const [filterMode, setFilterMode] = useState<'all' | 'mismatch' | 'heavy' | 'medium' | 'light'>('all');
+  const [filterMode, setFilterMode] = useState<'all' | 'expensive' | 'mismatch' | 'heavy' | 'medium' | 'light'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // حاسبة ومترجم جمني الفوري لأي وصف أو مقاس يدوي
   const [customDescEn, setCustomDescEn] = useState('');
   const [customAisle, setCustomAisle] = useState('N11A1');
   const [customQty, setCustomQty] = useState(1);
@@ -43,17 +43,17 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
   const [isCustomLoading, setIsCustomLoading] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
 
-  // حساب فوري لكافة القطع عبر المحرك الهندسي المحلي ثم تحديثها بـ Gemini AI عند الطلب
   const allAnalyses = useMemo(() => {
-    return items.map((item) => {
-      if (analysesMap[item.part_number]) {
-        return analysesMap[item.part_number];
-      }
-      return computeLocalPartEngineeringAnalysis(item);
-    });
+    return items
+      .map((item) => {
+        if (analysesMap[item.part_number]) {
+          return analysesMap[item.part_number];
+        }
+        return computeLocalPartEngineeringAnalysis(item);
+      })
+      .sort((a, b) => b.estimated_price_sar - a.estimated_price_sar);
   }, [items, analysesMap]);
 
-  // تشغيل تحليل Gemini AI التلقائي عند توفر قطع في المخزون
   const handleRunGeminiBatchAnalysis = async () => {
     if (items.length === 0) return;
     setIsAnalyzingAi(true);
@@ -66,7 +66,7 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
       }
       setAnalysesMap(nextMap);
       setFeedbackMsg(
-        `✅ اكتمل تحليل مساعد جمني الذكي لعدد (${results.length}) قطعة: تم تدقيق الترجمة العربية وحسبة المقاسات بالملم/البوصة وتقدير الأوزان والأرفف المناسبة!`
+        `✅ اكتمل تحليل القطع لعدد (${results.length}) قطعة: فرز الأغلى سعراً، وتوجيه الثقيلة جداً إلى الموقعين (D و C) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف!`
       );
     } catch (err) {
       setFeedbackMsg(`⚠️ ${(err as Error).message}`);
@@ -81,7 +81,6 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
     }
   }, [items.length]);
 
-  // حفظ وتحديث الترجمات العربية الدقيقة في قاعدة البيانات لجميع القطع
   const handleSaveAllTranslationsToDb = async () => {
     if (items.length === 0) return;
     setIsUpdatingTranslations(true);
@@ -114,7 +113,6 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
     }
   };
 
-  // تحليل نص أو مقاس يكتبه المستخدم مباشرة في مختبر جمني
   const handleAnalyzeCustomInput = async () => {
     if (!customDescEn.trim()) return;
     setIsCustomLoading(true);
@@ -137,6 +135,7 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
 
   const filteredAnalyses = useMemo(() => {
     return allAnalyses.filter((a) => {
+      if (filterMode === 'expensive' && a.price_category !== 'أغلى سعراً / قيمة عالية') return false;
       if (filterMode === 'mismatch' && a.current_bin === a.recommended_bin) return false;
       if (filterMode === 'heavy' && a.size_category !== 'كبير / ثقيل') return false;
       if (filterMode === 'medium' && a.size_category !== 'متوسط الحجم') return false;
@@ -164,7 +163,6 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
 
   return (
     <div className="bg-[#211510] border-2 border-amber-500/60 rounded-2xl p-4 space-y-4 shadow-xl" dir="rtl">
-      {/* رأس مساعد جمني للترجمة وحسبة المقاسات والأماكن المناسبة */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#3D271F] pb-3.5">
         <div className="flex items-center gap-2.5">
           <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-amber-500/30 to-emerald-500/20 border border-amber-400/60 flex items-center justify-center text-amber-300 shadow-inner">
@@ -173,14 +171,17 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h3 className="text-sm sm:text-base font-black text-white">
-                مساعد جمني الذكي (Gemini AI) للترجمة وحسبة المقاسات والأماكن المناسبة للحجم والوزن
+                محلل المتشابهات والمقاسات بالملم وفرز الأغلى سعراً (بحد {MAX_ITEMS_PER_SHELF} صنف لكل رف)
               </h3>
-              <span className="px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-500/60 text-[11px] font-black">
-                FL=0م | A=1م | B=2م | BB=3م | C=4م | D=5م
+              <span className="px-2.5 py-0.5 rounded-full bg-red-950 text-red-200 border border-red-500/60 text-[11px] font-black">
+                الثقيلة جداً ⬅ الموقعين D و C
+              </span>
+              <span className="px-2.5 py-0.5 rounded-full bg-amber-400 text-stone-950 text-[11px] font-black">
+                سعة الرف: {MAX_ITEMS_PER_SHELF} صنف فقط
               </span>
             </div>
             <p className="text-xs text-neutral-300 mt-0.5">
-              يقرأ الوصف الإنجليزي، يترجمه للعربية بدقة، يحسب المقاسات (بوصة ⬅ ملم وسم)، يقدر الوزن بالكيلوجرام، ويحدد الرف الأنسب لوزن وحجم كل قطعة
+              يقرأ الوصف الإنجليزي، يترجمه للعربية، يحول المقاسات إلى المليمتر (MM)، يفرز الأغلى سعراً لتجميعها في رف واحد، ويوجه القطع الثقيلة جداً إلى الموقعين D و C بحد {MAX_ITEMS_PER_SHELF} صنفاً لكل رف
             </p>
           </div>
         </div>
@@ -197,7 +198,7 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
             ) : (
               <Sparkles className="w-4 h-4" />
             )}
-            <span>تحليل شامل عبر جمني للمقاسات والأوزان ✨</span>
+            <span>تحليل الصنف والحجم والسعر ✨</span>
           </button>
 
           <button
@@ -219,12 +220,11 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
         </div>
       )}
 
-      {/* 1. مختبر وحاسبة جمني الفورية لأي وصف أو مقاس */}
       <div className="bg-[#180F0C] border border-[#3E2820] rounded-xl p-3.5 space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h4 className="text-xs sm:text-sm font-black text-amber-300 flex items-center gap-1.5">
             <Ruler className="w-4 h-4 text-amber-400" />
-            <span>حاسبة ومترجم جمني الفوري (اكتب أو الصق أي وصف قطعة أو مقاس لحساب وزنه والرف المناسب له):</span>
+            <span>حاسبة الصنف والمقاس بالملم (MM) والسعر التقديري وتحديد موقع التخزين:</span>
           </h4>
           <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
             <span className="text-neutral-400">أمثلة سريعة:</span>
@@ -232,17 +232,17 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
               {
                 label: 'حلقة تآكل 215MM',
                 text: 'RING WEAR, CASING, 215 MM OD, 185 MM ID, 25 MM THK, ASTM A276 TYPE 316',
-                loc: 'N11D1',
+                loc: 'N11A1',
               },
               {
-                label: 'دعامة مواسير 3/4 بوصة',
-                text: 'SUPPORT: RIGID CONDUIT; 3/4 IN; STEEL',
-                loc: 'N12A1',
+                label: 'كونتاكتور 250 أمبير (غالي وثقيل)',
+                text: 'CONTACTOR, 3 POLE, 600 VAC, 250 A, 3 N.O',
+                loc: 'N07A2',
               },
               {
-                label: 'أورينج مشغل 50 بوصة²',
-                text: 'O-RING: YOKE; FOR 50 SQ IN ACTUATOR, NITRILE',
-                loc: 'N11FL1',
+                label: 'جازكيت 257x269 ملم',
+                text: 'GASKET: 257 MM X 269 MM, 0.50 MM',
+                loc: 'N07BB1',
               },
             ].map((ex) => (
               <button
@@ -270,21 +270,21 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
               dir="ltr"
               value={customDescEn}
               onChange={(e) => setCustomDescEn(e.target.value)}
-              placeholder="مثال: RING WEAR, CASING, 215 MM OD, ASTM A276 TYPE 316 أو SUPPORT 3/4 IN STEEL"
+              placeholder="مثال: CONTACTOR 3 POLE 600 VAC 250 A أو RING WEAR, CASING, 215 MM OD"
               className="w-full px-3 py-2 rounded-xl bg-[#120B08] border border-[#4A3227] text-white text-xs font-mono focus:outline-none focus:border-amber-500"
             />
           </div>
 
           <div className="md:col-span-2">
             <label className="block text-[11px] font-bold text-neutral-300 mb-1">
-              الممر/الموقع الحالي:
+              الموقع الحالي:
             </label>
             <input
               type="text"
               dir="ltr"
               value={customAisle}
               onChange={(e) => setCustomAisle(e.target.value.toUpperCase())}
-              placeholder="N11A1"
+              placeholder="N07A1"
               className="w-full px-3 py-2 rounded-xl bg-[#120B08] border border-[#4A3227] text-amber-300 text-xs font-mono font-bold text-center"
             />
           </div>
@@ -314,18 +314,17 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
               ) : (
                 <Sparkles className="w-4 h-4" />
               )}
-              <span>ترجمة وحسبة المقاس والرف ✨</span>
+              <span>تحليل الصنف والسعر والمقاس ✨</span>
             </button>
           </div>
         </div>
 
-        {/* نتيجة التحليل الفوري للقطعة المخصصة */}
         {customAnalysis && (
           <div className="p-3.5 rounded-xl bg-[#241712] border border-amber-500/50 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
             <div className="p-2.5 rounded-lg bg-[#180F0C] border border-[#3A271F] space-y-1">
               <div className="text-[11px] text-amber-400 font-bold flex items-center gap-1">
                 <Languages className="w-3.5 h-3.5" />
-                <span>الترجمة العربية الهندسية الصحيحة:</span>
+                <span>الترجمة العربية والصنف:</span>
               </div>
               <div className="font-black text-white text-sm">{customAnalysis.description_ar}</div>
               <div className="text-[11px] text-neutral-400">المعدن/المادة: {customAnalysis.material_ar}</div>
@@ -334,15 +333,16 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
             <div className="p-2.5 rounded-lg bg-[#180F0C] border border-[#3A271F] space-y-1">
               <div className="text-[11px] text-sky-400 font-bold flex items-center gap-1">
                 <Ruler className="w-3.5 h-3.5" />
-                <span>حسبة المقاسات وتحويل الوحدات:</span>
+                <span>المقاس بالملم والسعر التقديري:</span>
               </div>
               <div className="font-bold text-sky-200">{customAnalysis.dimensions_calculation_ar}</div>
+              <div className="font-black text-amber-300">{customAnalysis.price_label_ar}</div>
             </div>
 
             <div className="p-2.5 rounded-lg bg-[#180F0C] border border-[#3A271F] space-y-1">
               <div className="text-[11px] text-orange-400 font-bold flex items-center gap-1">
                 <Scale className="w-3.5 h-3.5" />
-                <span>تقدير الحجم والوزن التقريبي:</span>
+                <span>تصنيف الحجم والوزن:</span>
               </div>
               <div className="font-black text-orange-200">{customAnalysis.size_category}</div>
               <div className="text-[11px] text-neutral-300">{customAnalysis.weight_label_ar}</div>
@@ -351,10 +351,10 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
             <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/50 space-y-1">
               <div className="text-[11px] text-emerald-300 font-bold flex items-center gap-1">
                 <MapPin className="w-3.5 h-3.5" />
-                <span>المكان والرف المناسب للحجم والوزن:</span>
+                <span>الموقع الموصى به (حد {MAX_ITEMS_PER_SHELF} صنف/رف):</span>
               </div>
               <div className="font-mono font-black text-emerald-300 text-sm">
-                {customAnalysis.recommended_bin} — {customAnalysis.recommended_elevation.shortLabelAr}
+                {customAnalysis.recommended_bin} ({customAnalysis.recommended_shelf_code})
               </div>
               <div className="text-[11px] text-neutral-200">{customAnalysis.placement_reason_ar}</div>
             </div>
@@ -362,7 +362,6 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
         )}
       </div>
 
-      {/* 2. جدول وبطاقات تحليل جميع قطع المخزون (الترجمة + حسبة المقاسات + الوزن + المكان المناسب) */}
       {items.length > 0 && (
         <div className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -376,7 +375,18 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                     : 'bg-[#180F0C] text-neutral-300 border-[#3A271F]'
                 }`}
               >
-                كافة القطع ({allAnalyses.length})
+                كافة القطع مرتبة بالأغلى ({allAnalyses.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilterMode('expensive')}
+                className={`px-3 py-1.5 rounded-xl font-bold border cursor-pointer ${
+                  filterMode === 'expensive'
+                    ? 'bg-amber-400 text-stone-950 border-amber-300 font-black'
+                    : 'bg-[#180F0C] text-amber-300 border-amber-600/50'
+                }`}
+              >
+                💰 الأغلى سعراً (لتجميعها في رف واحد — {MAX_ITEMS_PER_SHELF} صنف/رف)
               </button>
               <button
                 type="button"
@@ -387,7 +397,7 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                     : 'bg-[#180F0C] text-emerald-300 border-emerald-700/50'
                 }`}
               >
-                ينصح بنقلها لرف يناسب حجمها ووزنها ({mismatchCount})
+                مقترحات النقل والتجميع ({mismatchCount})
               </button>
               <button
                 type="button"
@@ -398,7 +408,7 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                     : 'bg-[#180F0C] text-red-300 border-red-800/50'
                 }`}
               >
-                كبير / ثقيل ⬅ FL الأرضي أو A=1م
+                كبير / ثقيل جداً ⬅ الموقعين D و C
               </button>
               <button
                 type="button"
@@ -409,7 +419,7 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                     : 'bg-[#180F0C] text-sky-300 border-sky-800/50'
                 }`}
               >
-                متوسط الحجم ⬅ B=2م أو BB=3م
+                متوسط الحجم (حسب الصنف والملم)
               </button>
               <button
                 type="button"
@@ -420,7 +430,7 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                     : 'bg-[#180F0C] text-purple-300 border-purple-800/50'
                 }`}
               >
-                صغير / خفيف ⬅ C=4م أو D=5م
+                صغير / خفيف (حسب الصنف والملم)
               </button>
             </div>
 
@@ -430,20 +440,20 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="بحث برقم القطعة أو المقاس أو الرف..."
+                placeholder="بحث برقم القطعة أو المقاس بالملم أو الموقع..."
                 className="w-full pr-8 pl-3 py-1.5 rounded-xl bg-[#140C09] border border-[#3E2820] text-xs text-white focus:outline-none focus:border-amber-500"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-1 gap-2.5 max-h-[520px] overflow-y-auto pr-1">
-            {filteredAnalyses.map((row, idx) => {
-              const needsHeightMove = row.current_bin !== row.recommended_bin;
+            {filteredAnalyses.slice(0, 120).map((row, idx) => {
+              const needsMove = row.current_bin !== row.recommended_bin;
               return (
                 <div
                   key={`${row.part_number}-${idx}`}
                   className={`p-3 rounded-xl border transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs ${
-                    needsHeightMove
+                    needsMove
                       ? 'bg-[#1B120E] border-amber-600/60 hover:border-amber-400'
                       : 'bg-[#170F0C] border-[#35231C]'
                   }`}
@@ -455,6 +465,9 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                       </span>
                       <span className="font-black text-white text-sm">
                         {row.description_ar}
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-amber-400 text-stone-950 font-black text-[11px]">
+                        💰 {row.estimated_price_sar.toLocaleString()} ر.س
                       </span>
                       <span
                         className={`px-2 py-0.5 rounded font-bold text-[11px] border ${
@@ -476,11 +489,10 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                       {row.description_en}
                     </div>
 
-                    {/* تفاصيل حسبة المقاسات والوزن */}
                     <div className="flex flex-wrap items-center gap-2 pt-0.5">
                       <span className="px-2.5 py-1 rounded-lg bg-[#241813] border border-sky-700/40 text-sky-200 font-bold flex items-center gap-1">
                         <Ruler className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                        <span>حسبة المقاس: {row.dimensions_calculation_ar}</span>
+                        <span>المقاس بالملم: {row.dimensions_calculation_ar}</span>
                       </span>
 
                       <span className="px-2.5 py-1 rounded-lg bg-[#241813] border border-orange-700/40 text-orange-200 font-bold flex items-center gap-1">
@@ -490,40 +502,31 @@ export const GeminiEngineeringAssistantPanel: React.FC<GeminiEngineeringAssistan
                     </div>
 
                     <div className="text-[11px] text-emerald-300 font-bold">
-                      💡 توصية جمني للمكان والارتفاع: {row.placement_reason_ar}
+                      💡 توصية التجميع والموقع: {row.placement_reason_ar}
                     </div>
                   </div>
 
-                  {/* مقارنة الرف الحالي بالرف المقترح وزر النقل */}
                   <div className="flex flex-col sm:flex-row lg:flex-col items-stretch sm:items-center lg:items-end justify-center gap-2 shrink-0 min-w-[230px]">
                     <div className="flex items-center gap-1.5 text-[11px] font-mono bg-[#120B08] px-2.5 py-1.5 rounded-lg border border-[#38241C]">
                       <span className="text-neutral-400 font-sans">الحالي:</span>
                       <strong className="text-amber-300">{row.current_bin}</strong>
-                      <span className="text-neutral-400 font-sans">
-                        ({row.current_elevation.meters === 0 ? 'أرضي 0م' : `${row.current_elevation.meters}م`})
-                      </span>
                       <span>⬅</span>
                       <span className="text-neutral-400 font-sans">الأنسب:</span>
                       <strong className="text-emerald-400">{row.recommended_bin}</strong>
-                      <span className="text-emerald-300 font-sans">
-                        ({row.recommended_elevation.meters === 0 ? 'أرضي 0م' : `${row.recommended_elevation.meters}م`})
-                      </span>
                     </div>
 
-                    {needsHeightMove ? (
+                    {needsMove ? (
                       <button
                         type="button"
                         onClick={() => onMoveItemToShelf(row.part_number, row.recommended_bin)}
                         className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-md cursor-pointer"
                       >
                         <ArrowRightLeft className="w-3.5 h-3.5" />
-                        <span>
-                          نقل للرف الأنسب ({row.recommended_bin} — {row.recommended_elevation.meters === 0 ? 'الأرض 0م' : `${row.recommended_elevation.meters}م`}) 🟢
-                        </span>
+                        <span>نقل إلى ({row.recommended_bin}) 🟢</span>
                       </button>
                     ) : (
                       <span className="px-3 py-1 rounded-lg bg-emerald-950/60 text-emerald-300 border border-emerald-700/50 text-[11px] font-bold text-center">
-                        ✓ في الرف والارتفاع المثالي لحجمها ووزنها
+                        ✓ في الموقع المناسب (ضمن حد {MAX_ITEMS_PER_SHELF} صنف/رف)
                       </span>
                     )}
                   </div>

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { InventoryItem, LocationSummary } from '../types';
 import { exportLocationToPdfFile } from '../utils/pdfExportUtil';
-import { parseShelfElevation, estimatePartSizeProfile } from '../services/transferSuggestions';
+import { isDLocation, isCLocation, MAX_ITEMS_PER_SHELF, estimatePartSizeProfile } from '../services/transferSuggestions';
 import {
   ArrowRight,
   Plus,
@@ -104,10 +104,18 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
               </h2>
               <span
                 className={`text-xs px-2.5 py-0.5 rounded-md border font-bold ${
-                  parseShelfElevation(locationCode).badgeColorClass
+                  isDLocation(locationCode)
+                    ? 'bg-red-950/85 text-red-200 border-red-500/60'
+                    : isCLocation(locationCode)
+                    ? 'bg-orange-950/85 text-orange-200 border-orange-500/60'
+                    : 'bg-amber-950/80 text-amber-200 border-amber-600/50'
                 }`}
               >
-                {parseShelfElevation(locationCode).shortLabelAr}
+                {isDLocation(locationCode)
+                  ? `موقع أرضي ثقيل (D) • سعة ${items.length}/${MAX_ITEMS_PER_SHELF}`
+                  : isCLocation(locationCode)
+                  ? `موقع ثقيل مساند (C) • سعة ${items.length}/${MAX_ITEMS_PER_SHELF}`
+                  : `رف قياسي • سعة ${items.length}/${MAX_ITEMS_PER_SHELF}`}
               </span>
             </div>
           </div>

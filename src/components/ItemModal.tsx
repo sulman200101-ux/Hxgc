@@ -307,7 +307,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 <span className="text-emerald-300 font-bold flex items-center gap-1">
                   <MapPin className="w-3.5 h-3.5" />
                   <span>
-                    الرف المقترح للحجم والوزن: <strong className="font-mono">{liveAnalysis.recommended_bin}</strong> ({liveAnalysis.recommended_elevation.shortLabelAr})
+                    الرف المقترح للحجم والوزن: <strong className="font-mono">{liveAnalysis.recommended_bin}</strong> ({liveAnalysis.size_category})
                   </span>
                 </span>
                 {locationCode.trim().toUpperCase() !== liveAnalysis.recommended_bin && (

@@ -1,6 +1,11 @@
 import React, { useState } from 'react';
 import { LocationSummary, InventoryItem } from '../types';
-import { parseShelfElevation, estimatePartSizeProfile } from '../services/transferSuggestions';
+import {
+  estimatePartSizeProfile,
+  isDLocation,
+  isCLocation,
+  MAX_ITEMS_PER_SHELF,
+} from '../services/transferSuggestions';
 import {
   MapPin,
   ChevronDown,
@@ -39,14 +44,13 @@ export const LocationCard: React.FC<LocationCardProps> = ({
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const previewItems = items.slice(0, 25);
-  const shelfElevation = parseShelfElevation(summary.location_code);
+  const isHeavyD = isDLocation(summary.location_code);
+  const isHeavyC = isCLocation(summary.location_code);
 
   return (
     <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] shadow-lg hover:border-amber-700/50 transition-all overflow-hidden mb-4">
-      {/* Location Header */}
       <div className="p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          {/* Location Code & Title */}
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400">
               <MapPin className="w-5 h-5" />
@@ -56,20 +60,23 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                 <span className="text-lg font-black text-white tracking-wide font-mono">
                   موقع: {summary.location_code}
                 </span>
-                <span className={`text-xs px-2.5 py-0.5 rounded-md border font-bold ${shelfElevation.badgeColorClass}`}>
-                  {shelfElevation.shortLabelAr}
-                </span>
+                {(isHeavyD || isHeavyC) && (
+                  <span className="text-xs px-2.5 py-0.5 rounded-md border font-bold bg-emerald-950/90 text-emerald-300 border-emerald-500/60">
+                    موقع القطع الثقيلة ({isHeavyC ? 'C' : 'D'})
+                  </span>
+                )}
                 <span className="text-xs px-2 py-0.5 rounded-md bg-[#3B2820] text-amber-200/80 border border-[#4F362B] font-bold">
-                  {summary.item_count} أصناف
+                  {summary.item_count} / {MAX_ITEMS_PER_SHELF} أصناف
                 </span>
               </div>
               <p className="text-[11px] text-neutral-400 mt-0.5">
-                {shelfElevation.fullExplanationAr} — {shelfElevation.suitabilityAr}
+                {isHeavyD || isHeavyC
+                  ? `رف مخصص للقطع الثقيلة جداً (${isHeavyC ? 'C' : 'D'}) — السعة القصوى ${MAX_ITEMS_PER_SHELF} صنفاً للرف`
+                  : `تجميع المتشابهات في الصنف والحجم والملم (MM) — السعة القصوى ${MAX_ITEMS_PER_SHELF} صنفاً للرف`}
               </p>
             </div>
           </div>
 
-          {/* Status Badges & Action Buttons */}
           <div className="flex items-center gap-2 flex-wrap">
             {summary.missing_count > 0 && (
               <span className="px-2.5 py-1 rounded-lg bg-red-950 text-red-200 border border-red-500 text-xs font-black flex items-center gap-1 shadow-sm">
@@ -117,7 +124,6 @@ export const LocationCard: React.FC<LocationCardProps> = ({
           </div>
         </div>
 
-        {/* 4-Column Statistics Breakdown */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 bg-[#1F1511] p-3 rounded-xl border border-[#3C271E]">
           <div className="flex flex-col items-center justify-center p-2 rounded-lg bg-[#271B15] border border-[#3A271F]">
             <span className="text-[11px] text-neutral-400 font-medium mb-1">
@@ -156,7 +162,6 @@ export const LocationCard: React.FC<LocationCardProps> = ({
           </div>
         </div>
 
-        {/* Card Actions Footer */}
         <div className="mt-3.5 flex items-center justify-between pt-2 border-t border-[#3B2820]">
           <button
             onClick={() => onOpenLocation(summary.location_code)}
@@ -176,7 +181,6 @@ export const LocationCard: React.FC<LocationCardProps> = ({
         </div>
       </div>
 
-      {/* Expanded Items List inside this location */}
       {isExpanded && (
         <div className="border-t border-[#432d24] bg-[#221712] p-3 sm:p-4 space-y-2.5">
           {previewItems.length === 0 ? (
@@ -209,7 +213,10 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                           {item.category}
                         </span>
                         <span className="px-2 py-0.5 rounded-md bg-[#1B120E] text-amber-200 border border-amber-700/40 text-[11px] font-bold">
-                          الحجم: {sizeProf.sizeCategory} ({sizeProf.dimensionsLabel})
+                          المقاس: {sizeProf.dimensionsLabel}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-950/70 text-emerald-200 border border-emerald-600/40 text-[11px] font-bold">
+                          💰 ~{sizeProf.estimatedPriceSar.toLocaleString('en-US')} ر.س
                         </span>
 
                         {isMissing ? (

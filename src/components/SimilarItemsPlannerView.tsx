@@ -161,13 +161,11 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     return adj;
   }, [selectedQuickItem, selectedQuickItemSize, allBins]);
 
-  // قائمة القطع الثقيلة جداً المقترح نقلها إلى الموقعين D و C (بحد أقصى 15 صنفاً لكل رف)
   const heavyToDSuggestions = useMemo(() => {
     if (!isActive) return [];
     return suggestHeavyItemsToLocationD(items, pendingPartNumbers);
   }, [items, pendingPartNumbers, isActive]);
 
-  // خطط فرز وتجميع القطع الأغلى سعراً في رف واحد (بحد أقصى 15 صنفاً لكل رف)
   const highValueShelfPlans = useMemo(() => {
     if (!isActive) return [];
     return buildHighValueConsolidationPlans(
@@ -258,7 +256,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     }
   };
 
-  // نقل جميع القطع الثقيلة جداً إلى الموقعين D و C مع الالتزام بحد 15 صنفاً لكل رف
   const handleMoveAllHeavyToDC = async () => {
     setBusy(true);
     setStatusMessage(null);
@@ -284,7 +281,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     }
   };
 
-  // اعتماد وتنفيذ تجميع القطع الأغلى سعراً في رف واحد (بحد أقصى 15 صنفاً فقط لكل رف)
   const handleExecuteHighValueShelfPlan = async (hvPlan: HighValueShelfPlan) => {
     setBusy(true);
     setStatusMessage(null);
@@ -388,7 +384,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
       }
     }
 
-    // الالتزام الصارم بحد 15 صنفاً لكل رف عند تجميع المتشابهات
     const batches =
       plan.shelfBatches && plan.shelfBatches.length > 0
         ? plan.shelfBatches
@@ -504,7 +499,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
 
   return (
     <div className="space-y-4" dir="rtl">
-      {/* ترويسة التخطيط لتجميع المتشابهات + الأغلى سعراً + الثقيلة جداً لـ D و C + 15 صنف للرف */}
       <div className="bg-[#251914] rounded-2xl border border-amber-700/40 p-4 shadow-lg flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
@@ -560,7 +554,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       </div>
 
-      {/* شريط الفلترة الذكية للمتشابهات حسب الصنف والحجم والسعر والمقاس بالملم */}
       <div className="bg-[#1E1410] rounded-2xl border border-amber-600/40 p-3.5 shadow-md space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
@@ -654,7 +647,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       </div>
 
-      {/* تنبيه الحالة */}
       {statusMessage && (
         <div
           role="status"
@@ -683,7 +675,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       )}
 
-      {/* القسم الأول (الجديد): فرز القطع الأغلى سعراً لتجميعها في رف واحد (بحد أقصى 15 صنفاً فقط لكل رف) */}
       {items.length > 0 && highValueShelfPlans.length > 0 && (
         <div className="bg-[#271C11] border-2 border-amber-400/80 rounded-2xl p-4 space-y-3 shadow-xl">
           {(() => {
@@ -787,7 +778,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       )}
 
-      {/* القسم الثاني: نقل القطع الثقيلة جداً إلى الموقعين D و C تلقائياً (بحد أقصى 15 صنفاً لكل رف) */}
       {items.length > 0 && (
         <div className="bg-[#1A261E] border-2 border-emerald-500/70 rounded-2xl p-4 space-y-3 shadow-xl">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -907,7 +897,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       )}
 
-      {/* القسم الثالث: نقل مباشر وسريع لأي قطعة إلى موقع جديد */}
       {items.length > 0 && (
         <div className="bg-[#221612] border-2 border-emerald-700/50 rounded-2xl p-4 space-y-3 shadow-md">
           <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1055,7 +1044,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       )}
 
-      {/* طلبات النقل المعلقة بانتظار اعتماد المشرف */}
       {pendingTransferDocs.length > 0 && (
         <div className="bg-[#231713] border-2 border-amber-600/60 rounded-2xl p-4 space-y-3">
           <h3 className="text-sm font-black text-amber-300 flex items-center gap-2">
@@ -1101,7 +1089,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       )}
 
-      {/* القسم الرابع: بطاقات المتشابهات من كل صنف مع تقسيم الرفوف بحد أقصى 15 صنفاً لكل رف */}
       {filteredSwapPlans.length === 0 ? (
         <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] p-8 text-center space-y-2">
           <Sparkles className="w-8 h-8 text-amber-400 mx-auto" />
@@ -1473,4 +1460,3 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     </div>
   );
 };
-

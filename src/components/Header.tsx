@@ -61,12 +61,15 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="relative z-10 text-white font-black text-lg tracking-wider drop-shadow">A</span>
               </div>
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <h1 className="text-lg sm:text-xl font-bold text-white tracking-tight leading-tight">
                     قطع الغيار - أسمو
                   </h1>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/25 text-emerald-300 font-black border border-emerald-400/50 font-mono">
+                    v2.4.0
+                  </span>
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-orange-500/25 text-amber-200 font-bold border border-amber-400/40">
-                    سعة 100,000+ قطعة
+                    سقف 15 صنف للرف
                   </span>
                 </div>
                 <p className="text-[11px] text-amber-200/60 font-medium">

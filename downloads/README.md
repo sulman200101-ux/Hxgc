@@ -1,19 +1,10 @@
-# Android test build
+# Android Build v2.4.0
 
-`asmo-inventory-1.6.0-debug.apk` is the current development build (versionCode 7).
+`asmo-inventory-v2.4.0.apk` is the current unified release build (`versionCode 21`, `versionName "2.4.0"`).
+All older APK builds (`v1.0.0` through `v2.3.0` and `v3.0.0`) have been removed and superseded by `v2.4.0`.
 
-This APK is signed with a different debug key from the previously published v1.5.0 APK. It is for testing, not an in-place update of that version. Do not uninstall the existing app or clear its data to bypass the signature mismatch. Keep a verified external backup before any migration.
-
-No real-device OCR accuracy percentage or compatibility with existing installed data is claimed. Source validation and limitations: `../docs/ASMO-DEVELOPMENT-REPORT.md`.
-
-## Current test build: 1.6.1
-
-`asmo-inventory-1.6.1-debug.apk` includes separate inventory/operations screens with swipe navigation and bundled local OCR engine/language assets. A clear synthetic sheet was read with external network blocked. Real customer-sheet and Android-camera accuracy remains unverified. This build uses the same certificate as the test 1.6.0 APK in this directory, but not the previous published 1.5.0 APK. Keep a verified backup before any update.
-
-Latest trial: `asmo-inventory-1.6.2-debug.apk` (versionCode 9). Adds fallback image rotation and SAP PAA/ZYD unit support based on the visually received sheet. The exact customer attachment was not run through the shell OCR test; handwritten marks still require review. Signing key is unchanged from test versions 1.6.0/1.6.1.
-
-Latest trial: `asmo-inventory-1.6.3-debug.apk` (versionCode 10). Duplicate source rows are preserved and can request explicit supervisor-approved addition of their combined quantity to the existing part balance. One stock record is retained; original rows and approval are recorded. Normal inventory rows without an additional-stock request do not increase the balance. Tests: 70 service/browser checks, offline OCR synthetic checks and UI duplicate-approval flow. Real handwriting remains subject to manual review.
-
-Latest trial: `asmo-inventory-1.6.4-debug.apk` (versionCode 11). The scanner starts with camera/album buttons, with album allowing one or many sheets and automatic local reading. The issue action opens the camera immediately. Transfer stays inside item controls; item rows/cards also have verified/unverified actions. Row review and supervisor approval remain required before stock changes. Browser capture, album one/two-image OCR, status-toggle/cancellation and duplicate-quantity approval tests passed. Physical Android camera permission behavior still needs device confirmation. Test signing key is unchanged from 1.6.0–1.6.3.
-
-Latest trial: `asmo-inventory-1.6.5-debug.apk` (versionCode 12). Replaces full-report screenshot PDF generation with paginated text tables, local Arabic font, progress feedback and Android native file/share output. Verified all 7,500 synthetic part numbers and technical English text in an exported PDF while the browser UI remained responsive. Adds non-mutating transfer suggestions by technical family and coded zone, pending transfer requests and explicit supervisor approval. Physical adjacency/capacity must be verified; no real-device performance guarantee is claimed. Test signing key remains unchanged.
+## Key Features in v2.4.0
+- Strict 15-item shelf limit (`MAX_ITEMS_PER_SHELF = 15`) with automatic overflow redistribution (`A1 -> A2 -> B1 -> B2 -> BB1 -> BB2`).
+- Dedicated shelf consolidation for the top 15 most expensive parts (`رف القطع الأغلى سعراً`) with SAR unit/total price estimation.
+- Heavy-duty part routing across `D` and `C` locations (`isCLocation` & `isHeavyDutyDOrCLocation`), capped at 15 items per shelf.
+- Pure 37-row SAP calibration sheet OCR without static fallback rows, powered by server-side Gemini Vision + local Tri-Band OCR.
