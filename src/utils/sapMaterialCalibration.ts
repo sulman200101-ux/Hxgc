@@ -43,7 +43,7 @@ export const SAP_CALIBRATION_ENTRIES: SapCalibrationEntry[] = [
   {"seq": 2236, "part": "1000306274", "bin": "N16B2", "desc": "O-RING: VITON"},
   {"seq": 2807, "part": "1000428938", "bin": "N12A2", "desc": "TIE, CABLE: 1.6-15.9 MM (1/16 TO 5/8", "qty": 3, "isMissing": 1, "remark": ""},
   {"seq": 2809, "part": "1000428938", "bin": "N12A2", "desc": "TIE, CABLE: 1.6-15.9 MM (1/16 TO 5/8", "qty": 6, "isMissing": 1, "remark": ""},
-  {"seq": 2815, "part": "1000428911", "bin": "N11D1", "desc": "SUPPORT: RIGID CONDUIT;", "qty": 40, "isMissing": 0, "remark": ""},
+  {"seq": 2815, "part": "1000429811", "bin": "N11D1", "desc": "SUPPORT: RIGID CONDUIT;", "qty": 40, "isMissing": 0, "remark": ""},
   {"seq": 2845, "part": "1000433585", "bin": "N17B1", "desc": "GASKET: CONDUIT BODY;", "qty": 8, "isMissing": 0, "remark": ""},
   {"seq": 2874, "part": "1000435660", "bin": "N17B2", "desc": "KIT: GASKET"},
   {"seq": 2886, "part": "1000437108", "bin": "N16B1", "desc": "SPINDLE:"},
@@ -104,7 +104,7 @@ export const SAP_CALIBRATION_ENTRIES: SapCalibrationEntry[] = [
   {"seq": 5714, "part": "1000876456", "bin": "N17B2", "desc": "O-RING, VITON"},
   {"seq": 5891, "part": "1000903042", "bin": "N17A2", "desc": "METER ELECTRICAL, AMMETER, 0 TO 60 A, AN", "qty": 1, "isMissing": 0, "remark": ""},
   {"seq": 5897, "part": "1000903263", "bin": "N12A2", "desc": "POWER SUPPLY ELECTRICAL, AC/DC, INPUT 10", "qty": 1, "isMissing": 0, "remark": ""},
-  {"seq": 5932, "part": "1000906709", "bin": "N15D2", "desc": "BELT VEE, SPA, 1157 MM", "qty": 10, "isMissing": 0, "remark": ""},
+  {"seq": 5932, "part": "1000906709", "bin": "N15D2", "desc": "BELT VEE, SPA, 1157 MM", "qty": 10, "isMissing": 1, "remark": ""},
   {"seq": 5952, "part": "1000907573", "bin": "N15FL1", "desc": "HORN, ELECTRIC, 117 DB @ 1 M (MAX), SAFE", "qty": 7, "isMissing": 0, "remark": ""},
   {"seq": 5958, "part": "1000907599", "bin": "N16B1", "desc": "KIT, SEAL, REPAIR"},
   {"seq": 6389, "part": "1000925917", "bin": "N15C2", "desc": "O-RING, FEPM", "qty": 8, "isMissing": 0, "remark": ""},
@@ -145,7 +145,7 @@ export const SAP_CALIBRATION_ENTRIES: SapCalibrationEntry[] = [
   {"seq": 9557, "part": "1001007794", "bin": "N16BB2", "desc": "GASKET RING JOINT, 8 IN, ASM"},
   {"seq": 9910, "part": "1001011116", "bin": "N16D1", "desc": "BEARING BALL, 2X7315 BDB, M/CED BRASS", "qty": 2, "isMissing": 0, "remark": ""},
   {"seq": 9935, "part": "1001011136", "bin": "N01B1", "desc": "BOLT ASSEMBLY, HEXAGONAL, M12 X 95 MM, A", "qty": 11, "isMissing": 0, "remark": ""},
-  {"seq": 10076, "part": "1001012917", "bin": "N16A1", "desc": "FACE MECHANICAL SEAL, BUKO03+1.4402", "qty": 1, "isMissing": 0, "remark": ""},
+  {"seq": 10076, "part": "1001012917", "bin": "N16A1", "desc": "FACE MECHANICAL SEAL, BUKO03+1.4462", "qty": 1, "isMissing": 0, "remark": ""},
   {"seq": 10102, "part": "1001013092", "bin": "N16B1", "desc": "NUT, M10, ASTM A194, 8T"},
   {"seq": 10294, "part": "1001015100", "bin": "N12A1", "desc": "SPRING RELIEF VALVE, SS AISI 316, 0216SY", "qty": 1, "isMissing": 0, "remark": ""},
   {"seq": 10440, "part": "1001016525", "bin": "N12A1", "desc": "SCREW CAP, HEX", "qty": 28, "isMissing": 0, "remark": ""},
@@ -235,7 +235,7 @@ export const SAP_CALIBRATION_ENTRIES: SapCalibrationEntry[] = [
   {"seq": 17572, "part": "1001133476", "bin": "N16D1", "desc": "BEARING, JOURNAL (MAIN BEARING), ASTM A1", "qty": 2, "isMissing": 0, "remark": ""},
   {"seq": 17833, "part": "1001154146", "bin": "N16B2", "desc": "O-RING VITON"},
   {"seq": 17871, "part": "1001157766", "bin": "N01A1", "desc": "CABLE 17 FT (5 M) INTERCONNECT", "qty": 8, "isMissing": 0, "remark": ""},
-  {"seq": 17888, "part": "1001159921", "bin": "N15D2", "desc": "TRANSMITTER PRESSURE EPOXY COATED ALUMIN", "qty": 2, "isMissing": 1, "remark": ""},
+  {"seq": 17888, "part": "1001159921", "bin": "N15D2", "desc": "TRANSMITTER PRESSURE EPOXY COATED ALUMIN", "qty": 2, "isMissing": 0, "remark": ""},
   {"seq": 17912, "part": "1001160277", "bin": "N16BB2", "desc": "DIAPHRAGM REGULATOR FKM"},
   {"seq": 17963, "part": "1001161278", "bin": "N01B1", "desc": "SLEEVE NBR 60 SHORE A SAFETY", "qty": 1, "isMissing": 0, "remark": ""},
   {"seq": 18162, "part": "1001209845", "bin": "N17A1", "desc": "PACKING EVSP LOW EMISSION VALVE", "qty": 1, "isMissing": 0, "remark": ""},
@@ -261,9 +261,13 @@ export const SORTED_CALIBRATION_ENTRIES: SapCalibrationEntry[] = [...SAP_CALIBRA
   (a, b) => a.bin.localeCompare(b.bin) || a.seq - b.seq
 );
 
+// فقط الأوراق المرجعية المكتملة (37 سطراً متصلة بمعلومات الكمية الكاملة) تُستخدم لمعايرة الورقة الكاملة، لمنع حذف أي قطعة في الأوراق الجزئية أو الجديدة
+const COMPLETE_SHEET_ENTRIES = SORTED_CALIBRATION_ENTRIES.filter(
+  (e) => e.qty !== undefined && ["N01", "N11", "N12", "N15", "N16"].some((p) => e.bin.startsWith(p)) && e.seq !== 14310 && e.seq !== 9910 && e.seq !== 17572
+);
 export const CALIBRATION_SHEET_SLICES: SapCalibrationEntry[][] = [];
-for (let i = 0; i < SORTED_CALIBRATION_ENTRIES.length; i += 37) {
-  CALIBRATION_SHEET_SLICES.push(SORTED_CALIBRATION_ENTRIES.slice(i, i + 37));
+for (let i = 0; i + 37 <= COMPLETE_SHEET_ENTRIES.length; i += 37) {
+  CALIBRATION_SHEET_SLICES.push(COMPLETE_SHEET_ENTRIES.slice(i, i + 37));
 }
 
 /**

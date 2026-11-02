@@ -99,7 +99,7 @@ export function repair10DigitMaterialCode(raw: string | null | undefined): strin
   if (/^\d{10}$/.test(trimmed)) return normalizeSapMaterialPrefix(trimmed);
 
   // 1. فحص وجود 10 أرقام صحيحة تبدأ بـ 1000 أو 1001 حتى لو التصقت برقم التسلسل في البداية أو كود مصنع في النهاية
-  const directGlued = trimmed.match(/(?:^|[^0-9])\d{0,5}(100[01]\d{6})(?:C006|M016|002|\b|[^0-9])/i);
+  const directGlued = trimmed.match(/(?:^|[^0-9])\d{0,5}(100\d{7})(?:C006|M016|002|\b|[^0-9])/i);
   if (directGlued) return normalizeSapMaterialPrefix(directGlued[1]);
 
   // 2. إزالة خطوط الجدول والرموز الطرفية قبل تحويل الحروف البصرية المتشابهة
@@ -120,13 +120,13 @@ export function repair10DigitMaterialCode(raw: string | null | undefined): strin
     .replace(/[B&]/g, '8')
     .replace(/[¢E]/g, '9');
 
-  const exact10 = mapped.match(/(?:^|[^0-9])\d{0,5}(100[01]\d{6})(?=[^0-9]|$)/);
+  const exact10 = mapped.match(/(?:^|[^0-9])\d{0,5}(100\d{7})(?=[^0-9]|$)/);
   if (exact10) return normalizeSapMaterialPrefix(exact10[1]);
 
   const digitsOnly = mapped.replace(/[^0-9]/g, '');
   if (/^\d{10}$/.test(digitsOnly)) {
     const fixed = normalizeSapMaterialPrefix(digitsOnly);
-    if (/^100[01]\d{6}$/.test(fixed)) return fixed;
+    if (/^100\d{7}$/.test(fixed)) return fixed;
   }
 
   // البحث من اليمين إلى اليسار أولاً (لأن رقم التسلسل 1..19500 يلتصق من اليسار دائماً) عن 10 أرقام صريحة تبدأ بـ 1000 أو 1001

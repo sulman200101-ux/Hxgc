@@ -242,7 +242,7 @@ export function extractStrictMaterialNumber(line: string): string | null {
 
   // فصل رقم القطعة (1000xxxxxx / 1001xxxxxx) حتى لو التصق قبله رقم تسلسل السطر أو خط الجدول
   const gluedMatch = line.match(
-    /(?:^|[^0-9])\d{0,5}[|Il!tTrRfF+[\]().:\-\/\\]?(100[01]\d{6})(?:\d{0,2}|C006|M016|002)?(?=[^0-9]|$)/i
+    /(?:^|[^0-9])\d{0,5}[|Il!tTrRfF+[\]().:\-\/\\]?(100\d{7})(?:\d{0,2}|C006|M016|002)?(?=[^0-9]|$)/i
   );
   if (gluedMatch) {
     return normalizeSapMaterialPrefix(gluedMatch[1]);
@@ -283,27 +283,27 @@ export function extractStrictMaterialNumber(line: string): string | null {
         .replace(/[^0-9]/g, '');
 
       const prefixFixed = normalizeSapMaterialPrefix(repaired);
-      if (/^100[01]\d{6}$/.test(prefixFixed)) {
+      if (/^100\d{7}$/.test(prefixFixed)) {
         return prefixFixed;
       }
       if (repaired.length >= 11 && repaired.length <= 16) {
         for (let offset = repaired.length - 10; offset >= 0; offset--) {
           const rawSlice = repaired.slice(offset, offset + 10);
-          if (/^100[01]\d{6}$/.test(rawSlice)) {
+          if (/^100\d{7}$/.test(rawSlice)) {
             return normalizeSapMaterialPrefix(rawSlice);
           }
         }
         for (let offset = repaired.length - 10; offset >= 0; offset--) {
           const candidate10 = normalizeSapMaterialPrefix(repaired.slice(offset, offset + 10));
-          if (/^100[01]\d{6}$/.test(candidate10)) {
+          if (/^100\d{7}$/.test(candidate10)) {
             return candidate10;
           }
         }
       }
-      if (/^\d{1,5}100[01]\d{6}$/.test(repaired)) {
+      if (/^\d{1,5}100\d{7}$/.test(repaired)) {
         return normalizeSapMaterialPrefix(repaired.slice(-10));
       }
-      if (/^100[01]\d{6}\d{1,2}$/.test(repaired)) {
+      if (/^100\d{7}\d{1,2}$/.test(repaired)) {
         return normalizeSapMaterialPrefix(repaired.slice(0, 10));
       }
       if (/^00[0174]\d{6}$/.test(repaired)) {
@@ -752,8 +752,8 @@ export function alignAndCompleteCalibrationSheet(rows: ExtractedSparePart[]): Ex
     }
   }
 
-  // إذا طابقت الورقة الممسوحة شريحة جرد كاملة (15 سطراً فأكثر من أصل 37)، نضمن اكتمال ودقة الـ 37 سطراً بنسبة 100%
-  if (bestSlice && bestMatchCount >= 15) {
+  // إذا طابقت الورقة الممسوحة إحدى الأوراق المرجعية الكاملة (24 سطراً فأكثر من أصل 37)، نستكمل السطور المفقودة مع الحفاظ على أي سطر إضافي قرأه الـ OCR فعلياً
+  if (bestSlice && bestSlice.length === 37 && bestMatchCount >= 24) {
     const usedRowIndices = new Set<number>();
     const aligned: ExtractedSparePart[] = [];
 
@@ -1177,10 +1177,13 @@ export function unionOrderedRowSequences(
     if (secondaryToPrimaryMap.has(sIdx)) continue;
     const missingRow = secondary[sIdx];
 
-    const alreadyExistsExact = result.some((r) => r.part_number === missingRow.part_number);
+    const existingWithSamePart = result.filter((r) => r.part_number === missingRow.part_number);
     const countInSecondary = secondary.filter((r) => r.part_number === missingRow.part_number).length;
-    const countInResult = result.filter((r) => r.part_number === missingRow.part_number).length;
-    if (alreadyExistsExact && countInResult >= countInSecondary) {
+    const countInResult = existingWithSamePart.length;
+    const hasDistinctQty =
+      missingRow.qty_total > 1 &&
+      existingWithSamePart.every((r) => r.qty_total !== missingRow.qty_total);
+    if (existingWithSamePart.length > 0 && countInResult >= countInSecondary && !hasDistinctQty) {
       continue;
     }
 

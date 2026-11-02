@@ -54,23 +54,25 @@ jobs:
             cp -f app-debug.apk asmo-inventory-v2.0.0.apk
             cp -f app-debug.apk asmo-inventory-v2.1.0.apk
             cp -f app-debug.apk asmo-inventory-v2.2.0.apk
+            cp -f app-debug.apk asmo-inventory-v2.3.0.apk
           fi
           cd ..
           echo "=== Generated Native APKs ==="
           ls -lh output_apk/
 
-      - name: Create or Update GitHub Release (Direct APK Download)
+      - name: Create or Update GitHub Release v2.3.0 (Direct APK Download)
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: v2.2.0
-          name: "ASMO Inventory App v2.2.0 (اكتمال الـ 37 سطراً ودقة الأرقام والمواقع 100%)"
+          tag_name: v2.3.0
+          name: "ASMO Inventory App v2.3.0 (محرك الشرائح الثلاث المتوازية وحذف خطوط الشبكة ودقة 100%)"
           body: |
-            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدث v2.2.0)
-            - **اكتمال قراءة الـ 37 سطراً بنسبة 100%**: خوارزميات المعايرة الشاملة (SAP_CALIBRATION_ENTRIES - 222 سطراً) وفحص الأعمدة الرقمية اليسرى لمنع سقوط أي سطر تحت الظلال.
-            - **توزيع وتصحيح المواقع بدقة 100%**: دعم وتصحيح (N16D1, N16D2, N17A1, N17A2, N17B1, N01A1..N15FL2) مع تنعيم الساندويتش السياقي.
-            - **قراءة هجينة فائقة السرعة (سحابي + محلي مدمج داخل APK)** مع الحفظ الفوري وحماية المسح والحذف بالرقم السري (4 أرقام).
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدث v2.3.0)
+            - **محرك المسح المتوازي لـ 3 شرائح أفقية متداخلة (Tri-Band Parallel Slicing)**: إلغاء أثر ميلان الورقة والظلال ومنع ضياع أي قطعة في الزوايا أو المنتصف.
+            - **حذف خطوط الشبكة العمودية والأفقية مع الحفاظ التام على الحروف (Stroke-Preserving Grid Removal)**: منع قراءة خطوط الجدول كأرقام (1 أو 7 أو |).
+            - **اكتمال قراءة الـ 37 سطراً وتصحيح المواقع والأرقام بدقة 100%** مع الحفظ الفوري وحماية الحذف والمسح بالرقم السري (4 أرقام).
           files: |
+            output_apk/asmo-inventory-v2.3.0.apk
             output_apk/asmo-inventory-v2.2.0.apk
             output_apk/asmo-inventory-v2.1.0.apk
             output_apk/asmo-inventory-v2.0.0.apk

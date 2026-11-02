@@ -68,7 +68,7 @@ async function runGeminiVisionTableOcr(imageBase64: string): Promise<any | null>
       httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
     });
 
-    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3-flash-preview', 'gemini-2.5-flash'];
+    const candidateModels = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash'];
 
     for (const modelName of candidateModels) {
       try {
@@ -517,7 +517,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
 
-    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3-flash-preview', 'gemini-2.5-flash'];
+    const candidateModels = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash'];
     for (const modelName of candidateModels) {
       try {
         const response = await ai.models.generateContent({
@@ -581,11 +581,13 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v2.3.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v2.2.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v2.1.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v2.0.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v1.9.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.3.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.2.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.1.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.0.0.apk'),
@@ -596,17 +598,18 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.2.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.3.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.2.0/asmo-inventory-v2.2.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.3.0/asmo-inventory-v2.3.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v2.3.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.2.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.1.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.0.0.apk', handleApkDownload);
@@ -618,8 +621,6 @@ app.get('/api/download-apk', handleApkDownload);
 
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
-
-  getNodeOcrWorker().catch(() => {});
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -637,6 +638,9 @@ async function startServer() {
 
   app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
+    setTimeout(() => {
+      getNodeOcrWorker().catch(() => {});
+    }, 2500);
   });
 }
 

@@ -20,12 +20,26 @@ const langGzSources = [
 
 await mkdir(new URL('public/ocr/lang/', root), { recursive: true });
 for (const [source, target] of files) {
-  await copyFile(new URL(source, root), new URL(target, root));
+  try {
+    const targetUrl = new URL(target, root);
+    try {
+      await access(targetUrl);
+    } catch {
+      await copyFile(new URL(source, root), targetUrl);
+    }
+  } catch {
+    // Keep existing asset if node_modules source is not yet extracted
+  }
 }
 for (const [source, target] of optionalSimdFiles) {
   try {
-    await access(new URL(source, root));
-    await copyFile(new URL(source, root), new URL(target, root));
+    const targetUrl = new URL(target, root);
+    try {
+      await access(targetUrl);
+    } catch {
+      await access(new URL(source, root));
+      await copyFile(new URL(source, root), targetUrl);
+    }
   } catch {
     // SIMD files optional depending on tesseract.js-core version
   }
@@ -34,14 +48,18 @@ for (const [source, target] of optionalSimdFiles) {
 // فك ضغط ملفات اللغات (.traineddata) مباشرة بدون الاحتفاظ بنسخة .gz لمنع تعارض mergeDebugAssets في أندرويد ولضمان عمل gzip: false في كل من APK والمتصفح
 for (const [lang, sourcePath] of langGzSources) {
   try {
-    const srcUrl = new URL(sourcePath, root);
-    await access(srcUrl);
     const rawUrl = new URL(`public/ocr/lang/${lang}.traineddata`, root);
     const oldGzUrl = new URL(`public/ocr/lang/${lang}.traineddata.gz`, root);
-    const gzBuf = await readFile(srcUrl);
-    const uncompressed = gunzipSync(gzBuf);
-    await writeFile(rawUrl, uncompressed);
     await rm(oldGzUrl, { force: true });
+    try {
+      await access(rawUrl);
+    } catch {
+      const srcUrl = new URL(sourcePath, root);
+      await access(srcUrl);
+      const gzBuf = await readFile(srcUrl);
+      const uncompressed = gunzipSync(gzBuf);
+      await writeFile(rawUrl, uncompressed);
+    }
   } catch {
     // المتابعة في حال كانت اللغة الاختيارية غير متوفرة
   }
