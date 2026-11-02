@@ -54,7 +54,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     setValidationError(null);
     if (item) {
       setPartNumber(item.part_number);
-      setLocationCode(item.location_code === 'عام' ? 'N11C2' : item.location_code);
+      setLocationCode(item.location_code === 'عام' ? '' : item.location_code);
       setDescEn(item.description_en);
       setDescAr(item.description_ar);
       setCategory(item.category === 'عام' ? 'قطع ميكانيكية متنوعة' : item.category);
@@ -62,13 +62,12 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       setQtyOut(item.qty_out);
       setStatus(item.is_missing === 1 ? 'غير موجودة' : item.status);
     } else {
-      const random7 = Math.floor(1000000 + Math.random() * 8999999);
-      setPartNumber(`100${random7}`);
-      setLocationCode('N11C2');
+      setPartNumber('');
+      setLocationCode('');
       setDescEn('');
       setDescAr('');
-      setCategory('مسامير وروابط');
-      setQtyTotal(10);
+      setCategory('قطع ميكانيكية متنوعة');
+      setQtyTotal(0);
       setQtyOut(0);
       setStatus('غير مدقق');
     }

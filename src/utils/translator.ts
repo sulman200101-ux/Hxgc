@@ -266,8 +266,8 @@ const TRANSLATION_CACHE = new Map<string, { category: string; descAr: string }>(
 
 export function categorizeAndTranslate(descEn: string): { category: string; descAr: string } {
   const normalizedKey = (descEn || '').trim().toUpperCase();
-  if (!normalizedKey) {
-    return { category: 'قطع ميكانيكية متنوعة', descAr: 'قطعة غيار' };
+  if (!normalizedKey || normalizedKey === 'غير محدد' || normalizedKey === 'SPARE PART ASMO' || normalizedKey === 'SPARE PART') {
+    return { category: '', descAr: '' };
   }
   if (TRANSLATION_CACHE.has(normalizedKey)) {
     return TRANSLATION_CACHE.get(normalizedKey)!;

@@ -322,33 +322,33 @@ export function validateDocument(doc: StockDocument) {
   const seen = new Set<string>();
   for (let i = 0; i < doc.lines.length; i++) {
     const line = doc.lines[i];
-    const rowLabel = ` (السطر #${i + 1})`;
     line.part_number = String(line.part_number || '').trim();
-    if (!/^\d{10}$/.test(line.part_number)) {
+    if (line.part_number && !/^\d{10}$/.test(line.part_number)) {
       const digits = line.part_number.replace(/\D/g, '');
-      if (digits.length === 10) {
-        line.part_number = digits;
-      } else {
-        throw new Error('راجع رقم القطعة' + rowLabel);
-      }
+      line.part_number = digits.length === 10 ? digits : '';
     }
     if (!Number.isSafeInteger(line.quantity) || line.quantity < 0) {
-      line.quantity = 1;
+      line.quantity = 0;
     }
-    if (doc.kind !== 'inventory' && line.quantity === 0) {
-      line.quantity = 1;
+    line.location = (line.location || '').trim();
+    if (line.location === 'غير محدد' || line.location === 'N/A') {
+      line.location = '';
     }
-    if (!line.location || !line.location.trim()) {
-      line.location = 'غير محدد';
-    }
-    if (!line.description_en || !line.description_en.trim()) {
-      line.description_en = 'غير محدد';
+    line.description_en = (line.description_en || '').trim();
+    if (
+      line.description_en === 'غير محدد' ||
+      line.description_en === 'SPARE PART ASMO' ||
+      line.description_en === 'SPARE PART'
+    ) {
+      line.description_en = '';
     }
     line.reviewed = true;
-    if (seen.has(line.part_number) && ['inventory', 'receipt'].includes(doc.kind)) {
+    if (line.part_number && seen.has(line.part_number) && ['inventory', 'receipt'].includes(doc.kind)) {
       doc.duplicateResolution = 'sum';
     }
-    seen.add(line.part_number);
+    if (line.part_number) {
+      seen.add(line.part_number);
+    }
   }
 }
 
@@ -360,12 +360,13 @@ export const canonicalDocumentId = (value: string) =>
     .toUpperCase();
 
 export function approvalLines(doc: StockDocument): DocumentLine[] {
-  if (doc.duplicateResolution !== 'sum') return doc.lines;
+  const validLines = doc.lines.filter((line) => /^\d{10}$/.test(String(line.part_number || '').trim()));
+  if (doc.duplicateResolution !== 'sum') return validLines;
   const groups = new Map<
     string,
     { line: DocumentLine; count: number; totalShortage: number; allExcludedF: boolean }
   >();
-  for (const line of doc.lines) {
+  for (const line of validLines) {
     const existing = groups.get(line.part_number);
     const marks = interpretMark(line.check, line.remark);
     if (!existing) {
@@ -376,14 +377,13 @@ export function approvalLines(doc: StockDocument): DocumentLine[] {
         allExcludedF: marks.excludedIncrease,
       });
     } else {
-      const totalQuantity = existing.line.quantity + line.quantity;
+      const totalQuantity = (existing.line.quantity || 0) + (line.quantity || 0);
       const totalShortage = existing.totalShortage + marks.shortage;
       const allExcludedF = existing.allExcludedF && marks.excludedIncrease;
       let mergedRemark = existing.line.remark || line.remark;
       if (totalShortage > 0) {
         mergedRemark = `-${totalShortage}`;
       } else if (!allExcludedF && /^F\d+$/i.test(mergedRemark.trim())) {
-        // إذا كان أحد السطرين عادياً والآخر يحمل ملاحظة F، نحتفظ بالملاحظة دون حجب السطر المدمج
         mergedRemark = `${mergedRemark.trim()} (مدمج)`;
       }
       groups.set(line.part_number, {
@@ -399,10 +399,6 @@ export function approvalLines(doc: StockDocument): DocumentLine[] {
       });
     }
   }
-  const mergedList = Array.from(groups.values()).map((g) => g.line);
-  if (mergedList.some((line) => !Number.isSafeInteger(line.quantity))) {
-    throw new Error('مجموع الكميات غير صالح');
-  }
-  return mergedList;
+  return Array.from(groups.values()).map((g) => g.line);
 }
 

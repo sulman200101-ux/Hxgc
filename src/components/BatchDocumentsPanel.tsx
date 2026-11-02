@@ -161,11 +161,18 @@ export function BatchDocumentsPanel({
                 : '');
             const marks = interpretMark(sym, row.remark || '');
             return {
-              part_number: row.part_number,
-              quantity: Number.isFinite(row.qty_total) && row.qty_total > 0 ? row.qty_total : 1,
+              part_number: row.part_number || '',
+              quantity:
+                Number.isFinite(row.qty_total) && row.qty_total > 0
+                  ? row.qty_total
+                  : Number.NaN,
               location: row.location_code || '',
               description_en:
-                row.description_en && row.description_en !== 'غير محدد' ? row.description_en : '',
+                row.description_en &&
+                row.description_en !== 'غير محدد' &&
+                row.description_en !== 'SPARE PART ASMO'
+                  ? row.description_en
+                  : '',
               description_ar: row.description_ar || '',
               check: marks.mark_symbol || '',
               remark: marks.shortage > 0 ? `-${marks.shortage}` : sym === 'F' ? 'F' : '',
@@ -466,7 +473,7 @@ export function BatchDocumentsPanel({
                   >
                     <div className="flex flex-wrap items-center gap-1.5">
                       <input
-                        required
+                        placeholder="رقم القطعة"
                         pattern="[0-9]{10}"
                         className="bg-stone-800 px-1.5 py-1 w-28 rounded font-mono text-amber-300"
                         value={line.part_number}
@@ -478,7 +485,7 @@ export function BatchDocumentsPanel({
                         title="رقم القطعة"
                       />
                       <input
-                        required
+                        placeholder="الموقع"
                         className="bg-stone-800 px-1.5 py-1 w-20 rounded font-mono text-emerald-300"
                         value={line.location}
                         onChange={(e) =>
@@ -489,12 +496,12 @@ export function BatchDocumentsPanel({
                         title="الموقع"
                       />
                       <input
-                        required
+                        placeholder="الكمية"
                         type="number"
                         min="0"
                         step="1"
                         className="bg-stone-800 px-1.5 py-1 w-16 rounded font-mono text-white"
-                        value={Number.isFinite(line.quantity) ? line.quantity : ''}
+                        value={Number.isFinite(line.quantity) && line.quantity > 0 ? line.quantity : ''}
                         onChange={(e) =>
                           patchLine(sheet.key, index, {
                             quantity: e.target.value === '' ? Number.NaN : Number(e.target.value),
@@ -565,13 +572,15 @@ export function BatchDocumentsPanel({
                 const preparedDocs: StockDocument[] = reviewedSheets.map((sheet, idx) => {
                   const firstByPart = new Map<string, { location: string; check: string }>();
                   const normalizedLines = sheet.lines.map((l) => {
-                    const cleanPart = l.part_number.trim();
-                    const safeQty = Number.isFinite(l.quantity) && l.quantity >= 0 ? Math.floor(l.quantity) : 1;
-                    const safeLoc = (l.location || '').trim().toUpperCase() || 'N01A1';
-                    const safeDescEn = (l.description_en || '').trim() || 'SPARE PART ASMO';
-                    const existingFirst = firstByPart.get(cleanPart);
+                    const cleanPart = (l.part_number || '').trim();
+                    const safeQty = Number.isFinite(l.quantity) && l.quantity >= 0 ? Math.floor(l.quantity) : 0;
+                    const safeLoc = (l.location || '').trim().toUpperCase();
+                    const safeDescEn = (l.description_en || '').trim();
+                    const existingFirst = cleanPart ? firstByPart.get(cleanPart) : undefined;
                     if (!existingFirst) {
-                      firstByPart.set(cleanPart, { location: safeLoc, check: l.check });
+                      if (cleanPart) {
+                        firstByPart.set(cleanPart, { location: safeLoc, check: l.check });
+                      }
                       return {
                         ...l,
                         part_number: cleanPart,
@@ -585,8 +594,8 @@ export function BatchDocumentsPanel({
                       ...l,
                       part_number: cleanPart,
                       quantity: safeQty,
-                      location: existingFirst.location,
-                      check: existingFirst.check,
+                      location: existingFirst.location || safeLoc,
+                      check: existingFirst.check || l.check,
                       description_en: safeDescEn,
                       reviewed: true,
                     };

@@ -7,7 +7,6 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { createWorker } from 'tesseract.js';
 import { parseRawTextOcr, combineBestSheetExtractions } from './src/services/localOcr';
-import { alignAndCompleteCalibrationSheet } from './src/utils/strictTableParser';
 
 dotenv.config();
 
@@ -82,9 +81,10 @@ async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: strin
     اقرأ جدول قطع الغيار من الصورة المرفقة واستخرج السطور المرئية بوضوح فقط.
 
     قواعد صارمة جداً لمنع الهلوسة:
-    1. يُمنع منعاً باتاً توليد أو تخمين أي أرقام قطع أو مواقع أو كميات غير موجودة في الصورة.
-    2. رقم القطعة (part_number) يجب أن يُقرأ كما هو بدقة (10 أرقام)، وإذا كان غير واضح ضع null.
-    3. ابحث بدقة عن أي علامات يدوية أو رموز مكتوبة بجانب كل صف أو عند خانة الكمية، وفسرها حصراً كالتالي:
+    1. يُمنع منعاً باتاً توليد أو تخمين أي أرقام قطع أو مواقع أو كميات أو أوصاف غير موجودة في الصورة.
+    2. رقم القطعة (part_number) يجب أن يُقرأ كما هو بدقة (10 أرقام)، وإذا لم تستطع قراءته اتركه فارغاً "" أو null.
+    3. أي حقل في الصف لم تستطع قراءته بوضوح (سواء part_number أو location_code أو description أو quantity) يجب أن تعيده فارغاً "" أو null ولا تملأه من سطور أخرى.
+    4. ابحث بدقة عن أي علامات يدوية أو رموز مكتوبة بجانب كل صف أو عند خانة الكمية، وفسرها حصراً كالتالي:
        - إذا وجدت علامة صح (✓): اجعل حقل mark_symbol = "✓" وحقل audit_meaning = "القطع موجودة" وحقل status = "مدقق".
        - إذا وجدت علامة خطأ أو إكس (X أو ✗): اجعل حقل mark_symbol = "X" وحقل audit_meaning = "القطع غير موجودة" وحقل status = "غير موجود".
        - إذا وجدت حرف (F أو f): اجعل حقل mark_symbol = "F" وحقل audit_meaning = "تم نقل العدد الزائد إلى مكان آخر" وحقل status = "تم النقل".
@@ -187,10 +187,13 @@ async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: strin
           ? parsed.items
           : [];
 
-        // تصفية إضافية صارمة في الكود لحذف أي صف لم يتمكن الـ OCR من قراءة رقم قطعته بوضوح
-        const filteredList = rawList.filter(
-          (item: any) => item && item.part_number && String(item.part_number).trim() !== ''
-        );
+        const filteredList = rawList.filter((item: any) => {
+          if (!item) return false;
+          const hasPart = item.part_number && String(item.part_number).trim() !== '' && String(item.part_number).trim() !== 'null';
+          const hasLoc = item.location_code && String(item.location_code).trim() !== '' && String(item.location_code).trim() !== 'null';
+          const hasDesc = item.description && String(item.description).trim() !== '' && String(item.description).trim() !== 'null';
+          return Boolean(hasPart || hasLoc || hasDesc);
+        });
 
         if (filteredList.length > 0) {
           const normalizedItems = filteredList.map((row: any) => {
@@ -205,23 +208,29 @@ async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: strin
                 ? String(row.remark)
                 : '';
 
+            const rawPart = row?.part_number && row.part_number !== 'null' ? String(row.part_number).trim() : '';
+            const cleanPart = /^\d{10}$/.test(rawPart) ? rawPart : '';
+            const cleanLoc = row?.location_code && row.location_code !== 'null' ? String(row.location_code).trim() : '';
+            const cleanDesc =
+              row?.description && row.description !== 'null'
+                ? String(row.description).trim()
+                : row?.description_en && row.description_en !== 'null'
+                ? String(row.description_en).trim()
+                : '';
+            const hasQty =
+              row?.quantity !== null &&
+              row?.quantity !== undefined &&
+              String(row.quantity).trim() !== '' &&
+              Number.isFinite(Number(row.quantity));
+            const cleanQty = hasQty ? Number(row.quantity) : null;
+
             return {
-              part_number: String(row.part_number).trim(),
-              location_code: row?.location_code ?? '',
-              description_en: row?.description ?? row?.description_en ?? '',
-              description: row?.description ?? row?.description_en ?? '',
-              qty_total:
-                row?.quantity !== null && row?.quantity !== undefined
-                  ? Number(row.quantity) || 1
-                  : row?.qty_total !== null && row?.qty_total !== undefined
-                  ? Number(row.qty_total) || 1
-                  : 1,
-              quantity:
-                row?.quantity !== null && row?.quantity !== undefined
-                  ? Number(row.quantity) || 1
-                  : row?.qty_total !== null && row?.qty_total !== undefined
-                  ? Number(row.qty_total) || 1
-                  : 1,
+              part_number: cleanPart,
+              location_code: cleanLoc,
+              description_en: cleanDesc,
+              description: cleanDesc,
+              qty_total: cleanQty !== null && cleanQty > 0 ? cleanQty : 0,
+              quantity: cleanQty,
               mark_symbol: sym,
               audit_meaning: row?.audit_meaning ?? null,
               status: row?.status ?? (isMissing ? 'غير موجود' : 'غير مدقق'),
@@ -301,8 +310,6 @@ async function runNodeTableOcr(imageBase64: string, preprocessedBase64?: string)
       const natItems = parseRawTextOcr(data.text || '');
       extracted = combineBestSheetExtractions(extracted, natItems);
     }
-
-    extracted = alignAndCompleteCalibrationSheet(extracted);
 
     if (extracted.length > 0) {
       return {
@@ -414,9 +421,7 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
         if (parsed.raw_text || parsed.left_text) {
           const fullRows = parsed.raw_text ? parseRawTextOcr(parsed.raw_text) : [];
           const leftRows = parsed.left_text ? parseRawTextOcr(parsed.left_text) : [];
-          const unified = alignAndCompleteCalibrationSheet(
-            combineBestSheetExtractions(fullRows, leftRows)
-          );
+          const unified = combineBestSheetExtractions(fullRows, leftRows);
           if (unified.length >= (parsed.items?.length || 0)) {
             parsed.items = unified;
           }
@@ -746,26 +751,27 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
-  path.resolve(__dirname, 'public', 'asmo-inventory-v2.5.0.apk'),
+  path.resolve(__dirname, 'public', 'asmo-inventory-v2.6.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
-  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.5.0.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.6.0.apk'),
 ];
 
 const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.5.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.6.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.5.0/asmo-inventory-v2.5.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.6.0/asmo-inventory-v2.6.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v2.6.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.5.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.4.0.apk', handleApkDownload);
 app.get('/api/download-apk', handleApkDownload);

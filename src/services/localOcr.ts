@@ -4,12 +4,10 @@ import {
 } from '../utils/imagePreprocessor';
 import { preprocessImageForOCR } from '../utils/imagePreprocess';
 import { createWorker } from 'tesseract.js';
-import { categorizeAndTranslate } from '../utils/translator';
 import { preprocessImageWithOpenCV } from '../utils/imagePreprocessing';
 import {
   parseStrictAsmoTable,
   unionOrderedRowSequences,
-  alignAndCompleteCalibrationSheet,
 } from '../utils/strictTableParser';
 import { parseTableWithGeminiVision, performStrictOCR } from './geminiVisionService';
 export { performStrictOCR };
@@ -19,14 +17,6 @@ export {
   type ExtractedSparePartData,
   type ExtractedInventoryTableRow,
 } from './geminiService';
-import {
-  sanitizeQuantity,
-  sanitizeLocationCode,
-  sanitizeDescription,
-  extractDynamicLocationFromLine,
-  isValidSpecificLocation,
-  resolveSheetLocationsWithContext,
-} from '../utils/regexSanitizer';
 import type { ItemStatus } from '../types';
 
 export interface ExtractedSparePart {
@@ -340,7 +330,7 @@ export async function processOcrFromImage(
           preprocessedGridFree || undefined
         );
         if (visionResult.success && isUsableExtraction(visionResult.items, 1)) {
-          extracted = alignAndCompleteCalibrationSheet(visionResult.items);
+          extracted = visionResult.items;
           if (extracted.length > 0) {
             return extracted;
           }
@@ -402,7 +392,6 @@ export async function processOcrFromImage(
       }
     }
 
-    extracted = alignAndCompleteCalibrationSheet(extracted);
     return extracted;
   } catch (err) {
     console.warn('Local OCR notice:', err);
@@ -414,95 +403,7 @@ export async function processOcrFromImage(
 }
 
 export function parseRawTextOcr(rawText: string): ExtractedSparePart[] {
-  const strictItems = parseStrictAsmoTable(rawText);
-  if (strictItems.length > 0) {
-    return strictItems;
-  }
-
-  const lines = rawText
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-  const rawResults: Array<ExtractedSparePart & { location?: string }> = [];
-
-  for (let idx = 0; idx < lines.length; idx++) {
-    const line = lines[idx];
-    if (/^\s*(?:MATERIAL|ITEM|NO\.|STORAGE\s+BIN|QTY|DESCRIPTION|INVENTORY|PAGE)\b/i.test(line)) {
-      continue;
-    }
-
-    const normalizedDigitsLine = line.replace(/\b1[0OQD][0OQD][0-9OILSBGZD]{7}\b/gi, (token) =>
-      token
-        .toUpperCase()
-        .replace(/[OQD]/g, '0')
-        .replace(/[IL]/g, '1')
-        .replace(/S/g, '5')
-        .replace(/B/g, '8')
-        .replace(/G/g, '6')
-        .replace(/Z/g, '2')
-    );
-
-    const partMatch = normalizedDigitsLine.match(/\b(100\d{7})\b/);
-    if (!partMatch) {
-      continue;
-    }
-
-    const partNum = partMatch[1];
-    const dynamicLoc = extractDynamicLocationFromLine(line);
-    const loc = dynamicLoc || sanitizeLocationCode(line) || '';
-
-    const hasCrossMark = /(?:^|\s)[Xx×✗✘](?:\s|$)/.test(line);
-    const minusMatch = line.match(
-      /(?:^|\s|\||\[|\])(?:\d{1,3}\s*[-−–—]\s*(\d{1,3})|[-−–—]\s*(\d{1,3}))(?=\s|\||\[|\]|$)/
-    );
-    const shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : 0;
-
-    const qtyUnitMatch =
-      line.match(/\b(EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT|ROL|BOX)[\s|\[\]()—\-]+(\d{1,4})\b/i) ||
-      line.match(/\b(\d{1,4})\s*(PCS|EA|SET|PK|SH|CO|AY|ZYD|PAA|KIT|\b)?$/i);
-
-    const rawQtyVal = qtyUnitMatch
-      ? /^\d+$/.test(qtyUnitMatch[1])
-        ? qtyUnitMatch[1]
-        : qtyUnitMatch[2]
-      : 1;
-    const total = Math.max(1, sanitizeQuantity(rawQtyVal, 1));
-    const out = hasCrossMark ? 0 : Math.min(total, shortage);
-    const remark = out > 0 ? `-${out}` : undefined;
-
-    const rawDesc = line
-      .replace(partNum, '')
-      .replace(loc, '')
-      .replace(/\b(C006|M016|D04D|002|001|EA|PCS|SET|PK|SH|CO|AY|ZYD|PAA|KIT)\b/gi, ' ')
-      .replace(/\b\d{1,4}\b/g, ' ')
-      .trim();
-
-    const { cleaned: descEn, isValid: descValid } = sanitizeDescription(rawDesc);
-    const finalDescEn = descValid ? descEn : 'غير محدد';
-    const { category, descAr } = categorizeAndTranslate(finalDescEn);
-
-    rawResults.push({
-      part_number: partNum,
-      location_code: loc,
-      location: loc,
-      description_en: finalDescEn,
-      description_ar: descAr,
-      category,
-      qty_total: total,
-      qty_out: out,
-      qty_remaining: hasCrossMark ? 0 : Math.max(0, total - out),
-      is_missing: hasCrossMark ? 1 : 0,
-      remark,
-      status: hasCrossMark ? 'غير موجودة' : 'غير مدقق',
-      confidence: 'قراءة فعلية من الورقة',
-    });
-  }
-
-  const contextResolved = resolveSheetLocationsWithContext(rawResults);
-  return contextResolved.map(({ location: _loc, ...rest }) => ({
-    ...rest,
-    location_code: isValidSpecificLocation(rest.location_code) ? rest.location_code : '',
-  }));
+  return parseStrictAsmoTable(rawText);
 }
 
 export function parseSimulatedTableOcr(): ExtractedSparePart[] {

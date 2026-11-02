@@ -1,6 +1,6 @@
 /**
- * خدمة القراءة الذكية لأوراق جرد أسمو (SAP Inventory Controller) عبر محرك بايثون/الخادم (/api/gemini/parse-table)
- * مع المعايرة الشاملة للسطور والمواقع والتحويل التلقائي لمحرك المتصفح المتوازي عند تشغيل تطبيق الأندرويد بمعزل عن الخادم.
+ * خدمة القراءة الصارمة لأوراق جرد أسمو (SAP Inventory Controller) عبر الخادم (/api/gemini/parse-table).
+ * لا تحتوي على أي بيانات مخزنة مسبقاً؛ أي حقل لم يتمكن الـ OCR من قراءته بوضوح يُترك فارغاً تماماً ("").
  */
 
 import type { ExtractedSparePart } from './localOcr';
@@ -8,18 +8,9 @@ import { categorizeAndTranslate } from '../utils/translator';
 import {
   strict10DigitRegexFilter,
   dynamicLocationNormalizer,
-  isValidSpecificLocation,
   detectMissingFromCheckMark,
   charToDigitMapper,
-  resolveSheetLocationsWithContext,
-  repair10DigitMaterialCode,
-  normalizeSapMaterialPrefix,
 } from '../utils/regexSanitizer';
-import {
-  verifyAndRepairMaterialNumber,
-  findMatchingCalibrationEntry,
-} from '../utils/sapMaterialCalibration';
-import { alignAndCompleteCalibrationSheet } from '../utils/strictTableParser';
 import { prepareImageForAi } from '../utils/imagePreprocessor';
 import type { SkippedRow } from '../components/SkippedRowsModal';
 
@@ -77,38 +68,16 @@ function isPhoneNumberNoise(digits: string): boolean {
   return /^(?:05\d{8}|966\d{8,9}|00966\d{8,9}|01[1-9]\d{7})$/.test(digits);
 }
 
+/**
+ * قراءة رقم القطعة فقط إذا كان مكوناً من 10 أرقام دقيقة وواضحة بدون أي تخمين، وإلا يُرجع null ليُترك الحقل فارغاً.
+ */
 export function repair10DigitMaterialClient(raw: string | number | null | undefined): string | null {
   if (raw === null || raw === undefined) return null;
-  const rawDigits = String(raw).replace(/[^0-9]/g, '');
-  if (isPhoneNumberNoise(rawDigits)) return null;
-
-  const strict = strict10DigitRegexFilter(String(raw));
-  if (strict && !isPhoneNumberNoise(strict)) return normalizeSapMaterialPrefix(strict);
-
-  const repairedByUtil = repair10DigitMaterialCode(String(raw));
-  if (repairedByUtil && !isPhoneNumberNoise(repairedByUtil)) return repairedByUtil;
-
-  const cleaned = String(raw)
-    .trim()
-    .toUpperCase()
-    .replace(/[OQD°]/g, '0')
-    .replace(/[IL|!'"`RTF+]/g, '1')
-    .replace(/S/g, '5')
-    .replace(/B/g, '8')
-    .replace(/G/g, '6')
-    .replace(/Z/g, '2')
-    .replace(/[A<]/g, '4')
-    .replace(/[E¢]/g, '9')
-    .replace(/[^0-9]/g, '');
-  if (isPhoneNumberNoise(cleaned)) return null;
-  if (/^\d{10}$/.test(cleaned)) {
-    const fixed = normalizeSapMaterialPrefix(cleaned);
-    if (/^10\d{8}$/.test(fixed)) return fixed;
-  }
-  if (/^00[01]\d{6}$/.test(cleaned)) return `1${cleaned}`;
-  const match = cleaned.match(/(10\d{8})/);
-  if (match) return normalizeSapMaterialPrefix(match[1]);
-
+  const trimmed = String(raw).trim();
+  const strict = strict10DigitRegexFilter(trimmed);
+  if (strict && !isPhoneNumberNoise(strict)) return strict;
+  const exactMatch = trimmed.match(/\b(\d{10})\b/);
+  if (exactMatch && !isPhoneNumberNoise(exactMatch[1])) return exactMatch[1];
   return null;
 }
 
@@ -128,11 +97,7 @@ function isHeaderOrFooterNoise(item: any): boolean {
   }
 
   const digits = rawPart.replace(/[^0-9]/g, '');
-  if (isPhoneNumberNoise(digits)) {
-    return true;
-  }
-
-  if (digits.length === 0 && (!rawDesc || rawDesc === 'SPARE PART ASMO' || rawDesc.length < 2)) {
+  if (digits && isPhoneNumberNoise(digits)) {
     return true;
   }
 
@@ -188,84 +153,53 @@ function normalizeRawVisionItems(rawItems: any[]): {
   repairedCount: number;
 } {
   const rawFiltered = (rawItems || []).filter((item: any) => !isHeaderOrFooterNoise(item));
-  const isFullSheet = rawFiltered.length >= 14;
-  const contextResolvedItems = resolveSheetLocationsWithContext(rawFiltered);
 
   const validatedItems: ExtractedSparePart[] = [];
   const skippedRows: SkippedRow[] = [];
-  let repairedCount = 0;
-  let lastValidLoc = '';
 
-  for (const r of contextResolvedItems) {
-    const candidateLoc =
-      r.location_code ||
-      dynamicLocationNormalizer(r.location ?? r.storage_bin ?? r.storageBin);
-    if (isValidSpecificLocation(candidateLoc)) {
-      lastValidLoc = candidateLoc;
-      break;
-    }
-  }
+  rawFiltered.forEach((item: any) => {
+    const rawPartStr =
+      item.part_number !== null && item.part_number !== undefined
+        ? String(item.part_number ?? item.material_number ?? item.material ?? item.partNumber ?? '').trim()
+        : '';
 
-  contextResolvedItems.forEach((item: any, idx: number) => {
-    const rawPartStr = String(
-      item.part_number ?? item.material_number ?? item.material ?? item.partNumber ?? ''
-    ).trim();
+    const rawDescCandidate =
+      item.description !== null && item.description !== undefined
+        ? String(item.description || item.description_en || item.material_description || item.desc || '')
+            .replace(/^[\s|—\-~_]+/, '')
+            .trim()
+        : String(item.description_en || '')
+            .replace(/^[\s|—\-~_]+/, '')
+            .trim();
 
-    const rawDescCandidate = String(
-      item.description_en || item.description || item.material_description || item.desc || ''
-    )
-      .replace(/^[\s|—\-~_]+/, '')
-      .trim();
+    const cleanDescEn =
+      rawDescCandidate &&
+      rawDescCandidate !== 'غير محدد' &&
+      rawDescCandidate !== 'SPARE PART ASMO' &&
+      rawDescCandidate !== 'SPARE PART' &&
+      rawDescCandidate !== 'null'
+        ? rawDescCandidate
+        : '';
 
-    const normLocation =
-      dynamicLocationNormalizer(item.location_code ?? item.location ?? item.storage_bin ?? item.storageBin);
+    const rawLocVal =
+      item.location_code !== null && item.location_code !== undefined
+        ? String(item.location_code)
+        : item.location !== null && item.location !== undefined
+        ? String(item.location)
+        : '';
+    const finalLocation = rawLocVal && rawLocVal !== 'null' ? dynamicLocationNormalizer(rawLocVal) : '';
 
-    let valid10DigitPart = repair10DigitMaterialClient(rawPartStr);
-    if (valid10DigitPart) {
-      valid10DigitPart = verifyAndRepairMaterialNumber(
-        valid10DigitPart,
-        String(item.rawLine || ''),
-        normLocation,
-        rawDescCandidate
-      );
-    }
+    // إذا كان رقم القطعة غير مقروء أو لا يتكون من 10 أرقام دقيقة يُترك فارغاً "" بدون أي تخمين
+    const valid10DigitPart = repair10DigitMaterialClient(rawPartStr) || '';
 
-    if (!valid10DigitPart) {
-      skippedRows.push({
-        id: `SKIP-${idx + 1}`,
-        row_number: idx + 1,
-        rowIndex: idx + 1,
-        raw_text: `${rawPartStr || 'غير مقروء'} | ${String(item.location_code ?? item.location ?? '')} | ${rawDescCandidate}`,
-        part_number: rawPartStr || '',
-        rawPartNumber: rawPartStr || 'غير مقروء',
-        location: String(item.location_code ?? item.location ?? ''),
-        rawLocation: String(item.location_code ?? item.location ?? ''),
-        quantity: Number(item.qty_total ?? item.quantity ?? 1) || 1,
-        rawQuantity: item.qty_total ?? item.quantity ?? 1,
-        description_en: rawDescCandidate,
-        reason: 'رقم القطعة غير مكتمل من 10 أرقام',
-      });
+    const rawQty = item.quantity !== undefined ? item.quantity : item.qty_total ?? item.qty;
+    const hasExplicitQty = rawQty !== null && rawQty !== undefined && String(rawQty).trim() !== '';
+    const parsedQty = hasExplicitQty ? charToDigitMapper(rawQty, 0) : 0;
+    const total = parsedQty >= 0 ? parsedQty : 0;
+
+    // إذا كان الصف فارغاً بالكامل نتجاوزه
+    if (!valid10DigitPart && !finalLocation && !cleanDescEn && total === 0) {
       return;
-    }
-    if (valid10DigitPart !== rawPartStr) {
-      repairedCount++;
-    }
-
-    const calEntry = findMatchingCalibrationEntry(
-      valid10DigitPart,
-      typeof item.seq === 'number' ? item.seq : null,
-      normLocation,
-      rawDescCandidate
-    );
-
-    const isLocValid = isValidSpecificLocation(normLocation);
-    if (isLocValid) {
-      lastValidLoc = normLocation;
-    }
-    let finalLocation = isLocValid ? normLocation : lastValidLoc || '';
-    if (calEntry && (!isLocValid || isFullSheet)) {
-      finalLocation = calEntry.bin;
-      lastValidLoc = finalLocation;
     }
 
     const rawMarkSymbol = item.mark_symbol ?? item.check_mark ?? item.check ?? null;
@@ -280,41 +214,19 @@ function normalizeRawVisionItems(rawItems: any[]): {
         ? 'N'
         : null;
 
-    let isMissing =
+    const isMissing =
       normSymbol === 'X' ||
       item.status === 'غير موجود' ||
       item.status === 'غير موجودة' ||
       detectMissingFromCheckMark(item)
         ? 1
         : 0;
-    const rawQty = item.qty_total ?? item.quantity ?? item.qty;
-    const parsedQty = charToDigitMapper(rawQty, 1);
-    let total = parsedQty > 0 ? parsedQty : 1;
 
     const rawRemark = item.remark ? String(item.remark).trim() : '';
     const minusMatch = rawRemark.match(/(?:^\d+\s*[-−–—]\s*(\d+)$|^[-−–—]\s*(\d+)$)/);
-    let shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : normSymbol === 'N' ? 1 : 0;
-    let descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'غير محدد';
+    const shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : normSymbol === 'N' ? 1 : 0;
 
-    if (calEntry && isFullSheet) {
-      if (calEntry.qty !== undefined) total = calEntry.qty;
-      if (calEntry.isMissing !== undefined) isMissing = calEntry.isMissing;
-      if (calEntry.remark !== undefined) {
-        const mShort = calEntry.remark.match(/^-\s*(\d+)$/);
-        shortage = mShort ? Number(mShort[1]) : 0;
-      }
-      if (
-        calEntry.desc &&
-        (descEn === 'غير محدد' ||
-          descEn === 'SPARE PART ASMO' ||
-          descEn.length < calEntry.desc.length - 2 ||
-          /[|\[\]{}=~_]/.test(descEn))
-      ) {
-        descEn = calEntry.desc;
-      }
-    }
-
-    const out = isMissing ? 0 : Math.min(total, shortage);
+    const out = isMissing ? 0 : total > 0 ? Math.min(total, shortage) : shortage;
     const remark =
       normSymbol === 'F'
         ? 'F'
@@ -357,18 +269,20 @@ function normalizeRawVisionItems(rawItems: any[]): {
       ? 'مدقق'
       : 'غير مدقق';
 
-    const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
+    const { category, descAr: dictDescAr } = cleanDescEn
+      ? categorizeAndTranslate(cleanDescEn)
+      : { category: '', descAr: '' };
     const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
     const hasArabicChars = /[\u0600-\u06FF]/.test(rawAiAr);
-    const finalDescAr = hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr;
+    const finalDescAr = cleanDescEn ? (hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr) : '';
 
     validatedItems.push({
-      part_number: valid10DigitPart,
-      location_code: finalLocation,
-      description_en: descEn,
-      description_ar: finalDescAr,
+      part_number: valid10DigitPart, // فارغ "" إذا لم يستطع قراءته
+      location_code: finalLocation, // فارغ "" إذا لم يستطع قراءته
+      description_en: cleanDescEn, // فارغ "" إذا لم يستطع قراءته
+      description_ar: finalDescAr, // فارغ "" إذا لم يستطع قراءته
       category,
-      qty_total: total,
+      qty_total: total, // 0 إذا لم يستطع قراءته
       qty_out: out,
       qty_remaining: isMissing ? 0 : Math.max(0, total - out),
       is_missing: isMissing,
@@ -380,27 +294,22 @@ function normalizeRawVisionItems(rawItems: any[]): {
     });
   });
 
-  const resolved = resolveSheetLocationsWithContext(validatedItems);
   return {
-    validatedItems: isFullSheet ? alignAndCompleteCalibrationSheet(resolved) : resolved,
+    validatedItems,
     skippedRows,
-    repairedCount,
+    repairedCount: 0,
   };
 }
 
 /**
  * قراءة صارمة ودقيقة (Strict Zero-Hallucination OCR) تمرر الصورة كاملة بدون أي تقسيم
- * عبر مسار الخادم الموحد (/api/gemini/parse-table) لمنع خطأ PROXY_GENERATION_DISABLED في المتصفح.
+ * عبر مسار الخادم الموحد (/api/gemini/parse-table) وتترك أي حقل غير مقروء فارغاً.
  */
 export async function performStrictOCR(imageBase64: string): Promise<any[]> {
   try {
-    // الطلب الموحد عبر الخادم (/api/gemini/parse-table) بالصورة الكاملة دفعة واحدة بدون أي تقسيم
     const serverItems = await callPythonVisionServer(imageBase64);
     if (serverItems && serverItems.length > 0) {
-      // تصفية إضافية صارمة في الكود لحذف أي صف لم يتمكن الـ OCR من قراءة رقم قطعته بوضوح
-      return serverItems.filter(
-        (item: any) => item && item.part_number && String(item.part_number).trim() !== ''
-      );
+      return serverItems;
     }
 
     return [];
@@ -475,4 +384,3 @@ export async function parseTableWithGeminiVision(
     };
   }
 }
-

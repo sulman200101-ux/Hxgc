@@ -418,12 +418,15 @@ class InventoryDatabase {
   ): Promise<InventoryItem> {
     const cleanPart = partNum.trim();
     if (!/^\d{10}$/.test(cleanPart)) throw new Error('رقم القطعة يجب أن يكون عشرة أرقام');
-    const safeQty = Number.isFinite(qty) && qty >= 0 ? Math.round(qty) : 1;
+    const safeQty = Number.isFinite(qty) && qty >= 0 ? Math.round(qty) : 0;
     const safeOut = Number.isFinite(qtyOut) && qtyOut >= 0 ? Math.min(safeQty, Math.round(qtyOut)) : 0;
-    const cleanLocation = sanitizeLocationCode(locCode) || locCode.trim().toUpperCase() || 'N01A1';
+    const cleanLocation = sanitizeLocationCode(locCode) || locCode.trim().toUpperCase();
 
     const existing = this.itemMap.get(cleanPart);
-    const isMoved = existing && existing.location_code !== cleanLocation ? 1 : existing?.is_moved || 0;
+    const isMoved =
+      existing && cleanLocation && existing.location_code && existing.location_code !== cleanLocation
+        ? 1
+        : existing?.is_moved || 0;
     const isMissing =
       isMissingFlag !== undefined ? isMissingFlag : forcedStatus === 'غير موجودة' ? 1 : 0;
     const remaining = isMissing ? 0 : Math.max(0, safeQty - safeOut);
@@ -446,7 +449,7 @@ class InventoryDatabase {
       location_code: cleanLocation,
       old_location:
         isMoved && existing ? existing.old_location || existing.location_code : existing?.old_location,
-      description_en: (descEn || existing?.description_en || 'SPARE PART ASMO').trim(),
+      description_en: (descEn || existing?.description_en || '').trim(),
       description_ar: finalDescAr,
       category: category,
       qty_total: safeQty,
@@ -485,26 +488,26 @@ class InventoryDatabase {
 
     const batchMap = new Map<string, InventoryItem>();
     for (const raw of items) {
-      if (!raw || (!raw.location_code && !raw.location)) {
-        throw new Error('بيانات القراءة غير مكتملة؛ لم يتغير المخزون');
-      }
+      if (!raw) continue;
       const cleanPart = String(raw.part_number || '').trim();
       if (!/^\d{10}$/.test(cleanPart)) continue;
       const cleanLoc =
         sanitizeLocationCode(String(raw.location_code || raw.location || '')) ||
-        String(raw.location_code || raw.location || 'N01A1').trim().toUpperCase() ||
-        'N01A1';
+        String(raw.location_code || raw.location || '').trim().toUpperCase();
       const existing = this.itemMap.get(cleanPart);
-      const isMoved = existing && existing.location_code !== cleanLoc ? 1 : existing?.is_moved || 0;
+      const isMoved =
+        existing && cleanLoc && existing.location_code && existing.location_code !== cleanLoc
+          ? 1
+          : existing?.is_moved || 0;
       const isMissing = raw.is_missing === 1 || raw.status === 'غير موجودة' ? 1 : 0;
-      const total = Number.isFinite(raw.qty_total) && raw.qty_total > 0 ? Math.round(raw.qty_total) : 1;
+      const total = Number.isFinite(raw.qty_total) && raw.qty_total >= 0 ? Math.round(raw.qty_total) : 0;
       const out = isMissing
         ? 0
         : Number.isFinite(raw.qty_out) && raw.qty_out >= 0
         ? Math.min(total, Math.round(raw.qty_out))
         : 0;
       const remaining = isMissing ? 0 : Math.max(0, total - out);
-      const descEn = String(raw.description_en || existing?.description_en || 'SPARE PART ASMO').trim();
+      const descEn = String(raw.description_en || existing?.description_en || '').trim();
       const { category, descAr } = categorizeAndTranslate(descEn);
 
       if (existing) {
@@ -911,20 +914,19 @@ class InventoryDatabase {
           const cleanPart = String(line.part_number || '').trim();
           const cleanLoc =
             sanitizeLocationCode(line.location) ||
-            String(line.location || '').trim().toUpperCase() ||
-            'N01A1';
+            String(line.location || '').trim().toUpperCase();
           const safeQty =
             Number.isFinite(line.quantity) && line.quantity >= 0
               ? Math.round(line.quantity)
-              : 1;
+              : 0;
           return {
             ...line,
             part_number: cleanPart,
             location: cleanLoc,
             quantity: safeQty,
-            description_en: (line.description_en || 'SPARE PART ASMO').trim() || 'SPARE PART ASMO',
+            description_en: (line.description_en || '').trim(),
             reviewed: true,
-            old_location: this.itemMap.get(cleanPart)?.location_code,
+            old_location: cleanPart ? this.itemMap.get(cleanPart)?.location_code : undefined,
           };
         }),
       };
@@ -1045,15 +1047,15 @@ class InventoryDatabase {
   ): InventoryItem | undefined {
     const now = new Date().toISOString();
     const marks = interpretMark(line.check, line.remark);
-    const safeDescEn = (line.description_en || before?.description_en || 'SPARE PART ASMO').trim();
+    const safeDescEn = (line.description_en || before?.description_en || '').trim();
     const { category, descAr } = categorizeAndTranslate(safeDescEn);
     const safeLoc =
       sanitizeLocationCode(line.location) ||
       line.location.trim().toUpperCase() ||
       before?.location_code ||
-      'N01A1';
+      '';
     const safeLineQty =
-      Number.isFinite(line.quantity) && line.quantity >= 0 ? Math.round(line.quantity) : 1;
+      Number.isFinite(line.quantity) && line.quantity >= 0 ? Math.round(line.quantity) : 0;
 
     if (doc.kind === 'inventory' && marks.excludedIncrease && before) return;
 
