@@ -76,7 +76,7 @@ async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: strin
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
     if (!cleanBase64) return null;
 
-    const candidateModels = ['gemini-1.5-flash', 'gemini-3-flash-preview', 'gemini-3.8-flash', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-3-flash-preview', 'gemini-flash-latest'];
     const strictPrompt = `
     أنت محرك OCR صارم ومخصص لجرد مستودعات شركة أسمو (ASMO).
     اقرأ جدول قطع الغيار من الصورة المرفقة واستخرج السطور المرئية بوضوح فقط.
@@ -571,7 +571,7 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
       ok: true,
       geminiActive: false,
       localOcrActive: true,
-      model: 'gemini-3.8-flash',
+      model: 'gemini-3-flash-preview',
       latencyMs: Date.now() - startMs,
       statusLabel: 'متوقف (يعمل القارئ المحلي الذكي تلقائياً)',
       details: 'محرك Gemini السحابي غير مفعل حالياً على الخادم؛ يعمل محرك القراءة البصري المحلي (WASM SIMD + خوارزمية الـ 37 سطراً) بكفاءة 100%.',
@@ -583,18 +583,18 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
       ok: true,
       geminiActive: !geminiKeyInvalid,
       localOcrActive: true,
-      model: 'gemini-3.8-flash',
+      model: 'gemini-3-flash-preview',
       latencyMs: Date.now() - startMs,
       statusLabel: !geminiKeyInvalid ? 'يعمل ونشط 🟢' : 'متوقف 🔴',
       details: !geminiKeyInvalid
-        ? 'محرك Gemini السحابي متصل وجاهز للقراءة والتحليل الهندسي مع محرك القراءة المحلي.'
+        ? 'محرك Gemini السحابي (gemini-3-flash-preview) متصل وجاهز للقراءة الصارمة والتحليل الهندسي.'
         : 'محرك Gemini السحابي متوقف؛ يعمل القارئ المحلي الذكي تلقائياً.',
     });
   }
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-3-flash-preview',
       contents: 'Respond with OK',
       config: {
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
@@ -609,11 +609,11 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
       ok: true,
       geminiActive: isWorking,
       localOcrActive: true,
-      model: 'gemini-3.8-flash',
+      model: 'gemini-3-flash-preview',
       latencyMs: Date.now() - startMs,
       statusLabel: isWorking ? 'يعمل ونشط 🟢' : 'متوقف 🔴',
       details: isWorking
-        ? `تم اختبار الاتصال بمحرك Gemini (gemini-3.8-flash) بنجاح خلال ${Date.now() - startMs} ملي ثانية — المحرك يعمل بكفاءة تامة.`
+        ? `تم اختبار الاتصال بمحرك Gemini (gemini-3-flash-preview) بنجاح خلال ${Date.now() - startMs} ملي ثانية — المحرك يعمل بكفاءة تامة.`
         : 'لم يستجب المحرك السحابي؛ يعمل القارئ المحلي الذكي تلقائياً.',
     });
   } catch (err: any) {
@@ -625,7 +625,7 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
       ok: true,
       geminiActive: false,
       localOcrActive: true,
-      model: 'gemini-3.8-flash',
+      model: 'gemini-3-flash-preview',
       latencyMs: Date.now() - startMs,
       statusLabel: 'متوقف (يعمل القارئ المحلي الذكي تلقائياً)',
       details: 'تعذر الاتصال بمحرك Gemini السحابي حالياً؛ يعمل محرك القراءة المحلي الذكي (37 سطراً) بكفاءة 100% بدون انقطاع.',
@@ -682,7 +682,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
 
-    const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-3-flash-preview', 'gemini-flash-latest'];
     for (const modelName of candidateModels) {
       try {
         const response = await ai.models.generateContent({

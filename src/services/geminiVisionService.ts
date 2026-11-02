@@ -390,140 +390,16 @@ function normalizeRawVisionItems(rawItems: any[]): {
 
 /**
  * قراءة صارمة ودقيقة (Strict Zero-Hallucination OCR) تمرر الصورة كاملة بدون أي تقسيم
- * وتمنع النموذج من التخمين أو إضافة أي أرقام قطع أو كميات وهمية.
+ * عبر مسار الخادم الموحد (/api/gemini/parse-table) لمنع خطأ PROXY_GENERATION_DISABLED في المتصفح.
  */
 export async function performStrictOCR(imageBase64: string): Promise<any[]> {
-  const strictPrompt = `
-    أنت محرك OCR صارم ومخصص لجرد مستودعات شركة أسمو (ASMO).
-    اقرأ جدول قطع الغيار من الصورة المرفقة واستخرج السطور المرئية بوضوح فقط.
-
-    قواعد صارمة جداً لمنع الهلوسة:
-    1. يُمنع منعاً باتاً توليد أو تخمين أي أرقام قطع أو مواقع أو كميات غير موجودة في الصورة.
-    2. رقم القطعة (part_number) يجب أن يُقرأ كما هو بدقة (10 أرقام)، وإذا كان غير واضح ضع null.
-    3. ابحث بدقة عن أي علامات يدوية أو رموز مكتوبة بجانب كل صف أو عند خانة الكمية، وفسرها حصراً كالتالي:
-       - إذا وجدت علامة صح (✓): اجعل حقل mark_symbol = "✓" وحقل audit_meaning = "القطع موجودة" وحقل status = "مدقق".
-       - إذا وجدت علامة خطأ أو إكس (X أو ✗): اجعل حقل mark_symbol = "X" وحقل audit_meaning = "القطع غير موجودة" وحقل status = "غير موجود".
-       - إذا وجدت حرف (F أو f): اجعل حقل mark_symbol = "F" وحقل audit_meaning = "تم نقل العدد الزائد إلى مكان آخر" وحقل status = "تم النقل".
-       - إذا وجدت علامة ناقص (-) أو حرف (N أو n): اجعل حقل mark_symbol = "N" وحقل audit_meaning = "ناقص العدد" وحقل status = "ناقص العدد".
-       - إذا لم توجد أي علامة أمام الصف: اجعل الحقول الخاصة بالعلامة null وحقل status = "غير مدقق".
-  `;
-
-  const mimeMatch = imageBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,/i);
-  const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
-  const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
-
   try {
-    const envViteKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
-    if (envViteKey && envViteKey !== 'undefined' && envViteKey !== 'MY_GEMINI_API_KEY') {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${envViteKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  { text: strictPrompt },
-                  {
-                    inlineData: {
-                      mimeType,
-                      data: cleanBase64, // إرسال الورقة كاملة دفعة واحدة لمنع التعليق عند 50%
-                    },
-                  },
-                ],
-              },
-            ],
-            generationConfig: {
-              temperature: 0.0, // منع الإبداع أو التخمين نهائياً
-              topK: 1,
-              topP: 0.1,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: 'ARRAY',
-                description: 'قائمة القطع المستخرجة من جدول الجرد',
-                items: {
-                  type: 'OBJECT',
-                  properties: {
-                    part_number: {
-                      type: 'STRING',
-                      nullable: true,
-                      description: 'رقم القطعة المكون من 10 أرقام',
-                    },
-                    location_code: {
-                      type: 'STRING',
-                      nullable: true,
-                      description: 'كود الموقع المخزني',
-                    },
-                    description: {
-                      type: 'STRING',
-                      nullable: true,
-                      description: 'وصف القطعة بالإنجليزية كما في الجدول',
-                    },
-                    quantity: {
-                      type: 'INTEGER',
-                      nullable: true,
-                      description: 'الكمية المسجلة في الجدول',
-                    },
-                    mark_symbol: {
-                      type: 'STRING',
-                      nullable: true,
-                      enum: ['✓', 'X', 'F', 'N'],
-                      description: 'الرمز المرسوم أمام القطعة إن وجد',
-                    },
-                    audit_meaning: {
-                      type: 'STRING',
-                      nullable: true,
-                      enum: [
-                        'القطع موجودة',
-                        'القطع غير موجودة',
-                        'تم نقل العدد الزائد إلى مكان آخر',
-                        'ناقص العدد',
-                      ],
-                      description: 'تفسير العلامة حسب قواعد الجرد',
-                    },
-                    status: {
-                      type: 'STRING',
-                      enum: ['مدقق', 'غير موجود', 'تم النقل', 'ناقص العدد', 'غير مدقق'],
-                      description: 'حالة الصنف النهائية',
-                    },
-                  },
-                  required: [
-                    'part_number',
-                    'location_code',
-                    'description',
-                    'quantity',
-                    'mark_symbol',
-                    'audit_meaning',
-                    'status',
-                  ],
-                },
-              },
-            },
-          }),
-        }
-      );
-
-      if (response.ok) {
-        const data = await response.json();
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (rawText) {
-          // تصفية إضافية صارمة في الكود لحذف أي صف لم يتمكن الـ OCR من قراءة رقم قطعته بوضوح
-          const parsedItems = JSON.parse(rawText);
-          if (Array.isArray(parsedItems)) {
-            return parsedItems.filter(
-              (item: any) => item.part_number && String(item.part_number).trim() !== ''
-            );
-          }
-        }
-      }
-    }
-
-    // الطلب الموحد عبر الخادم بدون أي تقسيم للصورة
+    // الطلب الموحد عبر الخادم (/api/gemini/parse-table) بالصورة الكاملة دفعة واحدة بدون أي تقسيم
     const serverItems = await callPythonVisionServer(imageBase64);
     if (serverItems && serverItems.length > 0) {
+      // تصفية إضافية صارمة في الكود لحذف أي صف لم يتمكن الـ OCR من قراءة رقم قطعته بوضوح
       return serverItems.filter(
-        (item: any) => item.part_number && String(item.part_number).trim() !== ''
+        (item: any) => item && item.part_number && String(item.part_number).trim() !== ''
       );
     }
 
