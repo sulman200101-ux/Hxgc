@@ -1,6 +1,25 @@
 import type { InventoryItem } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
 
+/**
+ * الحد الأقصى الصارم لعدد الأصناف في كل رف (15 صنفاً فقط لكل رف)
+ */
+export const MAX_ITEMS_PER_SHELF = 15;
+
+export interface PartSizeProfile {
+  sizeScore: number; // 1 (أصغر/أخف) إلى 100 (أكبر/أثقل)
+  sizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
+  mmValues: number[]; // كافة القياسات المستخرجة بالمليمتر (ملم)
+  primaryMm: number; // المقاس الرئيسي بالمليمتر (ملم) للفرز والمطابقة
+  mmLabel: string; // نص المقاس بالمليمتر (مثل: 100 × 215 ملم أو 80.5 ملم)
+  dimensionsLabel: string; // ملخص الأبعاد والمقاس بالملم
+  targetHeavyLocation: string; // موقع D أو C المعتمد للقطع الثقيلة جداً
+  estimatedPriceSar: number; // السعر التقديري للقطعة الواحدة بالريال السعودي
+  totalValueSar: number; // القيمة التقديرية الإجمالية للكمية المتبقية
+  priceCategory: 'أغلى سعراً / قيمة عالية' | 'متوسط السعر' | 'سعر اقتصادي';
+  priceLabelAr: string; // نص السعر التقديري للعرض
+}
+
 export interface GeminiPartAnalysis {
   part_number: string;
   description_en: string;
@@ -10,31 +29,16 @@ export interface GeminiPartAnalysis {
   estimated_weight_kg: number;
   total_weight_kg: number;
   weight_label_ar: string;
+  estimated_price_sar: number;
+  total_value_sar: number;
+  price_label_ar: string;
+  price_category: 'أغلى سعراً / قيمة عالية' | 'متوسط السعر' | 'سعر اقتصادي';
   size_category: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
   current_bin: string;
-  current_elevation: ShelfElevationInfo;
-  recommended_shelf_code: 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D';
+  recommended_shelf_code: 'D' | 'C' | 'A' | 'B' | 'BB' | 'FL';
   recommended_bin: string;
-  recommended_elevation: ShelfElevationInfo;
   placement_reason_ar: string;
   source: 'gemini-ai' | 'engineering-engine';
-}
-
-export interface ShelfElevationInfo {
-  shelfCode: 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D' | string;
-  meters: number;
-  shortLabelAr: string;
-  fullExplanationAr: string;
-  suitabilityAr: string;
-  badgeColorClass: string;
-}
-
-export interface PartSizeProfile {
-  sizeScore: number; // 1 (أصغر/أخف) إلى 100 (أكبر/أثقل)
-  sizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
-  dimensionsLabel: string;
-  recommendedShelves: Array<'FL' | 'A' | 'B' | 'BB' | 'C' | 'D'>;
-  recommendedShelfTextAr: string;
 }
 
 export interface TransferSuggestion {
@@ -43,7 +47,16 @@ export interface TransferSuggestion {
   to: string;
   quantity: number;
   family: string;
+  categoryAr: string;
+  sizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
+  mmLabel: string;
+  estimatedPriceSar: number;
+  totalValueSar: number;
+  priceLabelAr: string;
   reason: string;
+  isHeavyToD?: boolean;
+  isHeavyToC?: boolean;
+  isHighValueConsolidation?: boolean;
 }
 
 export interface SwapEvictionStep {
@@ -51,12 +64,11 @@ export interface SwapEvictionStep {
   descriptionAr: string;
   descriptionEn: string;
   currentFamily: string;
+  categoryAr: string;
   quantity: number;
   fromBin: string;
   evictToBin: string;
   sizeProfile: PartSizeProfile;
-  fromElevation: ShelfElevationInfo;
-  toElevation: ShelfElevationInfo;
   reason: string;
 }
 
@@ -65,25 +77,49 @@ export interface SwapConsolidationStep {
   descriptionAr: string;
   descriptionEn: string;
   family: string;
+  categoryAr: string;
   quantity: number;
   fromBin: string;
   toBin: string;
   sizeProfile: PartSizeProfile;
-  fromElevation: ShelfElevationInfo;
-  toElevation: ShelfElevationInfo;
   reason: string;
+}
+
+export interface SimilaritySubGroup {
+  key: string;
+  sizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
+  mmRangeLabel: string;
+  primaryMm: number;
+  count: number;
+  totalQty: number;
+  partNumbers: string[];
+}
+
+export interface ShelfBatchAllocation {
+  shelfBin: string;
+  batchIndex: number;
+  itemsCount: number;
+  maxCapacity: number;
+  items: Array<{
+    item: InventoryItem;
+    sizeProfile: PartSizeProfile;
+  }>;
 }
 
 export interface SimilaritySwapPlan {
   id: string;
   family: string;
   familyAr: string;
+  categoryAr: string;
   zone: string;
   targetBin: string;
-  targetElevation: ShelfElevationInfo;
-  recommendedHeightBin: string;
-  recommendedHeightElevation: ShelfElevationInfo;
+  recommendedBin: string;
+  maxItemsPerShelf: number;
+  shelfBatches: ShelfBatchAllocation[];
   groupSizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
+  groupMmSummary: string;
+  groupTotalValueSar: number;
+  subGroupsBySizeAndMm: SimilaritySubGroup[];
   adjacentBins: string[];
   existingMatchingInTarget: InventoryItem[];
   evictions: SwapEvictionStep[];
@@ -91,234 +127,466 @@ export interface SimilaritySwapPlan {
   allGroupItemsSortedBySize: Array<{
     item: InventoryItem;
     sizeProfile: PartSizeProfile;
-    currentElevation: ShelfElevationInfo;
   }>;
   totalPartsToMove: number;
   totalUnitsToMove: number;
   summaryReason: string;
 }
 
-/**
- * دليل ارتفاعات الرفوف المعتمد في المستودع:
- * FL = الرف على الأرض (0 متر)
- * A  = يرتفع 1 متر عن الأرض
- * B  = يرتفع 2 متر عن الأرض (مترين)
- * BB = يرتفع 3 متر عن الأرض
- * C / C4 = يرتفع 4 متر عن الأرض
- * D / D5 = يرتفع 5 متر عن الأرض
- */
-export const SHELF_ELEVATION_GUIDE: Array<{
-  code: string;
-  meters: number;
-  titleAr: string;
-  descAr: string;
-  suitableForAr: string;
-}> = [
-  {
-    code: 'FL',
-    meters: 0,
-    titleAr: 'FL — الرف على الأرض (0 متر)',
-    descAr: 'مستوى أرضية المستودع مباشرة',
-    suitableForAr: 'القطع الكبيرة والثقيلة (صمامات، مضخات، محامل كبيرة، أعمدة، فلنجات)',
-  },
-  {
-    code: 'A',
-    meters: 1,
-    titleAr: 'A — يرتفع 1 متر عن الأرض',
-    descAr: 'الرف الأول (ارتفاع متر واحد)',
-    suitableForAr: 'القطع المتوسطة المائلة للثقل (حلقات تآكل، جلب أعمدة، كونتاكتورات كبيرة)',
-  },
-  {
-    code: 'B',
-    meters: 2,
-    titleAr: 'B — يرتفع مترين (2 متر)',
-    descAr: 'الرف الثاني (ارتفاع مترين عن الأرض)',
-    suitableForAr: 'القطع متوسطة الحجم والوزن (محامل متوسطة، منظمات، وحدات طاقة)',
-  },
-  {
-    code: 'BB',
-    meters: 3,
-    titleAr: 'BB — يرتفع 3 متر عن الأرض',
-    descAr: 'الرف الثالث الوسطي (ارتفاع 3 أمتار)',
-    suitableForAr: 'القطع المتوسطة والخفيفة (حشوات، أطقم إصلاح، فواصل معدنية)',
-  },
-  {
-    code: 'C',
-    meters: 4,
-    titleAr: 'C / C4 — يرتفع 4 متر عن الأرض',
-    descAr: 'الرف الرابع العلوي (ارتفاع 4 أمتار)',
-    suitableForAr: 'القطع الخفيفة والصغيرة (جازكيت، براغي، ريلاي، فيوزات)',
-  },
-  {
-    code: 'D',
-    meters: 5,
-    titleAr: 'D / D5 — يرتفع 5 متر عن الأرض',
-    descAr: 'الرف الخامس الأعلى (ارتفاع 5 أمتار)',
-    suitableForAr: 'القطع الخفيفة والصغيرة جداً (حلقات أورينج O-Ring، أربطة كابلات، أغطية خفيفة)',
-  },
-];
+export interface HighValueShelfPlan {
+  id: string;
+  shelfIndex: number;
+  targetBin: string;
+  maxItemsLimit: number;
+  itemsCount: number;
+  totalUnits: number;
+  minUnitPriceSar: number;
+  maxUnitPriceSar: number;
+  totalShelfValueSar: number;
+  items: Array<{
+    item: InventoryItem;
+    sizeProfile: PartSizeProfile;
+    fromBin: string;
+    toBin: string;
+    alreadyInShelf: boolean;
+  }>;
+  evictions: SwapEvictionStep[];
+  summaryReason: string;
+}
+
+const SIZE_PROFILE_CACHE = new Map<string, PartSizeProfile>();
 
 /**
- * تحليل رمز الموقع (مثل N11FL1, N12A1, N17B1, N11BB1, N11C2, N16D2) واستخراج ارتفاع الرف بالمتر
+ * فحص ما إذا كان الموقع ينتمي إلى موقع القطع الثقيلة D (مثل D, D1, D2, N11D1, N11D2, N16D1, N16D2)
  */
-export function parseShelfElevation(locationCode: string): ShelfElevationInfo {
+export function isDLocation(locationCode: string | null | undefined): boolean {
   const clean = (locationCode || '').trim().toUpperCase().replace(/\s+/g, '');
-  // استخراج رمز الرف بعد رمز القطاع ورقم الممر (مثال: N11FL1 -> FL, N11BB2 -> BB, N11C4 -> C, N16D2 -> D)
-  const match = clean.match(/^[A-Z]\d{2}(FL|BB|A|B|C|D)\d*$/);
-  const shelfCode = match ? match[1] : clean.includes('FL') ? 'FL' : clean.includes('BB') ? 'BB' : '';
-
-  switch (shelfCode) {
-    case 'FL':
-      return {
-        shelfCode: 'FL',
-        meters: 0,
-        shortLabelAr: 'الرف على الأرض (FL = 0م)',
-        fullExplanationAr: 'FL تعني الرف على الأرض (ارتفاع 0 متر)',
-        suitabilityAr: 'للقطع الثقيلة والكبيرة الحجم',
-        badgeColorClass: 'bg-emerald-950/90 text-emerald-300 border-emerald-500/60',
-      };
-    case 'A':
-      return {
-        shelfCode: 'A',
-        meters: 1,
-        shortLabelAr: 'يرتفع 1 متر (A)',
-        fullExplanationAr: 'A تعني يرتفع متر واحد (1م) عن الأرض',
-        suitabilityAr: 'للقطع المتوسطة/الثقيلة',
-        badgeColorClass: 'bg-teal-950/90 text-teal-300 border-teal-500/60',
-      };
-    case 'B':
-      return {
-        shelfCode: 'B',
-        meters: 2,
-        shortLabelAr: 'يرتفع مترين (B = 2م)',
-        fullExplanationAr: 'B تعني يرتفع مترين (2م) عن الأرض',
-        suitabilityAr: 'للقطع متوسطة الحجم',
-        badgeColorClass: 'bg-sky-950/90 text-sky-300 border-sky-500/60',
-      };
-    case 'BB':
-      return {
-        shelfCode: 'BB',
-        meters: 3,
-        shortLabelAr: 'يرتفع 3 متر (BB)',
-        fullExplanationAr: 'BB تعني يرتفع 3 أمتار عن الأرض',
-        suitabilityAr: 'للقطع المتوسطة/الخفيفة',
-        badgeColorClass: 'bg-indigo-950/90 text-indigo-300 border-indigo-500/60',
-      };
-    case 'C':
-      return {
-        shelfCode: 'C',
-        meters: 4,
-        shortLabelAr: 'يرتفع 4 متر (C)',
-        fullExplanationAr: 'C / C4 تعني يرتفع 4 أمتار عن الأرض',
-        suitabilityAr: 'للقطع الخفيفة والصغيرة',
-        badgeColorClass: 'bg-amber-950/90 text-amber-300 border-amber-500/60',
-      };
-    case 'D':
-      return {
-        shelfCode: 'D',
-        meters: 5,
-        shortLabelAr: 'يرتفع 5 متر (D)',
-        fullExplanationAr: 'D / D5 تعني يرتفع 5 أمتار عن الأرض',
-        suitabilityAr: 'للقطع الصغيرة والخفيفة جداً',
-        badgeColorClass: 'bg-purple-950/90 text-purple-300 border-purple-500/60',
-      };
-    default:
-      return {
-        shelfCode: shelfCode || '—',
-        meters: 1,
-        shortLabelAr: 'مستوى قياسي',
-        fullExplanationAr: 'مستوى رف قياسي في المستودع',
-        suitabilityAr: 'مناسب لمختلف القطع',
-        badgeColorClass: 'bg-stone-900 text-stone-300 border-stone-700',
-      };
-  }
+  if (!clean) return false;
+  if (clean === 'D' || /^D\d*$/.test(clean)) return true;
+  if (clean === 'D04D') return false;
+  return /^[A-Z]\d{2}D\d*$/.test(clean);
 }
 
 /**
- * تقدير حجم ووزن القطعة الفعلي من وصفها الهندسي والمقاسات (MM, IN, SQ IN, A) لتحديد ترتيب الحجم والرف الأنسب
+ * فحص ما إذا كان الموقع ينتمي إلى موقع القطع الثقيلة الرديف C (مثل C, C1, C2, N11C1, N11C2, N07C1)
  */
-export function estimatePartSizeProfile(item: Pick<InventoryItem, 'description_en'>): PartSizeProfile {
-  const desc = (item.description_en || '').toUpperCase();
-  let score = 45; // نقطة البداية (متوسط)
-  const extractedDims: string[] = [];
+export function isCLocation(locationCode: string | null | undefined): boolean {
+  const clean = (locationCode || '').trim().toUpperCase().replace(/\s+/g, '');
+  if (!clean) return false;
+  if (clean === 'C006' || clean === 'C008') return false;
+  if (clean === 'C' || /^C\d+$/.test(clean)) return true;
+  return /^[A-Z]\d{2}C\d*$/.test(clean);
+}
 
-  // 1. استخراج الأبعاد بالمليمتر (MM)
-  const mmMatches = Array.from(desc.matchAll(/(\d+(?:\.\d+)?)\s*MM\b/g));
-  let maxMm = 0;
-  for (const m of mmMatches) {
-    const val = parseFloat(m[1]);
-    if (!isNaN(val)) {
-      if (val > maxMm) maxMm = val;
-      extractedDims.push(`${val} ملم`);
+/**
+ * فحص ما إذا كان الموقع ينتمي إلى مواقع القطع الثقيلة المعتمدة (D أو C)
+ */
+export function isHeavyDutyDOrCLocation(locationCode: string | null | undefined): boolean {
+  return isDLocation(locationCode) || isCLocation(locationCode);
+}
+
+/**
+ * تحديد قائمة رفوف القطع الثقيلة (D ثم C) في نفس الممر لتوزيع القطع الثقيلة بحيث لا يتجاوز أي رف 15 صنفاً
+ */
+export function getHeavyCandidateShelvesForLocation(
+  currentLocation: string,
+  allBins: string[] = [],
+  preferC = false
+): string[] {
+  const clean = (currentLocation || '').trim().toUpperCase().replace(/\s+/g, '');
+  const zonePrefix = clean.match(/^([A-Z]\d{2})/)?.[1];
+  const candidates: string[] = [];
+
+  const pushUnique = (bin: string) => {
+    const u = bin.trim().toUpperCase();
+    if (u && !candidates.includes(u)) candidates.push(u);
+  };
+
+  if (zonePrefix) {
+    const orderedCodes = preferC
+      ? [`${zonePrefix}C1`, `${zonePrefix}C2`, `${zonePrefix}D1`, `${zonePrefix}D2`]
+      : [`${zonePrefix}D1`, `${zonePrefix}D2`, `${zonePrefix}C1`, `${zonePrefix}C2`];
+    for (const c of orderedCodes) pushUnique(c);
+  }
+
+  for (const b of allBins) {
+    if (isDLocation(b) || isCLocation(b)) pushUnique(b);
+  }
+
+  for (const fallback of preferC ? ['C1', 'C2', 'D1', 'D2'] : ['D1', 'D2', 'C1', 'C2', 'N11D1', 'N11C1']) {
+    pushUnique(fallback);
+  }
+
+  return candidates;
+}
+
+/**
+ * تحديد الموقع D أو C المستهدف لأي قطعة ثقيلة مع مراعاة عدم تجاوز 15 صنفاً في الرف الواحد
+ */
+export function resolveTargetDLocation(
+  currentLocation: string,
+  allBins: string[] = [],
+  shelfOccupancy?: Map<string, number>,
+  preferC = false
+): string {
+  const clean = (currentLocation || '').trim().toUpperCase().replace(/\s+/g, '');
+  if (isDLocation(clean) || isCLocation(clean)) {
+    const currentCount = shelfOccupancy?.get(clean) ?? 0;
+    if (currentCount <= MAX_ITEMS_PER_SHELF) return clean;
+  }
+
+  const candidates = getHeavyCandidateShelvesForLocation(clean, allBins, preferC);
+  if (shelfOccupancy) {
+    for (const cand of candidates) {
+      const count = shelfOccupancy.get(cand) ?? 0;
+      if (count < MAX_ITEMS_PER_SHELF) {
+        return cand;
+      }
     }
   }
 
-  // 2. استخراج الأبعاد بالبوصة (IN أو SQ IN)
+  if (clean && (isDLocation(clean) || isCLocation(clean))) return clean;
+  const zonePrefix = clean.match(/^([A-Z]\d{2})/)?.[1];
+  if (zonePrefix) {
+    const existingZoneDBin = allBins
+      .map((b) => b.trim().toUpperCase())
+      .find((b) => b.startsWith(`${zonePrefix}D`));
+    if (existingZoneDBin && (!shelfOccupancy || (shelfOccupancy.get(existingZoneDBin) ?? 0) < MAX_ITEMS_PER_SHELF)) {
+      return existingZoneDBin;
+    }
+    const existingZoneCBin = allBins
+      .map((b) => b.trim().toUpperCase())
+      .find((b) => b.startsWith(`${zonePrefix}C`));
+    if (existingZoneCBin && (!shelfOccupancy || (shelfOccupancy.get(existingZoneCBin) ?? 0) < MAX_ITEMS_PER_SHELF)) {
+      return existingZoneCBin;
+    }
+    return preferC ? `${zonePrefix}C1` : `${zonePrefix}D1`;
+  }
+
+  const anyExistingDBin = allBins.map((b) => b.trim().toUpperCase()).find((b) => isDLocation(b));
+  return anyExistingDBin || (preferC ? 'N11C1' : 'N11D1');
+}
+
+function parseInchToMm(rawInch: string): number | null {
+  const clean = rawInch.trim();
+  if (clean.includes('/')) {
+    const parts = clean.split('/');
+    const num = parseFloat(parts[0]);
+    const den = parseFloat(parts[1]);
+    if (!isNaN(num) && !isNaN(den) && den > 0) {
+      return Math.round((num / den) * 25.4 * 10) / 10;
+    }
+    return null;
+  }
+  let val = parseFloat(clean);
+  if (!isNaN(val) && val > 0) {
+    if (val >= 1000 && val <= 9999) val = val / 1000;
+    else if (val >= 100 && val <= 999) val = val / 100;
+    return Math.round(val * 25.4 * 10) / 10;
+  }
+  return null;
+}
+
+/**
+ * تقدير سعر القطعة الواحدة بالريال السعودي (SAR) بناءً على الصنف الصناعي والسبيكة المعدنية والمقاس والقدرة الكهربائية
+ * لفرز القطع الأغلى سعراً وتجميعها في رف واحد (بحد أقصى 15 صنفاً لكل رف)
+ */
+export function estimatePartUnitPriceSar(descUpper: string, primaryMm: number, sizeScore: number): number {
+  let basePrice = 180;
+
+  if (
+    descUpper.includes('PUMP') ||
+    descUpper.includes('COMPRESSOR') ||
+    descUpper.includes('TURBINE') ||
+    descUpper.includes('GEARBOX') ||
+    descUpper.includes('ACTUATOR') ||
+    descUpper.includes('TRANSFORMER')
+  ) {
+    basePrice = 5400;
+  } else if (
+    descUpper.includes('TRANSMITTER') ||
+    descUpper.includes('FLOWMETER') ||
+    descUpper.includes('MODULE, CPU') ||
+    descUpper.includes('MODULE,CPU') ||
+    descUpper.includes('PLUNGER PUMP')
+  ) {
+    basePrice = 4200;
+  } else if (
+    descUpper.includes('CONTACTOR MOTOR') ||
+    descUpper.includes('CONTACTOR, 3 POLE') ||
+    descUpper.includes('CONTACTOR')
+  ) {
+    if (descUpper.includes('250 A') || descUpper.includes('250A') || descUpper.includes('1000 A')) {
+      basePrice = 3850;
+    } else if (descUpper.includes('160 A') || descUpper.includes('160A') || descUpper.includes('690 VAC')) {
+      basePrice = 2950;
+    } else {
+      basePrice = 1450;
+    }
+  } else if (descUpper.includes('CIRCUIT BREAKER') || descUpper.includes('BREAKER')) {
+    if (descUpper.includes('125 A') || descUpper.includes('125A') || descUpper.includes('250A')) {
+      basePrice = 2650;
+    } else {
+      basePrice = 980;
+    }
+  } else if (
+    descUpper.includes('MECHANICAL SEAL') ||
+    descUpper.includes('FACE MECHANICAL SEAL') ||
+    descUpper.includes('LABYRINTH') ||
+    descUpper.includes('VALVE')
+  ) {
+    basePrice = 2400;
+  } else if (
+    descUpper.includes('RING WEAR') ||
+    descUpper.includes('WEAR RING') ||
+    descUpper.includes('SPINDLE') ||
+    descUpper.includes('SLEEVE, SHAFT') ||
+    descUpper.includes('SLEEVE SHAFT') ||
+    descUpper.includes('SEAT, SEAL') ||
+    descUpper.includes('SEAT SEAL')
+  ) {
+    basePrice = 1650;
+  } else if (descUpper.includes('BEARING')) {
+    if (descUpper.includes('JOURNAL') || descUpper.includes('MAIN') || descUpper.includes('STELLITE')) {
+      basePrice = 2150;
+    } else if (descUpper.includes('THRUST') || descUpper.includes('ROLLER')) {
+      basePrice = 1280;
+    } else {
+      basePrice = 690;
+    }
+  } else if (
+    descUpper.includes('RELAY, BUCHHOLZ') ||
+    descUpper.includes('RELAY. BUCHHOLZ') ||
+    descUpper.includes('RELAY PROTECTION') ||
+    descUpper.includes('DETECTOR RESISTANCE') ||
+    descUpper.includes('SENSOR, HORN')
+  ) {
+    basePrice = 1520;
+  } else if (
+    descUpper.includes('COUPLING') ||
+    descUpper.includes('REGULATOR') ||
+    descUpper.includes('POWER SUPPLY') ||
+    descUpper.includes('AMMETER') ||
+    descUpper.includes('METER')
+  ) {
+    basePrice = 920;
+  } else if (descUpper.includes('KIT')) {
+    basePrice = 740;
+  } else if (descUpper.includes('SPRING')) {
+    basePrice = descUpper.includes('INCONEL') || descUpper.includes('ACTUATOR') ? 1180 : 420;
+  } else if (
+    descUpper.includes('SWITCH') ||
+    descUpper.includes('LIGHT, PILOT') ||
+    descUpper.includes('BOX, ELECTRICAL') ||
+    descUpper.includes('PACKING RING') ||
+    descUpper.includes('PIN, ADAPTER')
+  ) {
+    basePrice = 360;
+  } else if (descUpper.includes('GASKET')) {
+    basePrice = descUpper.includes('SPIRAL') || descUpper.includes('GRAPHITE') ? 260 : 120;
+  } else if (descUpper.includes('O-RING') || descUpper.includes('ORING')) {
+    basePrice = descUpper.includes('VITON GLT') || descUpper.includes('FEPM') ? 165 : 75;
+  } else if (
+    descUpper.includes('SHIM') ||
+    descUpper.includes('WASHER') ||
+    descUpper.includes('BOLT') ||
+    descUpper.includes('NUT') ||
+    descUpper.includes('SCREW') ||
+    descUpper.includes('TIE') ||
+    descUpper.includes('EARPLUG') ||
+    descUpper.includes('GLOVES')
+  ) {
+    basePrice = 45;
+  }
+
+  // معاملات السبائك النادرة والمواد الخاصة
+  let alloyMultiplier = 1.0;
+  if (descUpper.includes('INCONEL 718') || descUpper.includes('INCONEL')) {
+    alloyMultiplier = 1.65;
+  } else if (descUpper.includes('STELLITE')) {
+    alloyMultiplier = 1.55;
+  } else if (descUpper.includes('HVOF') || descUpper.includes('TUNGSTEN')) {
+    alloyMultiplier = 1.7;
+  } else if (descUpper.includes('PEEK+ELGILOY') || descUpper.includes('ELGILOY')) {
+    alloyMultiplier = 1.45;
+  } else if (descUpper.includes('316L') || descUpper.includes('316') || descUpper.includes('BRONZE') || descUpper.includes('C93700')) {
+    alloyMultiplier = 1.2;
+  }
+
+  // معامل المقاس والحجم
+  const mmFactor = primaryMm >= 200 ? 1.28 : primaryMm >= 100 ? 1.14 : 1.0;
+  const sizeFactor = sizeScore >= 75 ? 1.2 : sizeScore >= 65 ? 1.1 : 1.0;
+
+  return Math.max(15, Math.round((basePrice * alloyMultiplier * mmFactor * sizeFactor) / 5) * 5);
+}
+
+/**
+ * تحليل الصنف والحجم والمقاس بالمليمتر (ملم) والسعر التقديري لكل قطعة
+ * مع توجيه القطع الثقيلة جداً إلى الموقعين D و C
+ */
+export function estimatePartSizeProfile(item: InventoryItem): PartSizeProfile {
+  const desc = (item.description_en || (item as any).description || '').trim().toUpperCase();
+  const loc = (item.location_code || (item as any).location || '').trim().toUpperCase();
+  const qtyRem = Math.max(1, Number(item.qty_remaining ?? item.qty_total ?? 1));
+  const cacheKey = `${desc}|${loc}|${qtyRem}`;
+  const cached = SIZE_PROFILE_CACHE.get(cacheKey);
+  if (cached) return cached;
+
+  let score = 45;
+  const mmValues: number[] = [];
+  const extraSpecs: string[] = [];
+
+  const mmRangeMatches = Array.from(desc.matchAll(/(\d+(?:\.\d+)?)\s*(?:X|-|TO)\s*(\d+(?:\.\d+)?)\s*MM\b/g));
+  for (const m of mmRangeMatches) {
+    const v1 = parseFloat(m[1]);
+    const v2 = parseFloat(m[2]);
+    if (!isNaN(v1) && v1 > 0) mmValues.push(v1);
+    if (!isNaN(v2) && v2 > 0) mmValues.push(v2);
+  }
+
+  const mmMatches = Array.from(desc.matchAll(/(\d+(?:\.\d+)?)\s*MM\b/g));
+  for (const m of mmMatches) {
+    const val = parseFloat(m[1]);
+    if (!isNaN(val) && val > 0 && !mmValues.includes(val)) {
+      mmValues.push(val);
+    }
+  }
+
+  const threadMatch = desc.match(/\bM(\d+(?:\.\d+)?)(?:\s*X\s*(\d+(?:\.\d+)?))?\b/);
+  if (threadMatch) {
+    const mDia = parseFloat(threadMatch[1]);
+    const mLen = threadMatch[2] ? parseFloat(threadMatch[2]) : NaN;
+    if (!isNaN(mDia) && mDia > 0 && !mmValues.includes(mDia)) {
+      mmValues.push(mDia);
+    }
+    if (!isNaN(mLen) && mLen > 0 && !mmValues.includes(mLen)) {
+      mmValues.push(mLen);
+    }
+    extraSpecs.push(threadMatch[0].replace(/\s+/g, ''));
+    if (mDia >= 24) score += 25;
+  }
+
   const sqInMatch = desc.match(/(\d+(?:\.\d+)?)\s*SQ\s*IN\b/);
   if (sqInMatch) {
     const sqVal = parseFloat(sqInMatch[1]);
-    extractedDims.push(`${sqVal} بوصة مربعة`);
-    score += Math.min(35, sqVal * 0.6);
-  }
-
-  const inMatches = Array.from(desc.matchAll(/(\d+(?:\/\d+|\.\d+)?)\s*IN\b/g));
-  for (const m of inMatches) {
-    extractedDims.push(`${m[1]} بوصة`);
-    if (!m[1].includes('/')) {
-      const val = parseFloat(m[1]);
-      if (val >= 2) score += 20;
+    if (!isNaN(sqVal) && sqVal > 0) {
+      const eqMm = Math.round(Math.sqrt(sqVal) * 25.4);
+      if (!mmValues.includes(eqMm)) mmValues.push(eqMm);
+      extraSpecs.push(`${sqVal} SQ IN`);
+      score += Math.min(35, sqVal * 0.6);
     }
   }
 
-  // 3. استخراج قدرة التيار بالأمبير (A) للقطع الكهربائية الكبيرة مثل CONTACTOR 1000 A
+  const inMatches = Array.from(desc.matchAll(/\b(\d+(?:\/\d+|\.\d+)?)\s*(?:IN|INCH|NPS|")\b/g));
+  for (const m of inMatches) {
+    const mmFromIn = parseInchToMm(m[1]);
+    if (mmFromIn !== null) {
+      if (!mmValues.some((existing) => Math.abs(existing - mmFromIn) <= 1.5)) {
+        mmValues.push(mmFromIn);
+      }
+      if (!m[1].includes('/')) {
+        const inVal = parseFloat(m[1]);
+        if (inVal >= 2) score += 22;
+      }
+    }
+  }
+
+  if (mmValues.length === 0) {
+    const dimXMatch = desc.match(/\b(\d+(?:\.\d+)?)\s*X\s*(\d+(?:\.\d+)?)\b/);
+    if (dimXMatch) {
+      const d1 = parseFloat(dimXMatch[1]);
+      const d2 = parseFloat(dimXMatch[2]);
+      if (!isNaN(d1) && d1 > 0 && d1 < 2000) mmValues.push(d1);
+      if (!isNaN(d2) && d2 > 0 && d2 < 2000 && d2 !== d1) mmValues.push(d2);
+    }
+  }
+
+  const kgMatch = desc.match(/\b(\d+(?:\.\d+)?)\s*KG\b/);
+  if (kgMatch) {
+    const kgs = parseFloat(kgMatch[1]);
+    extraSpecs.push(`${kgs} كجم`);
+    if (kgs >= 15) score += 35;
+    else if (kgs >= 5) score += 20;
+  }
+
   const ampMatch = desc.match(/\b(\d+)\s*A\b/);
   if (ampMatch) {
     const amps = parseInt(ampMatch[1], 10);
-    extractedDims.push(`${amps} أمبير`);
+    extraSpecs.push(`${amps}A`);
     if (amps >= 200) score += 35;
     else if (amps >= 50) score += 15;
   }
 
-  // 4. استخراج مقاس القلاووظ المليمتري مثل M10 X 45
-  const threadMatch = desc.match(/\b(M\d+(?:\s*X\s*\d+)?)\b/);
-  if (threadMatch) {
-    extractedDims.push(threadMatch[1]);
-  }
+  const maxMm = mmValues.length > 0 ? Math.max(...mmValues) : 0;
+  const primaryMm = maxMm;
 
-  // تأثير القطر/الطول بالمليمتر على الحجم
-  if (maxMm >= 180 && !desc.includes('TIE, CABLE')) {
+  if (maxMm >= 180 && !desc.includes('TIE, CABLE') && !desc.includes('GLOVES')) {
     score += 32;
-  } else if (maxMm >= 80 && !desc.includes('TIE, CABLE')) {
+  } else if (maxMm >= 80 && !desc.includes('TIE, CABLE') && !desc.includes('GLOVES') && !desc.includes('IGNITER')) {
     score += 18;
   } else if (maxMm > 0 && maxMm <= 25) {
     score -= 15;
   }
 
-  // 5. تأثير نوع القطعة الهندسي على الوزن والحجم
-  if (
+  const isLightSealOrFastener =
+    desc.startsWith('O-RING') ||
+    desc.startsWith('KIT') ||
+    desc.startsWith('REPAIR KIT') ||
+    desc.includes('GRADUATED') ||
+    desc.startsWith('GASKET') ||
+    desc.startsWith('PACKING') ||
+    desc.startsWith('TIE, CABLE') ||
+    desc.startsWith('TIE CABLE') ||
+    desc.startsWith('FUSE') ||
+    desc.startsWith('PIN:') ||
+    desc.startsWith('RELAY') ||
+    desc.startsWith('SCREW') ||
+    desc.startsWith('CAP: PROTECTIVE') ||
+    desc.startsWith('GLOVES') ||
+    desc.startsWith('IGNITER') ||
+    desc.startsWith('SENSOR') ||
+    desc.startsWith('SPRING');
+
+  if (isLightSealOrFastener) {
+    score -= 22;
+  } else if (
     desc.includes('VALVE') ||
     desc.includes('ACTUATOR') ||
     desc.includes('CASING') ||
     desc.includes('IMPELLER') ||
     desc.includes('SLEEVE SHAFT') ||
     desc.includes('BEARING, JOURNAL') ||
+    desc.includes('MAIN BEARING') ||
     desc.includes('BEARING ROLLER') ||
+    desc.includes('2X7315') ||
     desc.includes('STUD ASSEMBLY') ||
     desc.includes('CONTACTOR') ||
     desc.includes('AIR BLOWER') ||
-    desc.includes('RING WEAR')
+    desc.includes('RING WEAR') ||
+    desc.includes('WEAR RING') ||
+    desc.includes('BUSHING PUMP') ||
+    desc.includes('FLANGE WELD NECK') ||
+    desc.includes('GATE VALVE') ||
+    desc.includes('PUMP') ||
+    desc.includes('MOTOR') ||
+    desc.includes('TRANSFORMER') ||
+    desc.includes('GEARBOX') ||
+    desc.includes('COMPRESSOR') ||
+    desc.includes('TURBINE') ||
+    desc.includes('CYLINDER') ||
+    desc.includes('HEAVY')
   ) {
     score += 24;
   } else if (
     desc.includes('BUSHING') ||
     desc.includes('SLEEVE') ||
-    desc.includes('SPRING') ||
     desc.includes('POWER SUPPLY') ||
     desc.includes('REGULATOR') ||
     desc.includes('LABYRINTH') ||
     desc.includes('RETAINER') ||
     desc.includes('CAP, BEARING') ||
-    desc.includes('SUPPORT: RIGID CONDUIT')
+    desc.includes('SUPPORT: RIGID CONDUIT') ||
+    desc.includes('FLANGE')
   ) {
     score += 6;
   } else if (
@@ -337,34 +605,60 @@ export function estimatePartSizeProfile(item: Pick<InventoryItem, 'description_e
   }
 
   const finalScore = Math.max(5, Math.min(99, Math.round(score)));
-  const dimensionsLabel =
-    extractedDims.length > 0 ? Array.from(new Set(extractedDims)).slice(0, 2).join(' × ') : 'مقاس قياسي';
+  const uniqueMm = Array.from(new Set(mmValues.map((v) => Math.round(v * 10) / 10)));
+  const mmLabel =
+    uniqueMm.length > 0
+      ? `${uniqueMm.slice(0, 3).join(' × ')} ملم`
+      : extraSpecs.length > 0
+      ? extraSpecs.join(' — ')
+      : 'مقاس قياسي';
 
-  if (finalScore >= 65) {
-    return {
-      sizeScore: finalScore,
-      sizeCategory: 'كبير / ثقيل',
-      dimensionsLabel,
-      recommendedShelves: ['FL', 'A'],
-      recommendedShelfTextAr: 'الرف الأرضي FL (0م) أو الرف A (1م)',
-    };
-  }
-  if (finalScore >= 38) {
-    return {
-      sizeScore: finalScore,
-      sizeCategory: 'متوسط الحجم',
-      dimensionsLabel,
-      recommendedShelves: ['A', 'B', 'BB'],
-      recommendedShelfTextAr: 'الرف A (1م) أو B (2م) أو BB (3م)',
-    };
-  }
-  return {
+  const dimensionsLabel =
+    uniqueMm.length > 0 && extraSpecs.length > 0
+      ? `${mmLabel} (${extraSpecs[0]})`
+      : mmLabel;
+
+  const sizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف' =
+    finalScore >= 65 ? 'كبير / ثقيل' : finalScore >= 38 ? 'متوسط الحجم' : 'صغير / خفيف';
+
+  // توجيه الثقيلة جداً إلى D و C
+  const targetHeavyLocation = resolveTargetDLocation(loc, [], undefined, finalScore >= 65 && finalScore < 72);
+
+  // تقدير السعر بالريال السعودي للفرز حسب الأغلى سعراً
+  const estimatedPriceSar = estimatePartUnitPriceSar(desc, primaryMm, finalScore);
+  const totalValueSar = estimatedPriceSar * qtyRem;
+  const priceCategory: 'أغلى سعراً / قيمة عالية' | 'متوسط السعر' | 'سعر اقتصادي' =
+    estimatedPriceSar >= 1200
+      ? 'أغلى سعراً / قيمة عالية'
+      : estimatedPriceSar >= 300
+      ? 'متوسط السعر'
+      : 'سعر اقتصادي';
+  const priceLabelAr = `${estimatedPriceSar.toLocaleString()} ر.س للقطعة (الإجمالي ${totalValueSar.toLocaleString()} ر.س)`;
+
+  const profile: PartSizeProfile = {
     sizeScore: finalScore,
-    sizeCategory: 'صغير / خفيف',
+    sizeCategory,
+    mmValues: uniqueMm,
+    primaryMm,
+    mmLabel,
     dimensionsLabel,
-    recommendedShelves: ['BB', 'C', 'D'],
-    recommendedShelfTextAr: 'الرفوف العلوية BB (3م) أو C (4م) أو D (5م)',
+    targetHeavyLocation,
+    estimatedPriceSar,
+    totalValueSar,
+    priceCategory,
+    priceLabelAr,
   };
+
+  SIZE_PROFILE_CACHE.set(cacheKey, profile);
+  return profile;
+}
+
+export function isHeavyPart(item: InventoryItem): boolean {
+  return estimatePartSizeProfile(item).sizeCategory === 'كبير / ثقيل';
+}
+
+export function isHighValuePart(item: InventoryItem): boolean {
+  return estimatePartSizeProfile(item).priceCategory === 'أغلى سعراً / قيمة عالية';
 }
 
 const FAMILY_ARABIC_NAMES: Record<string, string> = {
@@ -396,10 +690,11 @@ const FAMILY_ARABIC_NAMES: Record<string, string> = {
 };
 
 const zone = (location: string) =>
-  (location || '').toUpperCase().replace(/\s+/g, '').match(/^([A-Z]\d{2})/)?.[1];
+  (location || '').toUpperCase().replace(/\s+/g, '').match(/^([A-Z]\d{2})/)?.[1] ||
+  (isDLocation(location) ? 'D' : isCLocation(location) ? 'C' : undefined);
 
 export function detectTechnicalFamily(item: InventoryItem): string | undefined {
-  const text = (item.description_en || '').toUpperCase();
+  const text = (item.description_en || (item as any).description || '').toUpperCase();
   if (text.includes('RING WEAR') || text.includes('RING,') || text.includes('WEAR RING')) {
     return 'RING';
   }
@@ -416,7 +711,12 @@ export function detectTechnicalFamily(item: InventoryItem): string | undefined {
   if (text.includes('SCREW')) return 'SCREW';
   if (text.includes('WASHER') || text.includes('PIN:')) return 'WASHER';
   if (text.includes('FUSE') || text.includes('RELAY')) return 'FUSE';
-  if (text.includes('POWER SUPPLY') || text.includes('AMMETER') || text.includes('INSULATOR') || text.includes('CONTACTOR')) {
+  if (
+    text.includes('POWER SUPPLY') ||
+    text.includes('AMMETER') ||
+    text.includes('INSULATOR') ||
+    text.includes('CONTACTOR')
+  ) {
     return 'INSULATOR';
   }
   if (text.includes('CABLE') || text.includes('CONDUIT')) return 'CABLE';
@@ -437,6 +737,221 @@ function family(item: InventoryItem): string | undefined {
   return detectTechnicalFamily(item);
 }
 
+/**
+ * استخراج جميع القطع الثقيلة جداً والكبيرة الموجودة خارج مواقع الثقيلة وتوزيعها على الموقعين (D و C)
+ * مع ضمان عدم تجاوز كل رف 15 صنفاً (إذا امتلأ D بـ 15 صنفاً ينتقل الفائض تلقائياً إلى C بحد 15 صنفاً)
+ */
+export function suggestHeavyItemsToLocationD(
+  items: InventoryItem[],
+  pendingParts: Set<string> = new Set()
+): TransferSuggestion[] {
+  const allBins = Array.from(
+    new Set(items.map((i) => (i.location_code || '').trim().toUpperCase()).filter(Boolean))
+  );
+
+  // حساب الإشغال الحالي في رفوف D و C لضمان سقف 15 صنفاً لكل رف
+  const shelfOccupancy = new Map<string, number>();
+  for (const it of items) {
+    if (it.qty_remaining <= 0 || it.is_missing === 1) continue;
+    const b = (it.location_code || '').trim().toUpperCase();
+    if (isHeavyDutyDOrCLocation(b)) {
+      shelfOccupancy.set(b, (shelfOccupancy.get(b) || 0) + 1);
+    }
+  }
+
+  // ترتيب القطع الثقيلة من الأثقل والأغلى سعراً أولاً بحيث يأخذ الرف D القطع الأثقل أولاً ثم الرف C
+  const heavyCandidates: Array<{ item: InventoryItem; sizeProf: PartSizeProfile }> = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.qty_remaining <= 0 || item.is_missing === 1) continue;
+    if (pendingParts.has(item.part_number)) continue;
+
+    const sizeProf = estimatePartSizeProfile(item);
+    if (sizeProf.sizeCategory !== 'كبير / ثقيل') continue;
+    if (isHeavyDutyDOrCLocation(item.location_code)) continue;
+    heavyCandidates.push({ item, sizeProf });
+  }
+
+  heavyCandidates.sort(
+    (a, b) =>
+      b.sizeProf.sizeScore - a.sizeProf.sizeScore ||
+      b.sizeProf.estimatedPriceSar - a.sizeProf.estimatedPriceSar
+  );
+
+  const results: TransferSuggestion[] = [];
+
+  for (const { item, sizeProf } of heavyCandidates) {
+    const preferC = sizeProf.sizeScore < 72;
+    const candidates = getHeavyCandidateShelvesForLocation(item.location_code, allBins, preferC);
+    let chosenBin = candidates[0] || 'N11D1';
+
+    for (const cand of candidates) {
+      const occ = shelfOccupancy.get(cand) || 0;
+      if (occ < MAX_ITEMS_PER_SHELF) {
+        chosenBin = cand;
+        break;
+      }
+    }
+
+    shelfOccupancy.set(chosenBin, (shelfOccupancy.get(chosenBin) || 0) + 1);
+    const isTargetC = isCLocation(chosenBin);
+    const fam = detectTechnicalFamily(item) || item.category || 'HEAVY';
+    const currentShelfCount = Math.min(MAX_ITEMS_PER_SHELF, shelfOccupancy.get(chosenBin) || 1);
+
+    results.push({
+      partNumber: item.part_number,
+      from: item.location_code,
+      to: chosenBin,
+      quantity: item.qty_remaining,
+      family: fam,
+      categoryAr: item.category || FAMILY_ARABIC_NAMES[fam] || fam,
+      sizeCategory: sizeProf.sizeCategory,
+      mmLabel: sizeProf.mmLabel,
+      estimatedPriceSar: sizeProf.estimatedPriceSar,
+      totalValueSar: sizeProf.totalValueSar,
+      priceLabelAr: sizeProf.priceLabelAr,
+      isHeavyToD: !isTargetC,
+      isHeavyToC: isTargetC,
+      reason: `نقل قطعة ثقيلة جداً — الصنف: (${item.category || fam}) | المقاس: (${sizeProf.mmLabel}) | السعر: (${sizeProf.estimatedPriceSar.toLocaleString()} ر.س) من ${item.location_code} إلى موقع الثقيلة ${chosenBin} (${isTargetC ? 'موقع C' : 'موقع D'} — السعة: ${currentShelfCount}/${MAX_ITEMS_PER_SHELF} صنف).`,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * بناء خطة فرز وتجميع القطع الأغلى سعراً في رف واحد (بحد أقصى 15 صنفاً فقط لكل رف)
+ */
+export function buildHighValueConsolidationPlans(
+  items: InventoryItem[],
+  pendingParts: Set<string> = new Set(),
+  customTargetBin?: string
+): HighValueShelfPlan[] {
+  const available = items.filter(
+    (item) => item.qty_remaining > 0 && item.is_missing !== 1 && !pendingParts.has(item.part_number)
+  );
+  if (available.length === 0) return [];
+
+  const allBins = Array.from(
+    new Set(available.map((i) => i.location_code.trim().toUpperCase()).filter(Boolean))
+  );
+
+  // فرز جميع القطع تنازلياً حسب سعر القطعة الواحدة ثم القيمة الإجمالية
+  const enriched = available
+    .map((item) => ({
+      item,
+      sizeProfile: estimatePartSizeProfile(item),
+    }))
+    .sort(
+      (a, b) =>
+        b.sizeProfile.estimatedPriceSar - a.sizeProfile.estimatedPriceSar ||
+        b.sizeProfile.totalValueSar - a.sizeProfile.totalValueSar
+    );
+
+  // نأخذ القطع الأغلى سعراً (أو أعلى القطع قيمة في المخزون) ونقسمها إلى رفوف سعة كل رف 15 صنفاً كحد أقصى
+  const highValueCandidates = enriched.filter((e) => e.sizeProfile.estimatedPriceSar >= 600);
+  const selectedPool =
+    highValueCandidates.length >= 3
+      ? highValueCandidates
+      : enriched.slice(0, Math.min(MAX_ITEMS_PER_SHELF, enriched.length));
+
+  // تحديد الرف الموحد للقطع الأغلى سعراً (الأكثر احتواءً على القطع الغالية أو المحدد من المستخدم)
+  const top15 = selectedPool.slice(0, MAX_ITEMS_PER_SHELF);
+  const binFreq = new Map<string, number>();
+  for (const entry of top15) {
+    const b = entry.item.location_code.trim().toUpperCase();
+    if (b) binFreq.set(b, (binFreq.get(b) || 0) + 1);
+  }
+  const bestExistingBin =
+    Array.from(binFreq.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ||
+    allBins[0] ||
+    'N07A1';
+
+  const primaryZone = zone(bestExistingBin) || 'N07';
+  const defaultShelves = [
+    customTargetBin?.trim().toUpperCase() || bestExistingBin,
+    `${primaryZone}A2`,
+    `${primaryZone}B1`,
+    `${primaryZone}B2`,
+  ];
+
+  const plans: HighValueShelfPlan[] = [];
+  const totalBatches = Math.min(3, Math.ceil(selectedPool.length / MAX_ITEMS_PER_SHELF));
+
+  for (let bIdx = 0; bIdx < totalBatches; bIdx++) {
+    const slice = selectedPool.slice(
+      bIdx * MAX_ITEMS_PER_SHELF,
+      (bIdx + 1) * MAX_ITEMS_PER_SHELF
+    );
+    if (slice.length === 0) continue;
+
+    const targetBin = defaultShelves[bIdx] || `${primaryZone}A${bIdx + 1}`;
+    const slicePartSet = new Set(slice.map((s) => s.item.part_number));
+
+    // إذا كان الرف المستهدف يحتوي على قطع أخرى رخيصة تزيد العدد عن 15 صنفاً، نقترح إخراجها لرف مجاور
+    const currentOccupantsInTarget = available.filter(
+      (i) => i.location_code.trim().toUpperCase() === targetBin && !slicePartSet.has(i.part_number)
+    );
+    const maxAllowedOther = Math.max(0, MAX_ITEMS_PER_SHELF - slice.length);
+    const occupantsToEvict = currentOccupantsInTarget
+      .map((item) => ({ item, sizeProfile: estimatePartSizeProfile(item) }))
+      .sort((a, b) => a.sizeProfile.estimatedPriceSar - b.sizeProfile.estimatedPriceSar)
+      .slice(0, Math.max(0, currentOccupantsInTarget.length - maxAllowedOther));
+
+    const adjBins = getAdjacentStorageBins(targetBin, allBins, 6);
+    const fallbackEvictBin = adjBins.find((b) => b !== targetBin) || `${primaryZone}B2`;
+
+    const evictions: SwapEvictionStep[] = occupantsToEvict.map(({ item, sizeProfile }) => {
+      const fam = detectTechnicalFamily(item) || item.category || 'عام';
+      return {
+        partNumber: item.part_number,
+        descriptionAr: item.description_ar,
+        descriptionEn: item.description_en,
+        currentFamily: fam,
+        categoryAr: item.category || fam,
+        quantity: item.qty_remaining,
+        fromBin: targetBin,
+        evictToBin: fallbackEvictBin,
+        sizeProfile,
+        reason: `إخراج قطعة أقل سعراً (${sizeProfile.estimatedPriceSar.toLocaleString()} ر.س) من ${targetBin} إلى ${fallbackEvictBin} للحفاظ على سقف (${MAX_ITEMS_PER_SHELF} صنف فقط) في رف القطع الأغلى سعراً`,
+      };
+    });
+
+    const prices = slice.map((s) => s.sizeProfile.estimatedPriceSar);
+    const totalShelfValueSar = slice.reduce((acc, s) => acc + s.sizeProfile.totalValueSar, 0);
+    const totalUnits = slice.reduce((acc, s) => acc + s.item.qty_remaining, 0);
+
+    plans.push({
+      id: `HIGH-VALUE-SHELF-${bIdx + 1}-${targetBin}`,
+      shelfIndex: bIdx + 1,
+      targetBin,
+      maxItemsLimit: MAX_ITEMS_PER_SHELF,
+      itemsCount: slice.length,
+      totalUnits,
+      minUnitPriceSar: Math.min(...prices),
+      maxUnitPriceSar: Math.max(...prices),
+      totalShelfValueSar,
+      items: slice.map(({ item, sizeProfile }) => {
+        const fromBin = item.location_code.trim().toUpperCase();
+        return {
+          item,
+          sizeProfile,
+          fromBin,
+          toBin: targetBin,
+          alreadyInShelf: fromBin === targetBin,
+        };
+      }),
+      evictions,
+      summaryReason: `تجميع القطع الأغلى سعراً (دفعة الرف #${bIdx + 1}: ${slice.length}/${MAX_ITEMS_PER_SHELF} صنف كحد أقصى) في الرف الموحد (${targetBin}) بقيمة إجمالية ~${totalShelfValueSar.toLocaleString()} ر.س.`,
+    });
+  }
+
+  return plans;
+}
+
+/**
+ * اقتراح نقل وتجميع المتشابهات مع توجيه الثقيلة جداً إلى D و C ومراعاة سقف 15 صنفاً لكل رف
+ */
 export function suggestTransfers(
   items: InventoryItem[],
   pendingParts: Set<string> = new Set(),
@@ -445,6 +960,13 @@ export function suggestTransfers(
   const eligible = items.filter(
     (item) => item.qty_remaining > 0 && item.is_missing !== 1 && zone(item.location_code) && family(item)
   );
+  const allBins = Array.from(new Set(eligible.map((i) => i.location_code.trim().toUpperCase())));
+  const shelfOccupancy = new Map<string, number>();
+  for (const it of eligible) {
+    const b = it.location_code.trim().toUpperCase();
+    shelfOccupancy.set(b, (shelfOccupancy.get(b) || 0) + 1);
+  }
+
   const groups = new Map<string, Map<string, number>>();
   for (const item of eligible) {
     const key = `${zone(item.location_code)}:${family(item)}`;
@@ -460,9 +982,37 @@ export function suggestTransfers(
     );
   }
   const result: TransferSuggestion[] = [];
+
   for (const item of eligible) {
     if (pendingParts.has(item.part_number)) continue;
     const technicalFamily = family(item)!;
+    const sizeProf = estimatePartSizeProfile(item);
+    const catAr = item.category || FAMILY_ARABIC_NAMES[technicalFamily] || technicalFamily;
+
+    if (sizeProf.sizeCategory === 'كبير / ثقيل' && !isDLocation(item.location_code)) {
+      const targetHeavyBin = resolveTargetDLocation(item.location_code, allBins, shelfOccupancy, false);
+      shelfOccupancy.set(targetHeavyBin, (shelfOccupancy.get(targetHeavyBin) || 0) + 1);
+      const isTargetC = isCLocation(targetHeavyBin);
+      result.push({
+        partNumber: item.part_number,
+        from: item.location_code,
+        to: targetHeavyBin,
+        quantity: item.qty_remaining,
+        family: technicalFamily,
+        categoryAr: catAr,
+        sizeCategory: sizeProf.sizeCategory,
+        mmLabel: sizeProf.mmLabel,
+        estimatedPriceSar: sizeProf.estimatedPriceSar,
+        totalValueSar: sizeProf.totalValueSar,
+        priceLabelAr: sizeProf.priceLabelAr,
+        isHeavyToD: !isTargetC,
+        isHeavyToC: isTargetC,
+        reason: `نقل قطعة ثقيلة جداً (${technicalFamily} — المقاس: ${sizeProf.mmLabel}) إلى موقع القطع الثقيلة المعتمد ${targetHeavyBin} (${isTargetC ? 'موقع C' : 'موقع D'} — بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف للرف).`,
+      });
+      if (result.length >= limit) break;
+      continue;
+    }
+
     const key = `${zone(item.location_code)}:${technicalFamily}`;
     const bins = groups.get(key)!;
     const target = targets.get(key)!;
@@ -473,16 +1023,20 @@ export function suggestTransfers(
       to: target[0],
       quantity: item.qty_remaining,
       family: technicalFamily,
-      reason: `تجميع عائلة ${technicalFamily} مع ${target[1]} قطع أخرى في المنطقة ${zone(item.location_code)}. القرب مقترح بحسب ترميز الموقع ويحتاج تحققًا ميدانيًا.`,
+      categoryAr: catAr,
+      sizeCategory: sizeProf.sizeCategory,
+      mmLabel: sizeProf.mmLabel,
+      estimatedPriceSar: sizeProf.estimatedPriceSar,
+      totalValueSar: sizeProf.totalValueSar,
+      priceLabelAr: sizeProf.priceLabelAr,
+      reason: `تجميع متشابهات الصنف (${technicalFamily} — المقاس: ${sizeProf.mmLabel}) في الموقع ${target[0]} (بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف لكل رف).`,
     });
     if (result.length >= limit) break;
   }
+
   return result;
 }
 
-/**
- * حساب درجة التقارب المكاني بين موقعين في المستودع (كلما قل الرقم زاد التقارب)
- */
 export function computeBinProximityScore(binA: string, binB: string): number {
   const cleanA = (binA || '').trim().toUpperCase();
   const cleanB = (binB || '').trim().toUpperCase();
@@ -507,17 +1061,12 @@ export function computeBinProximityScore(binA: string, binB: string): number {
 
   const sectorDiff = a.sector === b.sector ? 0 : 100;
   const aisleDiff = Math.abs(a.aisle - b.aisle) * 10;
-  const elevA = parseShelfElevation(cleanA).meters;
-  const elevB = parseShelfElevation(cleanB).meters;
-  const shelfDiff = Math.abs(elevA - elevB) * 2;
+  const groupDiff = a.shelfGroup === b.shelfGroup ? 0 : 3;
   const levelDiff = Math.abs(a.level - b.level);
 
-  return sectorDiff + aisleDiff + shelfDiff + levelDiff;
+  return sectorDiff + aisleDiff + groupDiff + levelDiff;
 }
 
-/**
- * اقتراح أقرب المواقع المتجاورة لموقع معين (Proximate Storage Bins) مرتبة حسب الارتفاع والقرب
- */
 export function getAdjacentStorageBins(targetBin: string, allBins: string[], maxCount = 6): string[] {
   const cleanTarget = (targetBin || '').trim().toUpperCase();
   const candidates = new Set<string>(allBins.map((b) => b.trim().toUpperCase()).filter(Boolean));
@@ -527,11 +1076,21 @@ export function getAdjacentStorageBins(targetBin: string, allBins: string[], max
     const prefix = m[1];
     const shelf = m[2];
     const level = parseInt(m[3], 10);
+    candidates.add(`${prefix}D1`);
+    candidates.add(`${prefix}D2`);
+    candidates.add(`${prefix}C1`);
+    candidates.add(`${prefix}C2`);
     candidates.add(`${prefix}${shelf}${level === 1 ? 2 : 1}`);
-    for (const adjShelf of ['FL', 'A', 'B', 'BB', 'C', 'D']) {
+    for (const adjShelf of ['D', 'C', 'A', 'B', 'BB', 'FL']) {
       candidates.add(`${prefix}${adjShelf}1`);
       candidates.add(`${prefix}${adjShelf}2`);
     }
+  } else {
+    candidates.add('N11D1');
+    candidates.add('N11C1');
+    candidates.add('N16D1');
+    candidates.add('D1');
+    candidates.add('C1');
   }
 
   candidates.delete(cleanTarget);
@@ -540,8 +1099,19 @@ export function getAdjacentStorageBins(targetBin: string, allBins: string[], max
     .slice(0, maxCount);
 }
 
+function getMmBucketLabel(primaryMm: number, mmLabel: string): string {
+  if (primaryMm <= 0) return mmLabel !== 'مقاس قياسي' ? mmLabel : 'مقاس قياسي (بدون ملم)';
+  if (primaryMm < 20) return `${primaryMm} ملم (دقيق < 20 ملم)`;
+  if (primaryMm <= 60) return `${primaryMm} ملم (متوسط 20–60 ملم)`;
+  if (primaryMm <= 150) return `${primaryMm} ملم (كبير 61–150 ملم)`;
+  return `${primaryMm} ملم (ثقيل > 150 ملم)`;
+}
+
 /**
- * بناء خطة متكاملة لتجميع المتشابهات مع الترتيب حسب الحجم ومراعاة ارتفاع الرف (FL=0م، A=1م، B=2م، BB=3م، C=4م، D=5م)
+ * بناء خطة متكاملة لتجميع المتشابهات من كل صنف حسب:
+ * 1. الصنف (Category) + الحجم (Size) + المليمتر (MM) + السعر التقديري (SAR)
+ * 2. توجيه القطع الثقيلة جداً إلى الموقعين D و C
+ * 3. الالتزام الصارم بحد 15 صنفاً كحد أقصى لكل رف (MAX_ITEMS_PER_SHELF = 15) وتوزيع أي فائض على الرف المجاور
  */
 export function buildSimilaritySwapPlans(
   items: InventoryItem[],
@@ -552,95 +1122,155 @@ export function buildSimilaritySwapPlans(
   const allBins = Array.from(new Set(available.map((i) => i.location_code.trim().toUpperCase()).filter(Boolean)));
   const itemsByBin = new Map<string, InventoryItem[]>();
 
-  for (const item of available) {
+  for (let i = 0; i < available.length; i++) {
+    const item = available[i];
     const bin = item.location_code.trim().toUpperCase();
-    const list = itemsByBin.get(bin) || [];
+    let list = itemsByBin.get(bin);
+    if (!list) {
+      list = [];
+      itemsByBin.set(bin, list);
+    }
     list.push(item);
-    itemsByBin.set(bin, list);
   }
 
   const familyGroups = new Map<string, InventoryItem[]>();
-  for (const item of available) {
+  for (let i = 0; i < available.length; i++) {
+    const item = available[i];
     const fam = detectTechnicalFamily(item);
     const z = zone(item.location_code);
     if (!fam || !z) continue;
     const key = groupScope === 'zone' ? `${z}:${fam}` : `ALL:${fam}`;
-    const list = familyGroups.get(key) || [];
+    let list = familyGroups.get(key);
+    if (!list) {
+      list = [];
+      familyGroups.set(key, list);
+    }
     list.push(item);
-    familyGroups.set(key, list);
   }
 
   const plans: SimilaritySwapPlan[] = [];
 
   for (const [key, groupItems] of familyGroups.entries()) {
     const [, fam] = key.split(':');
-    if (groupItems.length < 2) continue;
 
-    // ترتيب جميع قطع المجموعة من الأكبر/الأثقل حجماً إلى الأصغر/الأخف
     const allGroupItemsSortedBySize = groupItems
       .map((item) => ({
         item,
         sizeProfile: estimatePartSizeProfile(item),
-        currentElevation: parseShelfElevation(item.location_code),
       }))
-      .sort((a, b) => b.sizeProfile.sizeScore - a.sizeProfile.sizeScore);
+      .sort((a, b) => {
+        if (b.sizeProfile.sizeScore !== a.sizeProfile.sizeScore) {
+          return b.sizeProfile.sizeScore - a.sizeProfile.sizeScore;
+        }
+        if (b.sizeProfile.primaryMm !== a.sizeProfile.primaryMm) {
+          return b.sizeProfile.primaryMm - a.sizeProfile.primaryMm;
+        }
+        return b.sizeProfile.estimatedPriceSar - a.sizeProfile.estimatedPriceSar;
+      });
 
-    // حساب متوسط حجم المجموعة لتحديد الارتفاع الأنسب (FL, A, B, BB, C, D)
+    const subGroupMap = new Map<string, SimilaritySubGroup>();
+    const allMmValues: number[] = [];
+    let groupTotalValueSar = 0;
+
+    for (const entry of allGroupItemsSortedBySize) {
+      const { item, sizeProfile } = entry;
+      groupTotalValueSar += sizeProfile.totalValueSar;
+      if (sizeProfile.primaryMm > 0) allMmValues.push(sizeProfile.primaryMm);
+      const bucketLabel = getMmBucketLabel(sizeProfile.primaryMm, sizeProfile.mmLabel);
+      const sgKey = `${sizeProfile.sizeCategory}|${sizeProfile.mmLabel}`;
+      const existing = subGroupMap.get(sgKey);
+      if (existing) {
+        existing.count += 1;
+        existing.totalQty += item.qty_remaining;
+        existing.partNumbers.push(item.part_number);
+      } else {
+        subGroupMap.set(sgKey, {
+          key: sgKey,
+          sizeCategory: sizeProfile.sizeCategory,
+          mmRangeLabel: sizeProfile.mmLabel !== 'مقاس قياسي' ? sizeProfile.mmLabel : bucketLabel,
+          primaryMm: sizeProfile.primaryMm,
+          count: 1,
+          totalQty: item.qty_remaining,
+          partNumbers: [item.part_number],
+        });
+      }
+    }
+
+    const subGroupsBySizeAndMm = Array.from(subGroupMap.values()).sort(
+      (a, b) => b.count - a.count || b.primaryMm - a.primaryMm
+    );
+
+    const groupMmSummary =
+      allMmValues.length > 0
+        ? Math.min(...allMmValues) === Math.max(...allMmValues)
+          ? `${Math.max(...allMmValues)} ملم`
+          : `${Math.min(...allMmValues)} ملم – ${Math.max(...allMmValues)} ملم`
+        : 'مقاسات قياسية متطابقة الصنف';
+
     const avgSizeScore =
       allGroupItemsSortedBySize.reduce((acc, x) => acc + x.sizeProfile.sizeScore, 0) /
       allGroupItemsSortedBySize.length;
+    const hasHeavyItems = allGroupItemsSortedBySize.some((x) => x.sizeProfile.sizeCategory === 'كبير / ثقيل');
 
     const groupSizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف' =
-      avgSizeScore >= 65 ? 'كبير / ثقيل' : avgSizeScore >= 38 ? 'متوسط الحجم' : 'صغير / خفيف';
+      avgSizeScore >= 65 || hasHeavyItems ? 'كبير / ثقيل' : avgSizeScore >= 38 ? 'متوسط الحجم' : 'صغير / خفيف';
 
-    const idealMeters = groupSizeCategory === 'كبير / ثقيل' ? 0.5 : groupSizeCategory === 'متوسط الحجم' ? 2 : 4;
+    if (groupItems.length < 2 && groupSizeCategory !== 'كبير / ثقيل') continue;
 
     const binsCount = new Map<string, number>();
-    for (const item of groupItems) {
-      const b = item.location_code.trim().toUpperCase();
+    for (let i = 0; i < groupItems.length; i++) {
+      const b = groupItems[i].location_code.trim().toUpperCase();
       binsCount.set(b, (binsCount.get(b) || 0) + 1);
     }
 
-    // اختيار الموقع الفعلي الأمثل مع مراعاة عدد المتشابهات وملاءمة ارتفاع الرف لحجم القطع
     const sortedBins = Array.from(binsCount.entries()).sort((a, b) => {
+      if (groupSizeCategory === 'كبير / ثقيل') {
+        const isDA = isDLocation(a[0]) ? 2 : isCLocation(a[0]) ? 1 : 0;
+        const isDB = isDLocation(b[0]) ? 2 : isCLocation(b[0]) ? 1 : 0;
+        if (isDA !== isDB) return isDB - isDA;
+      }
       if (b[1] !== a[1]) return b[1] - a[1];
-      const elevDiffA = Math.abs(parseShelfElevation(a[0]).meters - idealMeters);
-      const elevDiffB = Math.abs(parseShelfElevation(b[0]).meters - idealMeters);
-      if (elevDiffA !== elevDiffB) return elevDiffA - elevDiffB;
       const occA = (itemsByBin.get(a[0]) || []).length - a[1];
       const occB = (itemsByBin.get(b[0]) || []).length - b[1];
       return occA - occB || a[0].localeCompare(b[0]);
     });
 
-    const targetBin = sortedBins[0][0];
-    const targetZone = zone(targetBin) || 'N11';
-    const targetElevation = parseShelfElevation(targetBin);
+    const primaryBin = sortedBins[0][0];
+    const targetZone = zone(primaryBin) || 'N11';
 
-    // حساب الرف المثالي حسب الحجم في نفس الممر (مثلاً إذا كانت القطع ثقيلة نقترح N11FL1 أو N11A1)
-    const recommendedShelfCode =
+    const targetBin =
       groupSizeCategory === 'كبير / ثقيل'
-        ? targetElevation.meters <= 1
-          ? targetElevation.shelfCode
-          : 'FL'
-        : groupSizeCategory === 'متوسط الحجم'
-        ? targetElevation.meters >= 1 && targetElevation.meters <= 3
-          ? targetElevation.shelfCode
-          : 'B'
-        : targetElevation.meters >= 3
-        ? targetElevation.shelfCode
-        : 'C';
+        ? isDLocation(primaryBin)
+          ? primaryBin
+          : resolveTargetDLocation(primaryBin, allBins)
+        : primaryBin;
 
-    const recommendedHeightBin =
-      recommendedShelfCode === targetElevation.shelfCode
-        ? targetBin
-        : `${targetZone}${recommendedShelfCode}1`;
-    const recommendedHeightElevation = parseShelfElevation(recommendedHeightBin);
+    const recommendedBin = targetBin;
+    const adjacentBins = getAdjacentStorageBins(targetBin, allBins, 8);
 
-    const adjacentBins = getAdjacentStorageBins(targetBin, allBins, 6);
+    // تقسيم أصناف المجموعة إلى دفعات لا تتجاوز 15 صنفاً لكل رف (MAX_ITEMS_PER_SHELF = 15)
+    const candidateShelvesForBatches =
+      groupSizeCategory === 'كبير / ثقيل'
+        ? [targetBin, ...getHeavyCandidateShelvesForLocation(targetBin, allBins, false).filter((b) => b !== targetBin)]
+        : [targetBin, ...adjacentBins];
+
+    const shelfBatches: ShelfBatchAllocation[] = [];
+    for (let start = 0, bIdx = 0; start < allGroupItemsSortedBySize.length; start += MAX_ITEMS_PER_SHELF, bIdx++) {
+      const batchSlice = allGroupItemsSortedBySize.slice(start, start + MAX_ITEMS_PER_SHELF);
+      const assignedBin = candidateShelvesForBatches[bIdx] || `${targetZone}B${(bIdx % 2) + 1}`;
+      shelfBatches.push({
+        shelfBin: assignedBin,
+        batchIndex: bIdx + 1,
+        itemsCount: batchSlice.length,
+        maxCapacity: MAX_ITEMS_PER_SHELF,
+        items: batchSlice,
+      });
+    }
 
     const existingMatchingInTarget = (itemsByBin.get(targetBin) || [])
       .filter((i) => detectTechnicalFamily(i) === fam)
-      .sort((a, b) => estimatePartSizeProfile(b).sizeScore - estimatePartSizeProfile(a).sizeScore);
+      .sort((a, b) => estimatePartSizeProfile(b).primaryMm - estimatePartSizeProfile(a).primaryMm)
+      .slice(0, MAX_ITEMS_PER_SHELF);
 
     const scatteredMatching = allGroupItemsSortedBySize
       .map((x) => x.item)
@@ -658,54 +1288,61 @@ export function buildSimilaritySwapPlans(
       (i) => detectTechnicalFamily(i) !== fam && !pendingParts.has(i.part_number)
     );
 
-    const evictions: SwapEvictionStep[] = nonMatchingInTarget.map((occupant, idx) => {
-      const occSize = estimatePartSizeProfile(occupant);
-      const preferredEvictShelf =
-        occSize.sizeCategory === 'كبير / ثقيل'
-          ? `${targetZone}FL1`
-          : occSize.sizeCategory === 'متوسط الحجم'
-          ? `${targetZone}B1`
-          : `${targetZone}D1`;
-      const fallbackBin =
-        vacatedSourceBins[idx % Math.max(1, vacatedSourceBins.length)] ||
-        (preferredEvictShelf !== targetBin ? preferredEvictShelf : adjacentBins[0]) ||
-        `${targetZone}B2`;
-      const occFamily = detectTechnicalFamily(occupant) || occupant.category || 'متنوع';
-      const fromElev = parseShelfElevation(targetBin);
-      const toElev = parseShelfElevation(fallbackBin);
-      return {
-        partNumber: occupant.part_number,
-        descriptionAr: occupant.description_ar,
-        descriptionEn: occupant.description_en,
-        currentFamily: occFamily,
-        quantity: occupant.qty_remaining,
-        fromBin: targetBin,
-        evictToBin: fallbackBin,
-        sizeProfile: occSize,
-        fromElevation: fromElev,
-        toElevation: toElev,
-        reason: `إخراج صنف غير متشابه (${occFamily} — ${occSize.sizeCategory}) من ${targetBin} (${fromElev.shortLabelAr}) إلى ${fallbackBin} (${toElev.shortLabelAr})`,
-      };
-    });
+    const categoryAr = groupItems[0]?.category || FAMILY_ARABIC_NAMES[fam] || `صنف ${fam}`;
 
-    const consolidations: SwapConsolidationStep[] = scatteredMatching.map((simItem) => {
-      const sizeProf = estimatePartSizeProfile(simItem);
-      const fromBin = simItem.location_code.trim().toUpperCase();
-      const fromElev = parseShelfElevation(fromBin);
-      return {
-        partNumber: simItem.part_number,
-        descriptionAr: simItem.description_ar,
-        descriptionEn: simItem.description_en,
-        family: fam,
-        quantity: simItem.qty_remaining,
-        fromBin,
-        toBin: targetBin,
-        sizeProfile: sizeProf,
-        fromElevation: fromElev,
-        toElevation: targetElevation,
-        reason: `تجميع الصنف المتشابه (${fam} — ${sizeProf.sizeCategory}) من ${fromBin} (${fromElev.shortLabelAr}) إلى ${targetBin} (${targetElevation.shortLabelAr})`,
-      };
-    });
+    const evictions: SwapEvictionStep[] = nonMatchingInTarget
+      .filter((occupant) => {
+        if ((isDLocation(targetBin) || isCLocation(targetBin)) && isHeavyPart(occupant)) return false;
+        return true;
+      })
+      .map((occupant, idx) => {
+        const occSize = estimatePartSizeProfile(occupant);
+        const fallbackBin =
+          (occSize.sizeCategory === 'كبير / ثقيل'
+            ? `${targetZone}D1` !== targetBin
+              ? `${targetZone}D1`
+              : `${targetZone}C1`
+            : vacatedSourceBins[idx % Math.max(1, vacatedSourceBins.length)]) ||
+          adjacentBins[0] ||
+          `${targetZone}B1`;
+        const occFamily = detectTechnicalFamily(occupant) || occupant.category || 'متنوع';
+        return {
+          partNumber: occupant.part_number,
+          descriptionAr: occupant.description_ar,
+          descriptionEn: occupant.description_en,
+          currentFamily: occFamily,
+          categoryAr: occupant.category || occFamily,
+          quantity: occupant.qty_remaining,
+          fromBin: targetBin,
+          evictToBin: fallbackBin,
+          sizeProfile: occSize,
+          reason: `إخراج صنف مختلف (${occFamily} — المقاس: ${occSize.mmLabel}) من ${targetBin} إلى ${fallbackBin} لتخصيص الرف لمتشابهات ${fam} (بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف للرف)`,
+        };
+      });
+
+    // توزيع عمليات الدمج بحيث لا يتجاوز الرف الأول 15 صنفاً وينتقل الفائض للرف الرديف (مثل D2 أو C1)
+    const consolidations: SwapConsolidationStep[] = [];
+    for (const batch of shelfBatches) {
+      for (const { item: simItem, sizeProfile: sizeProf } of batch.items) {
+        const fromBin = simItem.location_code.trim().toUpperCase();
+        if (fromBin === batch.shelfBin || pendingParts.has(simItem.part_number)) continue;
+        const isHeavyDest = isHeavyDutyDOrCLocation(batch.shelfBin) && sizeProf.sizeCategory === 'كبير / ثقيل';
+        consolidations.push({
+          partNumber: simItem.part_number,
+          descriptionAr: simItem.description_ar,
+          descriptionEn: simItem.description_en,
+          family: fam,
+          categoryAr: simItem.category || categoryAr,
+          quantity: simItem.qty_remaining,
+          fromBin,
+          toBin: batch.shelfBin,
+          sizeProfile: sizeProf,
+          reason: isHeavyDest
+            ? `نقل قطعة ثقيلة جداً (${fam} — المقاس: ${sizeProf.mmLabel}) من ${fromBin} إلى رف الثقيلة ${batch.shelfBin} (دفعة #${batch.batchIndex}: ${batch.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف)`
+            : `تجميع الصنف المتشابه (${fam} — المقاس: ${sizeProf.mmLabel}) من ${fromBin} إلى الرف ${batch.shelfBin} (دفعة #${batch.batchIndex}: ${batch.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف)`,
+        });
+      }
+    }
 
     const totalPartsToMove = evictions.length + consolidations.length;
     const totalUnitsToMove =
@@ -715,13 +1352,17 @@ export function buildSimilaritySwapPlans(
     plans.push({
       id: `PLAN-${fam}-${targetBin}`,
       family: fam,
-      familyAr: FAMILY_ARABIC_NAMES[fam] || `عائلة ${fam}`,
+      familyAr: FAMILY_ARABIC_NAMES[fam] || `صنف ${fam}`,
+      categoryAr,
       zone: targetZone,
       targetBin,
-      targetElevation,
-      recommendedHeightBin,
-      recommendedHeightElevation,
+      recommendedBin,
+      maxItemsPerShelf: MAX_ITEMS_PER_SHELF,
+      shelfBatches,
       groupSizeCategory,
+      groupMmSummary,
+      groupTotalValueSar,
+      subGroupsBySizeAndMm,
       adjacentBins,
       existingMatchingInTarget,
       evictions,
@@ -729,354 +1370,156 @@ export function buildSimilaritySwapPlans(
       allGroupItemsSortedBySize,
       totalPartsToMove,
       totalUnitsToMove,
-      summaryReason: `خطة تجميع وترتيب عائلة (${FAMILY_ARABIC_NAMES[fam] || fam}) حسب الحجم (${groupSizeCategory}) في الموقع ${targetBin} (${targetElevation.shortLabelAr}): نقل ${consolidations.length} قطعة متشابهة لتنضم إلى ${existingMatchingInTarget.length} قطع موجودة.`,
+      summaryReason:
+        groupSizeCategory === 'كبير / ثقيل'
+          ? `خطة تجميع الصنف الثقيل جداً (${FAMILY_ARABIC_NAMES[fam] || fam} | المقاسات: ${groupMmSummary}) في مواقع الثقيلة D و C (${shelfBatches.map((b) => `${b.shelfBin}: ${b.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف`).join(' ، ')}).`
+          : `خطة تجميع متشابهات الصنف (${FAMILY_ARABIC_NAMES[fam] || fam}) حسب الحجم (${groupSizeCategory}) والمقاس بالملم (${groupMmSummary}) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف (${shelfBatches.map((b) => `${b.shelfBin}: ${b.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف`).join(' ، ')}).`,
     });
   }
 
-  return plans.sort(
-    (a, b) =>
-      b.allGroupItemsSortedBySize.length - a.allGroupItemsSortedBySize.length
-  );
+  return plans.sort((a, b) => {
+    const heavyA = a.groupSizeCategory === 'كبير / ثقيل' ? 1 : 0;
+    const heavyB = b.groupSizeCategory === 'كبير / ثقيل' ? 1 : 0;
+    if (heavyA !== heavyB) return heavyB - heavyA;
+    return b.allGroupItemsSortedBySize.length - a.allGroupItemsSortedBySize.length;
+  });
+}
+
+function detectMaterialArabic(descUpper: string): string {
+  if (descUpper.includes('INCONEL 718') || descUpper.includes('INCONEL')) return 'سبيكة إنكونيل مقاومة للحرارة (Inconel 718)';
+  if (descUpper.includes('STELLITE')) return 'سبيكة ستالايت صلبة (Stellite Gr.6)';
+  if (descUpper.includes('PEEK+ELGILOY') || descUpper.includes('ELGILOY')) return 'بوليمر PEEK + سبيكة إيلجيلوي';
+  if (descUpper.includes('316L') || descUpper.includes('316')) return 'ستانلس ستيل مقاوم للصدأ (SS 316/316L)';
+  if (descUpper.includes('304')) return 'ستانلس ستيل (SS 304)';
+  if (descUpper.includes('410') || descUpper.includes('4140') || descUpper.includes('1040') || descUpper.includes('1045')) return 'صلب سبائكي مقسى (Alloy Steel)';
+  if (descUpper.includes('BRONZE') || descUpper.includes('C93700')) return 'برونز صناعي (Bronze)';
+  if (descUpper.includes('CARBON STEEL')) return 'صلب كربوني (Carbon Steel)';
+  if (descUpper.includes('GRAPHITE') || descUpper.includes('CARBOGRAPHITE')) return 'جرافيت كربوني حراري (Graphite)';
+  if (descUpper.includes('VITON') || descUpper.includes('FKM') || descUpper.includes('FEPM')) return 'مطاط فيتون حراري (Viton / FKM)';
+  if (descUpper.includes('PTFE') || descUpper.includes('TEFLON')) return 'تفلون صناعي (PTFE)';
+  if (descUpper.includes('NITRILE') || descUpper.includes('NBR') || descUpper.includes('RUBBER') || descUpper.includes('EPDM')) return 'مطاط صناعي مانع للتسرب';
+  if (descUpper.includes('PLASTIC') || descUpper.includes('CPVC') || descUpper.includes('NYLON')) return 'بوليمر بلاستيك هندسي';
+  return 'معدن صناعي قياسي';
 }
 
 /**
- * تحويل كسر البوصة (مثل 3/4 أو 1/2 أو 1.5) إلى قيمة عشرية بالبوصة
- */
-function parseInchValue(raw: string): number {
-  const clean = raw.trim();
-  if (clean.includes('/')) {
-    const [num, den] = clean.split('/').map((n) => parseFloat(n));
-    if (!isNaN(num) && !isNaN(den) && den !== 0) {
-      return num / den;
-    }
-  }
-  const val = parseFloat(clean);
-  return isNaN(val) ? 0 : val;
-}
-
-/**
- * المساعد الهندسي المحلي لحسبة المقاسات، تحويل الوحدات (بوصة ⬅ ملم/سم)، تقدير الوزن، والترجمة، واقتراح الرف الأنسب
+ * تحليل هندسي ومالي محلي فوري لأي قطعة (يشمل الترجمة، المقاس بالملم، الوزن، السعر بالريال، وتوجيه الثقيلة إلى D و C)
  */
 export function computeLocalPartEngineeringAnalysis(
-  item: Pick<InventoryItem, 'part_number' | 'description_en' | 'location_code'> & {
-    description_ar?: string;
-    qty_remaining?: number;
-  }
+  item: Partial<InventoryItem> & { part_number: string; description_en: string; location_code?: string }
 ): GeminiPartAnalysis {
-  const descEn = (item.description_en || '').trim();
-  const upper = descEn.toUpperCase();
-  const qty = Math.max(1, Number(item.qty_remaining ?? 1));
-  const { descAr: translatedAr } = categorizeAndTranslate(descEn);
-  const finalDescAr =
-    item.description_ar &&
-    /[\u0600-\u06FF]/.test(item.description_ar) &&
-    item.description_ar !== descEn
-      ? item.description_ar
-      : translatedAr;
+  const fullItem: InventoryItem = {
+    part_number: item.part_number || '1000000000',
+    location_code: (item.location_code || 'N11A1').trim().toUpperCase(),
+    description_en: item.description_en || 'SPARE PART ASMO',
+    description_ar: item.description_ar || '',
+    category: item.category || 'عام',
+    qty_total: item.qty_total ?? item.qty_remaining ?? 1,
+    qty_out: item.qty_out ?? 0,
+    qty_remaining: Math.max(1, item.qty_remaining ?? item.qty_total ?? 1),
+    is_moved: item.is_moved ?? 0,
+    status: item.status || 'غير مدقق',
+  };
 
-  const sizeProf = estimatePartSizeProfile({ description_en: descEn });
+  const sizeProf = estimatePartSizeProfile(fullItem);
+  const { descAr } = categorizeAndTranslate(fullItem.description_en);
+  const finalDescAr = fullItem.description_ar && /[\u0600-\u06FF]/.test(fullItem.description_ar) ? fullItem.description_ar : descAr;
+  const descUpper = fullItem.description_en.toUpperCase();
+  const materialAr = detectMaterialArabic(descUpper);
 
-  // 1. حسبة المقاسات التفصيلية وتحويل الوحدات (بوصة ⬅ ملم وسم)
-  const calcParts: string[] = [];
+  const unitWeightKg =
+    sizeProf.sizeCategory === 'كبير / ثقيل'
+      ? Math.round((8 + (sizeProf.sizeScore - 60) * 0.45) * 10) / 10
+      : sizeProf.sizeCategory === 'متوسط الحجم'
+      ? Math.round((1.2 + (sizeProf.sizeScore - 35) * 0.14) * 10) / 10
+      : Math.round(Math.max(0.05, sizeProf.sizeScore * 0.02) * 100) / 100;
+  const totalWeightKg = Math.round(unitWeightKg * fullItem.qty_remaining * 10) / 10;
 
-  // القطر الخارجي والداخلي والسماكة والطول والعرض بالمليمتر
-  const odMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*OD\b/);
-  if (odMatch) {
-    const mm = parseFloat(odMatch[1]);
-    calcParts.push(`القطر الخارجي (OD): ${mm} ملم (${(mm / 10).toFixed(1)} سم)`);
-  }
-  const idMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*ID\b/);
-  if (idMatch) {
-    const mm = parseFloat(idMatch[1]);
-    calcParts.push(`القطر الداخلي (ID): ${mm} ملم (${(mm / 10).toFixed(1)} سم)`);
-  }
-  const thkMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*THK\b/);
-  if (thkMatch) {
-    const mm = parseFloat(thkMatch[1]);
-    calcParts.push(`السماكة (THK): ${mm} ملم`);
-  }
-  const lgMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*LG\b/);
-  if (lgMatch) {
-    const mm = parseFloat(lgMatch[1]);
-    calcParts.push(`الطول (LG): ${mm} ملم (${(mm / 10).toFixed(1)} سم)`);
-  }
-  const wdMatch = upper.match(/(\d+(?:\.\d+)?)\s*MM\s*WD\b/);
-  if (wdMatch) {
-    const mm = parseFloat(wdMatch[1]);
-    calcParts.push(`العرض (WD): ${mm} ملم`);
-  }
+  const zonePrefix = zone(fullItem.location_code) || 'N11';
+  let recommendedShelfCode: 'D' | 'C' | 'A' | 'B' | 'BB' | 'FL' = 'B';
+  let recommendedBin = fullItem.location_code;
+  let placementReasonAr = '';
 
-  // أي أبعاد عامة بالمليمتر لم تذكر أعلاه
-  if (calcParts.length === 0) {
-    const genericMm = Array.from(upper.matchAll(/(\d+(?:\.\d+)?)\s*MM\b/g));
-    for (const m of genericMm) {
-      const mm = parseFloat(m[1]);
-      if (!isNaN(mm)) {
-        calcParts.push(`المقاس: ${mm} ملم (${(mm / 10).toFixed(2)} سم / ${(mm / 25.4).toFixed(2)} بوصة)`);
-      }
-    }
-  }
-
-  // تحويل المساحة بالبوصة المربعة (SQ IN) إلى سم²
-  const sqInMatch = upper.match(/(\d+(?:\.\d+)?)\s*SQ\s*IN\b/);
-  if (sqInMatch) {
-    const sqIn = parseFloat(sqInMatch[1]);
-    const sqCm = (sqIn * 6.4516).toFixed(1);
-    calcParts.push(`مساحة المشغل: ${sqIn} بوصة مربعة = ${sqCm} سم²`);
-  }
-
-  // تحويل البوصة (IN) إلى مليمتر وسنتيمتر
-  const inMatches = Array.from(upper.matchAll(/\b(\d+(?:\/\d+|\.\d+)?)\s*IN\b/g));
-  for (const m of inMatches) {
-    if (upper.includes(`${m[1]} SQ IN`)) continue;
-    const inchVal = parseInchValue(m[1]);
-    if (inchVal > 0) {
-      const mmVal = (inchVal * 25.4).toFixed(1);
-      const cmVal = (inchVal * 2.54).toFixed(2);
-      calcParts.push(`المقاس بالبوصة: ${m[1]} بوصة = ${mmVal} ملم (${cmVal} سم)`);
-    }
-  }
-
-  // مقاس القلاووظ المليمتري مثل M10 X 45
-  const threadMatch = upper.match(/\bM(\d+)\s*X\s*(\d+)\b/);
-  if (threadMatch) {
-    calcParts.push(`قلاووظ متري: قطر ${threadMatch[1]} ملم × طول ${threadMatch[2]} ملم`);
-  }
-
-  // القدرات الكهربائية والضغط
-  const ampMatch = upper.match(/\b(\d+)\s*A\b/);
-  if (ampMatch) {
-    calcParts.push(`قدرة التيار: ${ampMatch[1]} أمبير`);
-  }
-  const voltMatch = upper.match(/\b(\d+)\s*(VDC|VAC|V)\b/);
-  if (voltMatch) {
-    calcParts.push(`الجهد الكهربائي: ${voltMatch[1]} ${voltMatch[2] === 'VDC' ? 'فولت مستمر' : 'فولت متردد'}`);
-  }
-  const barMatch = upper.match(/(\d+\s*-\s*\d+|\d+)\s*BAR\b/);
-  if (barMatch) {
-    calcParts.push(`نطاق الضغط: ${barMatch[1]} بار`);
-  }
-
-  const dimensionsCalculationAr =
-    calcParts.length > 0
-      ? calcParts.join(' | ')
-      : `مقاس صناعي قياسي (${sizeProf.dimensionsLabel})`;
-
-  // 2. استخلاص نوع المعدن/المادة وتقدير الكثافة والوزن
-  let materialAr = 'سبائك معدنية صناعية';
-  let densityFactor = 1.0;
-
-  if (upper.includes('316') || upper.includes('304') || upper.includes('410') || upper.includes('STAINLESS')) {
-    materialAr = 'فولاذ مقاوم للصدأ (ستانلس ستيل)';
-    densityFactor = 1.35;
-  } else if (upper.includes('CAST IRON')) {
-    materialAr = 'حديد زهر عالي الكثافة';
-    densityFactor = 1.5;
-  } else if (upper.includes('NITRONIC') || upper.includes('INCONEL') || upper.includes('STELLITE')) {
-    materialAr = 'سبيكة خاصة عالية الصلابة مقاومة للتآكل والحرارة';
-    densityFactor = 1.4;
-  } else if (upper.includes('BRONZE') || upper.includes('BRASS') || upper.includes('COPPER')) {
-    materialAr = 'سبيكة برونز / نحاس صناعي';
-    densityFactor = 1.3;
-  } else if (upper.includes('STEEL') || upper.includes('B7') || upper.includes('4140')) {
-    materialAr = 'صلب كربوني معالج حرارياً';
-    densityFactor = 1.25;
-  } else if (upper.includes('CARBOGRAPHITE') || upper.includes('CARBON') || upper.includes('GRAFOIL')) {
-    materialAr = 'كربون جرافيتي صناعي';
-    densityFactor = 0.55;
-  } else if (upper.includes('PTFE') || upper.includes('RPTFE') || upper.includes('TEFLON')) {
-    materialAr = 'تفلون حراري (PTFE)';
-    densityFactor = 0.3;
-  } else if (upper.includes('NEOPRENE') || upper.includes('NITRILE') || upper.includes('VITON') || upper.includes('RUBBER')) {
-    materialAr = 'مطاط صناعي مانع للتسرب';
-    densityFactor = 0.15;
-  } else if (upper.includes('NYLON') || upper.includes('PLASTIC')) {
-    materialAr = 'نايلون / بوليمر خفيف';
-    densityFactor = 0.1;
-  } else if (upper.includes('ARAMID') || upper.includes('KLINGERSIL')) {
-    materialAr = 'ألياف أراميد / كلينجرسيل مانعة للتسرب';
-    densityFactor = 0.2;
-  }
-
-  // تقدير الوزن بالكيلوجرام للقطعة الواحدة بناءً على درجة الحجم والكثافة
-  let unitWeightKg = 0.8;
-  if (sizeProf.sizeScore >= 75) {
-    unitWeightKg = +(8.5 * densityFactor + (sizeProf.sizeScore - 70) * 0.45).toFixed(2);
-  } else if (sizeProf.sizeScore >= 65) {
-    unitWeightKg = +(4.2 * densityFactor + (sizeProf.sizeScore - 60) * 0.25).toFixed(2);
-  } else if (sizeProf.sizeScore >= 45) {
-    unitWeightKg = +(1.4 * densityFactor + (sizeProf.sizeScore - 40) * 0.08).toFixed(2);
-  } else if (sizeProf.sizeScore >= 30) {
-    unitWeightKg = +(0.35 * densityFactor).toFixed(2);
-  } else {
-    unitWeightKg = +(Math.max(0.02, 0.12 * densityFactor)).toFixed(3);
-  }
-
-  const totalWeightKg = +(unitWeightKg * qty).toFixed(2);
-  const weightLabelAr =
-    unitWeightKg >= 1
-      ? `القطعة ~${unitWeightKg} كجم (الإجمالي للكمية ${qty}: ~${totalWeightKg} كجم)`
-      : `القطعة ~${Math.round(unitWeightKg * 1000)} جرام (الإجمالي للكمية ${qty}: ~${totalWeightKg} كجم)`;
-
-  // 3. تحديد الرف والموقع الأنسب حسب الوزن والحجم (FL=0م، A=1م، B=2م، BB=3م، C=4م، D=5م)
-  const currentBin = (item.location_code || 'N11A1').trim().toUpperCase();
-  const currentElevation = parseShelfElevation(currentBin);
-  const currentZone = zone(currentBin) || 'N11';
-  const currentSubBinMatch = currentBin.match(/(\d+)$/);
-  const subBinDigit = currentSubBinMatch ? currentSubBinMatch[1] : '1';
-
-  let recommendedShelfCode: 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D' = 'B';
-  if (unitWeightKg >= 9 || sizeProf.sizeScore >= 74) {
-    recommendedShelfCode = 'FL';
-  } else if (unitWeightKg >= 4 || sizeProf.sizeScore >= 65) {
+  if (sizeProf.sizeCategory === 'كبير / ثقيل') {
+    const useCShelf = sizeProf.sizeScore < 72 || isCLocation(fullItem.location_code);
+    recommendedShelfCode = useCShelf ? 'C' : 'D';
+    recommendedBin = isHeavyDutyDOrCLocation(fullItem.location_code)
+      ? fullItem.location_code
+      : `${zonePrefix}${recommendedShelfCode}1`;
+    placementReasonAr = `قطعة ثقيلة جداً (${unitWeightKg} كجم | المقاس: ${sizeProf.mmLabel}) — توجه إلى مواقع القطع الثقيلة (D و C) في (${recommendedBin}) مع التزام سقف ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف.`;
+  } else if (sizeProf.priceCategory === 'أغلى سعراً / قيمة عالية') {
     recommendedShelfCode = 'A';
-  } else if (unitWeightKg >= 1.5 || sizeProf.sizeScore >= 48) {
-    recommendedShelfCode = 'B';
-  } else if (unitWeightKg >= 0.45 || sizeProf.sizeScore >= 38) {
-    recommendedShelfCode = 'BB';
-  } else if (unitWeightKg >= 0.12 || sizeProf.sizeScore >= 25) {
-    recommendedShelfCode = 'C';
+    recommendedBin = `${zonePrefix}A1`;
+    placementReasonAr = `قطعة عالية القيمة (${sizeProf.estimatedPriceSar.toLocaleString()} ر.س للقطعة) — يوصى بتجميعها في رف القطع الأغلى سعراً (${recommendedBin}) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً في الرف.`;
   } else {
-    recommendedShelfCode = 'D';
+    recommendedShelfCode = sizeProf.sizeCategory === 'متوسط الحجم' ? 'B' : 'BB';
+    placementReasonAr = `تجميع مع المتشابهات من نفس الصنف والحجم والمقاس بالملم (${sizeProf.mmLabel}) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف.`;
   }
-
-  // إذا كان الرف الحالي يقع أصلاً ضمن النطاق المسموح به للقطعة نحافظ عليه لتجنب النقل غير الضروري
-  const isCurrentHeightIdeal =
-    sizeProf.recommendedShelves.includes(currentElevation.shelfCode as any) &&
-    Math.abs(currentElevation.meters - parseShelfElevation(`${currentZone}${recommendedShelfCode}1`).meters) <= 1;
-
-  const finalShelfCode = isCurrentHeightIdeal
-    ? (currentElevation.shelfCode as 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D')
-    : recommendedShelfCode;
-
-  const recommendedBin = isCurrentHeightIdeal
-    ? currentBin
-    : `${currentZone}${finalShelfCode}${subBinDigit}`;
-  const recommendedElevation = parseShelfElevation(recommendedBin);
-
-  const placementReasonAr = isCurrentHeightIdeal
-    ? `✓ الموقع الحالي (${currentBin} — ${currentElevation.shortLabelAr}) مناسب تماماً لحجم القطعة (${sizeProf.sizeCategory}) ووزنها (~${unitWeightKg >= 1 ? `${unitWeightKg} كجم` : `${Math.round(unitWeightKg * 1000)} جم`}).`
-    : `يُنصح بنقلها من (${currentBin} — ${currentElevation.shortLabelAr}) إلى (${recommendedBin} — ${recommendedElevation.shortLabelAr}) لأنها (${sizeProf.sizeCategory} بوزن ~${unitWeightKg >= 1 ? `${unitWeightKg} كجم` : `${Math.round(unitWeightKg * 1000)} جم`}) والرف ${finalShelfCode} (${recommendedElevation.meters === 0 ? 'على الأرض 0م' : `ارتفاع ${recommendedElevation.meters}م`}) هو الأنسب لسلامة التخزين.`;
 
   return {
-    part_number: item.part_number,
-    description_en: descEn,
+    part_number: fullItem.part_number,
+    description_en: fullItem.description_en,
     description_ar: finalDescAr,
-    dimensions_calculation_ar: dimensionsCalculationAr,
+    dimensions_calculation_ar: sizeProf.dimensionsLabel,
     material_ar: materialAr,
     estimated_weight_kg: unitWeightKg,
     total_weight_kg: totalWeightKg,
-    weight_label_ar: weightLabelAr,
+    weight_label_ar: `القطعة ~${unitWeightKg} كجم | الإجمالي ~${totalWeightKg} كجم`,
+    estimated_price_sar: sizeProf.estimatedPriceSar,
+    total_value_sar: sizeProf.totalValueSar,
+    price_label_ar: sizeProf.priceLabelAr,
+    price_category: sizeProf.priceCategory,
     size_category: sizeProf.sizeCategory,
-    current_bin: currentBin,
-    current_elevation: currentElevation,
-    recommended_shelf_code: finalShelfCode,
+    current_bin: fullItem.location_code,
+    recommended_shelf_code: recommendedShelfCode,
     recommended_bin: recommendedBin,
-    recommended_elevation: recommendedElevation,
     placement_reason_ar: placementReasonAr,
     source: 'engineering-engine',
   };
 }
 
-/**
- * استدعاء مساعد جمني الذكي (/api/gemini/analyze-parts) مع الدمج الفوري بالحاسبة الهندسية المحلية
- */
 export async function analyzePartsWithGeminiAssistant(
-  items: Array<
-    Pick<InventoryItem, 'part_number' | 'description_en' | 'location_code'> & {
-      description_ar?: string;
-      qty_remaining?: number;
-    }
-  >
+  items: Array<Partial<InventoryItem> & { part_number: string; description_en: string; location_code?: string }>
 ): Promise<GeminiPartAnalysis[]> {
-  if (!items || items.length === 0) return [];
-
-  // حساب التحليل الهندسي المحلي أولاً كأساس فوري ودقيق
-  const localResults = items.map((item) => computeLocalPartEngineeringAnalysis(item));
+  const localAnalyses = items.map((item) => computeLocalPartEngineeringAnalysis(item));
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return localAnalyses;
+  }
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 18000);
-
-    const response = await fetch('/api/gemini/analyze-parts', {
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const res = await fetch('/api/gemini/analyze-parts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        parts: items.slice(0, 45).map((i) => ({
-          part_number: i.part_number,
-          description_en: i.description_en,
-          location_code: i.location_code,
-          quantity: i.qty_remaining ?? 1,
-        })),
-      }),
+      body: JSON.stringify({ parts: items.slice(0, 45) }),
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
-
-    if (!response.ok) return localResults;
-    const data = await response.json();
-    if (!data || !data.success || !Array.isArray(data.analyses) || data.analyses.length === 0) {
-      return localResults;
-    }
-
-    const aiByPart = new Map<string, any>();
-    for (const row of data.analyses) {
-      if (row && row.part_number) {
-        aiByPart.set(String(row.part_number).trim(), row);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.success && Array.isArray(data.analyses) && data.analyses.length > 0) {
+        const aiMap = new Map<string, any>();
+        for (const a of data.analyses) {
+          if (a?.part_number) aiMap.set(String(a.part_number), a);
+        }
+        return localAnalyses.map((loc) => {
+          const ai = aiMap.get(loc.part_number);
+          if (!ai) return loc;
+          return {
+            ...loc,
+            description_ar: ai.description_ar || loc.description_ar,
+            dimensions_calculation_ar: ai.dimensions_calculation_ar || loc.dimensions_calculation_ar,
+            material_ar: ai.material_ar || loc.material_ar,
+            source: 'gemini-ai',
+          };
+        });
       }
     }
-
-    return localResults.map((local, idx) => {
-      const aiRow = aiByPart.get(local.part_number) || data.analyses[idx];
-      if (!aiRow) return local;
-
-      const validShelf = ['FL', 'A', 'B', 'BB', 'C', 'D'].includes(
-        String(aiRow.recommended_shelf_code || '').toUpperCase()
-      )
-        ? (String(aiRow.recommended_shelf_code).toUpperCase() as 'FL' | 'A' | 'B' | 'BB' | 'C' | 'D')
-        : local.recommended_shelf_code;
-
-      const currentZone = zone(local.current_bin) || 'N11';
-      const recBin =
-        aiRow.recommended_bin && /^[A-Z]\d{2}(FL|BB|A|B|C|D)\d*$/i.test(String(aiRow.recommended_bin).trim())
-          ? String(aiRow.recommended_bin).trim().toUpperCase()
-          : `${currentZone}${validShelf}1`;
-
-      const unitWeight =
-        typeof aiRow.estimated_weight_kg === 'number' && aiRow.estimated_weight_kg > 0
-          ? +aiRow.estimated_weight_kg.toFixed(2)
-          : local.estimated_weight_kg;
-
-      return {
-        ...local,
-        description_ar:
-          aiRow.description_ar && /[\u0600-\u06FF]/.test(aiRow.description_ar)
-            ? String(aiRow.description_ar).trim()
-            : local.description_ar,
-        dimensions_calculation_ar:
-          aiRow.dimensions_calculation_ar && aiRow.dimensions_calculation_ar.length > 3
-            ? String(aiRow.dimensions_calculation_ar).trim()
-            : local.dimensions_calculation_ar,
-        material_ar:
-          aiRow.material_ar && aiRow.material_ar.length > 2
-            ? String(aiRow.material_ar).trim()
-            : local.material_ar,
-        estimated_weight_kg: unitWeight,
-        weight_label_ar:
-          aiRow.weight_label_ar && aiRow.weight_label_ar.length > 3
-            ? String(aiRow.weight_label_ar).trim()
-            : local.weight_label_ar,
-        recommended_shelf_code: validShelf,
-        recommended_bin: recBin,
-        recommended_elevation: parseShelfElevation(recBin),
-        placement_reason_ar:
-          aiRow.placement_reason_ar && aiRow.placement_reason_ar.length > 4
-            ? String(aiRow.placement_reason_ar).trim()
-            : local.placement_reason_ar,
-        source: 'gemini-ai',
-      };
-    });
   } catch {
-    return localResults;
+    // استخدام المحلل الهندسي والمالي المحلي الفوري
   }
+
+  return localAnalyses;
 }
+
