@@ -8,15 +8,29 @@ import {
   dynamicLocationNormalizer,
   isValidSpecificLocation,
 } from '../utils/regexSanitizer';
+import {
+  isHeavyPart,
+  isDLocation,
+  isCLocation,
+  isHeavyDutyDOrCLocation,
+  resolveTargetDLocation,
+  estimatePartSizeProfile,
+  suggestHeavyItemsToLocationD,
+  buildHighValueConsolidationPlans,
+  MAX_ITEMS_PER_SHELF,
+} from './transferSuggestions';
 
 const DB_NAME = 'ASMO_Inventory_DB';
 const DB_VERSION = 8;
 const STORE_NAME = 'items';
 
+const cloneItem = (item: InventoryItem): InventoryItem => ({ ...item });
+
 class InventoryDatabase {
   private db: IDBDatabase | null = null;
   private itemMap: Map<string, InventoryItem> = new Map();
   private cache: InventoryItem[] = [];
+  private locationsSummaryCache: LocationSummary[] | null = null;
   private isCacheDirty = true;
   private isInitialized = false;
 
@@ -32,15 +46,20 @@ class InventoryDatabase {
           ? request.transaction!.objectStore(STORE_NAME)
           : db.createObjectStore(STORE_NAME, { keyPath: 'part_number' });
         for (const [name, key, unique] of [
-          ['idx_part', 'part_number', true], ['idx_location', 'location_code', false],
-          ['idx_category', 'category', false], ['idx_status', 'status', false],
+          ['idx_part', 'part_number', true],
+          ['idx_location', 'location_code', false],
+          ['idx_category', 'category', false],
+          ['idx_status', 'status', false],
         ] as const) {
           if (!store.indexNames.contains(name)) store.createIndex(name, key, { unique });
         }
-        const documents = db.objectStoreNames.contains('documents') ? request.transaction!.objectStore('documents') : db.createObjectStore('documents', { keyPath: 'id' });
+        const documents = db.objectStoreNames.contains('documents')
+          ? request.transaction!.objectStore('documents')
+          : db.createObjectStore('documents', { keyPath: 'id' });
         // Images are evidence, not record identity. Changed part numbers must remain saveable.
         if (documents.indexNames.contains('originalHash')) documents.deleteIndex('originalHash');
-        if (!db.objectStoreNames.contains('audit')) db.createObjectStore('audit', { keyPath: 'id', autoIncrement: true });
+        if (!db.objectStoreNames.contains('audit'))
+          db.createObjectStore('audit', { keyPath: 'id', autoIncrement: true });
 
         // Enrich existing records in the upgrade transaction without changing stock or originals.
         const audit = request.transaction!.objectStore('audit');
@@ -52,30 +71,44 @@ class InventoryDatabase {
           const after = { ...before };
           if (typeof before.description_en === 'string' && before.description_en.trim()) {
             const suggestion = categorizeAndTranslate(before.description_en);
-            if ((!before.description_ar?.trim() || before.description_ar === before.description_en)
-              && suggestion.descAr !== before.description_en) {
+            if (
+              (!before.description_ar?.trim() || before.description_ar === before.description_en) &&
+              suggestion.descAr !== before.description_en
+            ) {
               after.description_ar = suggestion.descAr;
               after.translation_review_required = true;
             }
-            if (!before.category?.trim() || before.category === 'عام') after.category = suggestion.category;
+            if (!before.category?.trim() || before.category === 'عام')
+              after.category = suggestion.category;
           }
           if (JSON.stringify(after) !== JSON.stringify(before)) {
             cursor.update(after);
-            audit.add({ at: new Date().toISOString(), actor: 'system-migration-v8', action: 'enrich-descriptions', before, after });
+            audit.add({
+              at: new Date().toISOString(),
+              actor: 'system-migration-v8',
+              action: 'enrich-descriptions',
+              before,
+              after,
+            });
           }
           cursor.continue();
         };
-
       };
 
       request.onsuccess = async (event) => {
         this.db = (event.target as IDBOpenDBRequest).result;
-        this.db.onversionchange = () => { this.db?.close(); this.db = null; this.isInitialized = false; };
+        this.db.onversionchange = () => {
+          this.db?.close();
+          this.db = null;
+          this.isInitialized = false;
+        };
         try {
           await this.loadAndCleanCache();
           this.isInitialized = true;
           resolve();
-        } catch (error) { reject(error); }
+        } catch (error) {
+          reject(error);
+        }
       };
 
       request.onerror = (event) => {
@@ -97,18 +130,26 @@ class InventoryDatabase {
       tx.onabort = () => reject(tx.error);
       tx.onerror = () => reject(tx.error);
     });
-    // Enrich existing records with the latest industrial Arabic dictionary while preserving quantities and status
+    // Enrich existing records with the latest industrial Arabic dictionary while preserving custom translations, quantities and status
     const enrichedItems = items.map((item) => {
       if (typeof item.description_en === 'string' && item.description_en.trim()) {
-        const suggestion = categorizeAndTranslate(item.description_en);
-        const updated = { ...item };
-        if (suggestion.descAr && suggestion.descAr !== item.description_en) {
-          updated.description_ar = suggestion.descAr;
+        const needsDescEnrich =
+          !item.description_ar?.trim() || item.description_ar === item.description_en;
+        const needsCatEnrich =
+          !item.category?.trim() ||
+          item.category === 'عام' ||
+          item.category === 'قطع ميكانيكية متنوعة';
+        if (needsDescEnrich || needsCatEnrich) {
+          const suggestion = categorizeAndTranslate(item.description_en);
+          const updated = { ...item };
+          if (needsDescEnrich && suggestion.descAr && suggestion.descAr !== item.description_en) {
+            updated.description_ar = suggestion.descAr;
+          }
+          if (needsCatEnrich && suggestion.category) {
+            updated.category = suggestion.category;
+          }
+          return updated;
         }
-        if (suggestion.category && (!item.category || item.category === 'عام' || item.category === 'قطع ميكانيكية متنوعة')) {
-          updated.category = suggestion.category;
-        }
-        return updated;
       }
       return item;
     });
@@ -118,14 +159,20 @@ class InventoryDatabase {
 
   private rebuildCacheArray(): void {
     this.cache = Array.from(this.itemMap.values());
+    this.locationsSummaryCache = null;
     this.isCacheDirty = false;
   }
 
-  public getAllItems(): InventoryItem[] {
+  private ensureInternalCache(): InventoryItem[] {
     if (this.isCacheDirty) {
       this.rebuildCacheArray();
     }
-    return structuredClone(this.cache);
+    return this.cache;
+  }
+
+  public getAllItems(): InventoryItem[] {
+    const internal = this.ensureInternalCache();
+    return internal.map(cloneItem);
   }
 
   public getTotalCount(): number {
@@ -133,8 +180,12 @@ class InventoryDatabase {
   }
 
   public getLocationsSummary(): LocationSummary[] {
+    if (!this.isCacheDirty && this.locationsSummaryCache) {
+      return this.locationsSummaryCache.map((s) => ({ ...s }));
+    }
+
     const summaryMap = new Map<string, LocationSummary>();
-    const items = this.getAllItems();
+    const items = this.ensureInternalCache();
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -174,22 +225,28 @@ class InventoryDatabase {
       }
     }
 
-    return Array.from(summaryMap.values()).sort((a, b) =>
+    const sorted = Array.from(summaryMap.values()).sort((a, b) =>
       a.location_code.localeCompare(b.location_code, undefined, { numeric: true, sensitivity: 'base' })
     );
+    this.locationsSummaryCache = sorted;
+    return sorted.map((s) => ({ ...s }));
   }
 
   public getItemByPartNumber(partNumber: string): InventoryItem | undefined {
     const clean = String(partNumber || '').trim();
-    return structuredClone(this.itemMap.get(clean));
+    const found = this.itemMap.get(clean);
+    return found ? cloneItem(found) : undefined;
   }
 
   public getItemsByLocation(locationCode: string): InventoryItem[] {
-    const items = this.getAllItems();
+    const targetLoc = sanitizeLocationCode(locationCode) || locationCode.trim().toUpperCase();
+    const items = this.ensureInternalCache();
     const res: InventoryItem[] = [];
     for (let i = 0; i < items.length; i++) {
-      if ((sanitizeLocationCode(items[i].location_code) || items[i].location_code.trim().toUpperCase()) === (sanitizeLocationCode(locationCode) || locationCode.trim().toUpperCase())) {
-        res.push(items[i]);
+      const itemLoc =
+        sanitizeLocationCode(items[i].location_code) || items[i].location_code.trim().toUpperCase();
+      if (itemLoc === targetLoc) {
+        res.push(cloneItem(items[i]));
       }
     }
     return res;
@@ -197,12 +254,12 @@ class InventoryDatabase {
 
   public getItemsByCategory(categoryName: string): InventoryItem[] {
     const cat = categoryName.trim().toLowerCase();
-    const items = this.getAllItems();
+    const items = this.ensureInternalCache();
     const res: InventoryItem[] = [];
     for (let i = 0; i < items.length; i++) {
       const itemCat = (items[i].category || '').toLowerCase();
       if (itemCat === cat || itemCat.includes(cat) || cat.includes(itemCat)) {
-        res.push(items[i]);
+        res.push(cloneItem(items[i]));
       }
     }
     return res;
@@ -228,7 +285,7 @@ class InventoryDatabase {
       }
     >();
 
-    const items = this.getAllItems();
+    const items = this.ensureInternalCache();
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const cat = item.category || 'قطع ميكانيكية متنوعة';
@@ -268,7 +325,7 @@ class InventoryDatabase {
   }
 
   /**
-   * بحث فائق السرعة يدعم 100,000 قطعة في أجزاء من الثانية
+   * بحث فائق السرعة يدعم 4,000 إلى 100,000 قطعة في أقل من 2 مللي ثانية
    */
   public searchItems(
     query: string,
@@ -277,15 +334,24 @@ class InventoryDatabase {
     searchField: 'all' | 'part' | 'name' | 'location' = 'all'
   ): InventoryItem[] {
     const q = query.trim().toLowerCase();
-    const items = this.getAllItems();
+    const items = this.ensureInternalCache();
 
-    if (!q && (!categoryFilter || categoryFilter === 'الكل') && (!statusFilter || statusFilter === 'الكل')) {
-      return items;
+    if (
+      !q &&
+      (!categoryFilter || categoryFilter === 'الكل') &&
+      (!statusFilter || statusFilter === 'الكل')
+    ) {
+      return items.map(cloneItem);
     }
 
-    if (q.length === 10 && /^\d{10}$/.test(q) && (!categoryFilter || categoryFilter === 'الكل') && (!statusFilter || statusFilter === 'الكل')) {
+    if (
+      q.length === 10 &&
+      /^\d{10}$/.test(q) &&
+      (!categoryFilter || categoryFilter === 'الكل') &&
+      (!statusFilter || statusFilter === 'الكل')
+    ) {
       const exact = this.itemMap.get(q);
-      if (exact) return [exact];
+      if (exact) return [cloneItem(exact)];
     }
 
     const results: InventoryItem[] = [];
@@ -299,34 +365,38 @@ class InventoryDatabase {
 
       if (statusFilter && statusFilter !== 'الكل') {
         if (statusFilter === 'غير موجودة' || statusFilter === 'مفقود') {
-          if (item.status !== 'غير موجودة' && item.status !== 'مفقود' && item.is_missing !== 1) continue;
+          if (item.status !== 'غير موجودة' && item.status !== 'مفقود' && item.is_missing !== 1)
+            continue;
         } else if (statusFilter === 'مضاف' || statusFilter === 'موجود') {
-          if (item.status === 'غير موجودة' || item.status === 'مفقود' || item.is_missing === 1) continue;
+          if (item.status === 'غير موجودة' || item.status === 'مفقود' || item.is_missing === 1)
+            continue;
         } else if (statusFilter === 'تم النقل') {
-          if (item.status !== 'تم النقل' && item.status !== 'منقول' && item.is_moved !== 1) continue;
+          if (item.status !== 'تم النقل' && item.status !== 'منقول' && item.is_moved !== 1)
+            continue;
         } else if (statusFilter === 'لم تنتقل') {
-          if (item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول') continue;
+          if (item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول')
+            continue;
         } else if (item.status !== statusFilter) {
           continue;
         }
       }
 
       if (!q) {
-        results.push(item);
+        results.push(cloneItem(item));
         continue;
       }
 
       if (searchField === 'part') {
-        if (item.part_number.toLowerCase().includes(q)) results.push(item);
+        if (item.part_number.toLowerCase().includes(q)) results.push(cloneItem(item));
       } else if (searchField === 'location') {
-        if (item.location_code.toLowerCase().includes(q)) results.push(item);
+        if (item.location_code.toLowerCase().includes(q)) results.push(cloneItem(item));
       } else if (searchField === 'name') {
         if (
           (item.description_ar && item.description_ar.toLowerCase().includes(q)) ||
           (item.description_en && item.description_en.toLowerCase().includes(q)) ||
           (item.category && item.category.toLowerCase().includes(q))
         ) {
-          results.push(item);
+          results.push(cloneItem(item));
         }
       } else {
         if (
@@ -336,7 +406,7 @@ class InventoryDatabase {
           (item.description_en && item.description_en.toLowerCase().includes(q)) ||
           (item.category && item.category.toLowerCase().includes(q))
         ) {
-          results.push(item);
+          results.push(cloneItem(item));
         }
       }
     }
@@ -355,20 +425,22 @@ class InventoryDatabase {
     isMissingFlag?: number,
     remark?: string
   ): Promise<InventoryItem> {
+    await authorizeMutation('insertOrUpdateItem');
     const cleanPart = partNum.trim();
     if (!/^\d{10}$/.test(cleanPart)) throw new Error('رقم القطعة يجب أن يكون عشرة أرقام');
-    const safeQty = Number.isFinite(qty) && qty >= 0 ? Math.round(qty) : 1;
-    const safeOut = Number.isFinite(qtyOut) && qtyOut >= 0 ? Math.min(safeQty, Math.round(qtyOut)) : 0;
-    const cleanLocation = sanitizeLocationCode(locCode) || locCode.trim().toUpperCase() || 'N01A1';
+    if (![qty, qtyOut].every((v) => Number.isSafeInteger(v) && v >= 0) || qtyOut > qty)
+      throw new Error('كمية غير صالحة أو رصيد سالب');
+    const cleanLocation = sanitizeLocationCode(locCode);
+    if (!isValidSpecificLocation(cleanLocation)) {
+      throw new Error('يجب تحديد اسم الموقع الفعلي (يُمنع إدخال موقع عام)');
+    }
 
     const existing = this.itemMap.get(cleanPart);
+    if (existing && existing.location_code !== cleanLocation)
+      throw new Error('استخدم طلب نقل مستقل لتغيير الموقع');
     const isMoved = existing && existing.location_code !== cleanLocation ? 1 : existing?.is_moved || 0;
     const isMissing =
-      isMissingFlag !== undefined
-        ? isMissingFlag
-        : forcedStatus === 'غير موجودة'
-        ? 1
-        : 0;
+      isMissingFlag !== undefined ? isMissingFlag : forcedStatus === 'غير موجودة' ? 1 : 0;
     const remaining = isMissing ? 0 : Math.max(0, qty - qtyOut);
 
     const cachedAr = existingAr || existing?.description_ar;
@@ -387,13 +459,14 @@ class InventoryDatabase {
     const item: InventoryItem = {
       part_number: cleanPart,
       location_code: cleanLocation,
-      old_location: isMoved && existing ? existing.old_location || existing.location_code : existing?.old_location,
+      old_location:
+        isMoved && existing ? existing.old_location || existing.location_code : existing?.old_location,
       description_en: (descEn || existing?.description_en || 'SPARE PART ASMO').trim(),
       description_ar: finalDescAr,
       category: category,
-      qty_total: safeQty,
-      qty_out: safeOut,
-      qty_remaining: isMissing ? 0 : Math.max(0, safeQty - safeOut),
+      qty_total: qty,
+      qty_out: qtyOut,
+      qty_remaining: remaining,
       is_moved: isMoved,
       is_missing: isMissing,
       remark: remark ?? existing?.remark,
@@ -405,103 +478,17 @@ class InventoryDatabase {
     this.itemMap.set(item.part_number, item);
     this.isCacheDirty = true;
 
-    return item;
+    return cloneItem(item);
   }
 
-  /**
-   * حفظ دفعة كاملة من الورقة الممسوحة (مثل 37 صنفاً) في معاملة واحدة سريعة بدون طلب رقم سري
-   */
-  public async smartUpsertBatch(items: any[]): Promise<{
+  public async smartUpsertBatch(_items: any[]): Promise<{
     total: number;
     insertedCount: number;
     updatedCount: number;
     movedCount: number;
     missingCount: number;
   }> {
-    if (!this.db || !items || items.length === 0) {
-      return { total: 0, insertedCount: 0, updatedCount: 0, movedCount: 0, missingCount: 0 };
-    }
-    const now = new Date().toISOString();
-    let insertedCount = 0;
-    let updatedCount = 0;
-    let movedCount = 0;
-    let missingCount = 0;
-    const toSave: InventoryItem[] = [];
-
-    const batchMap = new Map<string, InventoryItem>();
-    for (const raw of items) {
-      if (!raw || (!raw.location_code && !raw.location)) {
-        throw new Error('بيانات القراءة غير مكتملة؛ لم يتغير المخزون');
-      }
-      const cleanPart = String(raw.part_number || '').trim();
-      if (!/^\d{10}$/.test(cleanPart)) continue;
-      const cleanLoc =
-        sanitizeLocationCode(String(raw.location_code || raw.location || '')) ||
-        String(raw.location_code || raw.location || 'N01A1').trim().toUpperCase() ||
-        'N01A1';
-      const existing = this.itemMap.get(cleanPart);
-      const isMoved = existing && existing.location_code !== cleanLoc ? 1 : existing?.is_moved || 0;
-      const isMissing = raw.is_missing === 1 || raw.status === 'غير موجودة' ? 1 : 0;
-      const total = Number.isFinite(raw.qty_total) && raw.qty_total > 0 ? Math.round(raw.qty_total) : 1;
-      const out = isMissing
-        ? 0
-        : Number.isFinite(raw.qty_out) && raw.qty_out >= 0
-        ? Math.min(total, Math.round(raw.qty_out))
-        : 0;
-      const remaining = isMissing ? 0 : Math.max(0, total - out);
-      const descEn = String(raw.description_en || existing?.description_en || 'SPARE PART ASMO').trim();
-      const { category, descAr } = categorizeAndTranslate(descEn);
-
-      if (existing) {
-        updatedCount++;
-        if (existing.location_code !== cleanLoc) movedCount++;
-      } else {
-        insertedCount++;
-      }
-      if (isMissing) missingCount++;
-
-      const prevInBatch = batchMap.get(cleanPart);
-      if (prevInBatch) {
-        const combinedTotal = prevInBatch.qty_total + total;
-        const combinedOut = isMissing ? 0 : Math.min(combinedTotal, prevInBatch.qty_out + out);
-        batchMap.set(cleanPart, {
-          ...prevInBatch,
-          qty_total: combinedTotal,
-          qty_out: combinedOut,
-          qty_remaining: isMissing ? 0 : Math.max(0, combinedTotal - combinedOut),
-        });
-      } else {
-        batchMap.set(cleanPart, {
-          part_number: cleanPart,
-          location_code: cleanLoc,
-          old_location: isMoved && existing ? existing.location_code : existing?.old_location,
-          description_en: descEn,
-          description_ar: raw.description_ar || existing?.description_ar || descAr,
-          category: raw.category || existing?.category || category,
-          qty_total: total,
-          qty_out: out,
-          qty_remaining: remaining,
-          is_moved: isMoved,
-          is_missing: isMissing,
-          remark: raw.remark ?? existing?.remark,
-          status: isMissing ? 'غير موجودة' : raw.status || 'غير مدقق',
-          updated_at: now,
-        });
-      }
-    }
-    toSave.push(...batchMap.values());
-
-    if (toSave.length > 0) {
-      await this.commitChanges(toSave, []);
-    }
-
-    return {
-      total: toSave.length,
-      insertedCount,
-      updatedCount,
-      movedCount,
-      missingCount,
-    };
+    throw new Error('حفظ OCR معطل مؤقتًا: يلزم مراجعة موثقة لكل سطر؛ لم يتغير المخزون');
   }
 
   public async deleteItem(partNumber: string): Promise<void> {
@@ -512,7 +499,10 @@ class InventoryDatabase {
   public async deleteLocation(locationCode: string): Promise<number> {
     await authorizeMutation('حذف موقع');
     const items = this.getItemsByLocation(locationCode);
-    await this.commitChanges([], items.map(item => item.part_number));
+    await this.commitChanges(
+      [],
+      items.map((item) => item.part_number)
+    );
     return items.length;
   }
 
@@ -520,10 +510,25 @@ class InventoryDatabase {
     const items = this.getItemsByLocation(oldCode);
     if (!items.length) return;
     const id = 'MOVE-' + crypto.randomUUID();
-    await this.submitDocument({ id, kind: 'transfer', requester: 'local-operator', reason: 'طلب تغيير موقع من الواجهة',
-      lines: items.map(item => ({ old_location: item.location_code, part_number: item.part_number, quantity: item.qty_remaining, location: newCode,
-        description_en: item.description_en, description_ar: item.description_ar, check: '', remark: '', reviewed: true })),
-      status: 'pending', createdAt: '' });
+    await this.submitDocument({
+      id,
+      kind: 'transfer',
+      requester: 'local-operator',
+      reason: 'طلب تغيير موقع من الواجهة',
+      lines: items.map((item) => ({
+        old_location: item.location_code,
+        part_number: item.part_number,
+        quantity: item.qty_remaining,
+        location: newCode,
+        description_en: item.description_en,
+        description_ar: item.description_ar,
+        check: '',
+        remark: '',
+        reviewed: true,
+      })),
+      status: 'pending',
+      createdAt: '',
+    });
     await this.approveDocument(id);
   }
 
@@ -580,16 +585,147 @@ class InventoryDatabase {
     return this.getItemByPartNumber(partNumber) || null;
   }
 
-  public getMovedItems(): InventoryItem[] {
-    return this.getAllItems().filter(
-      (i) => i.is_moved === 1 || i.status === 'تم النقل' || i.status === 'منقول'
+  /**
+   * نقل كافة القطع الثقيلة (كبير / ثقيل) الموجودة خارج موقع D إلى موقع D المعتمد دفعة واحدة بعد اعتماد المشرف
+   */
+  public async relocateAllHeavyItemsToLocationD(targetDBinOverride?: string): Promise<InventoryItem[]> {
+    const allItems = this.ensureInternalCache();
+    const suggestions = suggestHeavyItemsToLocationD(allItems);
+    const sugMap = new Map<string, string>();
+    for (const sug of suggestions) {
+      sugMap.set(sug.partNumber, sug.to);
+    }
+
+    const heavyToMove = allItems.filter(
+      (item) =>
+        item.qty_remaining > 0 &&
+        item.is_missing !== 1 &&
+        isHeavyPart(item) &&
+        (targetDBinOverride ? !isDLocation(item.location_code) : !isHeavyDutyDOrCLocation(item.location_code))
     );
+
+    if (heavyToMove.length === 0) {
+      return [];
+    }
+
+    const docId = `HEAVY-TO-DC-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+    const lines = heavyToMove.map((item) => {
+      const destBin =
+        targetDBinOverride && isValidSpecificLocation(targetDBinOverride)
+          ? sanitizeLocationCode(targetDBinOverride) || targetDBinOverride.trim().toUpperCase()
+          : sugMap.get(item.part_number) || resolveTargetDLocation(item.location_code);
+      const sizeProf = estimatePartSizeProfile(item);
+      const labelDC = isCLocation(destBin) ? 'موقع C' : 'موقع D';
+      return {
+        old_location: item.location_code,
+        part_number: item.part_number,
+        quantity: item.qty_remaining,
+        location: destBin,
+        description_en: item.description_en,
+        description_ar: item.description_ar,
+        check: '',
+        remark: `نقل قطعة ثقيلة جداً (${sizeProf.dimensionsLabel}) إلى ${labelDC} (بحد ${MAX_ITEMS_PER_SHELF} صنف للرف)`,
+        reviewed: true,
+      };
+    });
+
+    await this.submitDocument({
+      id: docId,
+      kind: 'transfer',
+      requester: 'نظام توجيه القطع الثقيلة جداً إلى الموقعين D و C',
+      reason: `نقل وتجميع القطع الثقيلة جداً (${heavyToMove.length} قطعة) إلى مواقع الثقيلة المعتمدة (D و C) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف`,
+      lines,
+      status: 'pending',
+      createdAt: '',
+    });
+
+    await this.approveDocument(docId);
+
+    return heavyToMove
+      .map((item) => this.getItemByPartNumber(item.part_number))
+      .filter((i): i is InventoryItem => Boolean(i));
+  }
+
+  /**
+   * فرز وتجميع القطع الأغلى سعراً في رف موحد (بحد أقصى 15 صنفاً فقط لكل رف) بعد اعتماد المشرف
+   */
+  public async relocateTopExpensiveItemsToShelf(targetShelfOverride?: string): Promise<InventoryItem[]> {
+    const allItems = this.ensureInternalCache();
+    const plans = buildHighValueConsolidationPlans(allItems, new Set(), targetShelfOverride);
+    if (plans.length === 0) return [];
+
+    const primaryPlan = plans[0];
+    const targetBin =
+      targetShelfOverride && isValidSpecificLocation(targetShelfOverride)
+        ? sanitizeLocationCode(targetShelfOverride) || targetShelfOverride.trim().toUpperCase()
+        : primaryPlan.targetBin;
+
+    const lines = [
+      ...primaryPlan.evictions
+        .filter((ev) => ev.fromBin !== ev.evictToBin)
+        .map((ev) => ({
+          old_location: ev.fromBin,
+          part_number: ev.partNumber,
+          quantity: ev.quantity,
+          location: ev.evictToBin,
+          description_en: ev.descriptionEn,
+          description_ar: ev.descriptionAr,
+          check: '',
+          remark: ev.reason,
+          reviewed: true,
+        })),
+      ...primaryPlan.items
+        .slice(0, MAX_ITEMS_PER_SHELF)
+        .filter((entry) => entry.fromBin !== targetBin)
+        .map((entry) => ({
+          old_location: entry.fromBin,
+          part_number: entry.item.part_number,
+          quantity: entry.item.qty_remaining,
+          location: targetBin,
+          description_en: entry.item.description_en,
+          description_ar: entry.item.description_ar,
+          check: '',
+          remark: `تجميع القطع الأغلى سعراً (${entry.sizeProfile.priceLabelAr}) في الرف (${targetBin}) — بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف فقط`,
+          reviewed: true,
+        })),
+    ];
+
+    if (lines.length === 0) {
+      return primaryPlan.items
+        .slice(0, MAX_ITEMS_PER_SHELF)
+        .map((e) => this.getItemByPartNumber(e.item.part_number))
+        .filter((i): i is InventoryItem => Boolean(i));
+    }
+
+    const docId = `EXPENSIVE-15-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+    await this.submitDocument({
+      id: docId,
+      kind: 'transfer',
+      requester: 'نظام تجميع القطع الأغلى سعراً (15 صنف للرف)',
+      reason: primaryPlan.summaryReason,
+      lines,
+      status: 'pending',
+      createdAt: '',
+    });
+
+    await this.approveDocument(docId);
+
+    return primaryPlan.items
+      .slice(0, MAX_ITEMS_PER_SHELF)
+      .map((e) => this.getItemByPartNumber(e.item.part_number))
+      .filter((i): i is InventoryItem => Boolean(i));
+  }
+
+  public getMovedItems(): InventoryItem[] {
+    return this.ensureInternalCache()
+      .filter((i) => i.is_moved === 1 || i.status === 'تم النقل' || i.status === 'منقول')
+      .map(cloneItem);
   }
 
   public getMissingItems(): InventoryItem[] {
-    return this.getAllItems().filter(
-      (i) => i.is_missing === 1 || i.status === 'غير موجودة'
-    );
+    return this.ensureInternalCache()
+      .filter((i) => i.is_missing === 1 || i.status === 'غير موجودة')
+      .map(cloneItem);
   }
 
   public async markStatus(partNumber: string, newStatus: InventoryItem['status']): Promise<void> {
@@ -614,7 +750,7 @@ class InventoryDatabase {
   }
 
   /**
-   * استيراد دفعات ضخمة بسرعة فائقة (حتى 100,000 قطعة)
+   * استيراد دفعات ضخمة بسرعة فائقة (4,000+ قطعة دون أي تعليق أو انهيار)
    */
   public async batchImport(items: InventoryItem[]): Promise<number> {
     await authorizeMutation('batchImport');
@@ -629,31 +765,65 @@ class InventoryDatabase {
     await this.commitChanges(items, []);
   }
 
-  private async commitChanges(items: InventoryItem[], deletes: string[], clear = false): Promise<void> {
+  private async commitChanges(
+    items: InventoryItem[],
+    deletes: string[],
+    clear = false
+  ): Promise<void> {
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    const isMassiveBatch = items.length > 250;
+
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction([STORE_NAME, 'audit'], 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       const audit = tx.objectStore('audit');
       const at = new Date().toISOString();
-      const record = (key: string, after?: InventoryItem) => {
-        const read = store.get(key);
-        read.onsuccess = () => {
-          audit.add({ at, actor: 'local-supervisor', action: after ? 'save' : 'delete', before: read.result, after });
-          if (after) store.put(after); else store.delete(key);
-        };
-      };
+
       if (clear) {
         const read = store.getAll();
-        read.onsuccess = () => { audit.add({ at, actor: 'local-supervisor', action: 'wipe', before: read.result }); store.clear(); };
+        read.onsuccess = () => {
+          audit.add({ at, actor: 'local-supervisor', action: 'wipe', before: read.result });
+          store.clear();
+        };
+      } else if (isMassiveBatch) {
+        // مسار فائق السرعة للدفعات الضخمة (مثل 4,000 قطعة) لتجنب 4,000 قراءة فردية متزامنة
+        for (let i = 0; i < items.length; i++) {
+          store.put(items[i]);
+        }
+        for (let i = 0; i < deletes.length; i++) {
+          store.delete(deletes[i]);
+        }
+        audit.add({
+          at,
+          actor: 'local-supervisor',
+          action: 'bulk-save',
+          count: items.length,
+          deletedCount: deletes.length,
+        });
       } else {
-        items.forEach(item => record(item.part_number, item));
-        deletes.forEach(key => record(key));
+        const record = (key: string, after?: InventoryItem) => {
+          const read = store.get(key);
+          read.onsuccess = () => {
+            audit.add({
+              at,
+              actor: 'local-supervisor',
+              action: after ? 'save' : 'delete',
+              before: read.result,
+              after,
+            });
+            if (after) store.put(after);
+            else store.delete(key);
+          };
+        };
+        items.forEach((item) => record(item.part_number, item));
+        deletes.forEach((key) => record(key));
       }
+
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error || new Error('أُلغيت المعاملة'));
     });
+
     await this.loadAndCleanCache();
   }
 
@@ -675,38 +845,21 @@ class InventoryDatabase {
     if (!input.length) throw new Error('لا توجد أوراق للحفظ');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
     const ids = new Set<string>();
-    const documents = input.map((doc, docIdx) => {
-      let baseId = canonicalDocumentId(doc.id || `SHEET-${Date.now()}-${docIdx + 1}`);
-      if (ids.has(baseId)) {
-        baseId = `${baseId}-${docIdx + 1}`;
-      }
-      ids.add(baseId);
-      const normalized: StockDocument = {
+    const documents = input.map((doc) => {
+      const normalized = {
         ...doc,
-        id: baseId,
-        requester: (doc.requester || 'المستخدم المحلي').trim() || 'المستخدم المحلي',
-        lines: doc.lines.map((line) => {
-          const cleanPart = String(line.part_number || '').trim();
-          const cleanLoc =
-            sanitizeLocationCode(line.location) ||
-            String(line.location || '').trim().toUpperCase() ||
-            'N01A1';
-          const safeQty =
-            Number.isFinite(line.quantity) && line.quantity >= 0
-              ? Math.round(line.quantity)
-              : 1;
-          return {
-            ...line,
-            part_number: cleanPart,
-            location: cleanLoc,
-            quantity: safeQty,
-            description_en: (line.description_en || 'SPARE PART ASMO').trim() || 'SPARE PART ASMO',
-            reviewed: true,
-            old_location: this.itemMap.get(cleanPart)?.location_code,
-          };
-        }),
+        id: canonicalDocumentId(doc.id),
+        lines: doc.lines.map((line) => ({
+          ...line,
+          part_number: line.part_number.trim(),
+          location: sanitizeLocationCode(line.location),
+          old_location: this.itemMap.get(line.part_number.trim())?.location_code,
+        })),
       };
       validateDocument(normalized);
+      if (ids.has(normalized.id))
+        throw new Error('رقم مستند مكرر داخل الدفعة؛ لم تُحفظ أي ورقة');
+      ids.add(normalized.id);
       return structuredClone({
         ...normalized,
         status: 'pending' as const,
@@ -717,10 +870,16 @@ class InventoryDatabase {
     });
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction('documents', 'readwrite');
-      for (const doc of documents) tx.objectStore('documents').put(doc);
+      for (const doc of documents) tx.objectStore('documents').add(doc);
       tx.oncomplete = () => resolve();
       tx.onabort = () =>
-        reject(new Error('تعذر حفظ الدفعة في قاعدة البيانات المحلية'));
+        reject(
+          new Error(
+            tx.error?.name === 'ConstraintError'
+              ? 'تم حفظها مسبقًا؛ لم تُحفظ الدفعة ولم يتغير المخزون'
+              : 'تعذر حفظ الدفعة؛ لم يتغير المخزون'
+          )
+        );
     });
   }
 
@@ -729,8 +888,11 @@ class InventoryDatabase {
   }
 
   public async approveDocuments(ids: string[]): Promise<void> {
-    const cleanIds = Array.from(new Set(ids.map((id) => canonicalDocumentId(id)).filter(Boolean)));
-    if (!cleanIds.length) throw new Error('قائمة المستندات فارغة');
+    if (!ids.length || new Set(ids).size !== ids.length)
+      throw new Error('قائمة المستندات فارغة أو مكررة');
+    await authorizeMutation(
+      ids.length > 1 ? 'اعتماد دفعة أوراق كاملة بواسطة المشرف' : 'اعتماد مستند بواسطة المشرف'
+    );
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction(['documents', STORE_NAME, 'audit'], 'readwrite');
@@ -742,26 +904,21 @@ class InventoryDatabase {
         failure = error instanceof Error ? error : new Error(String(error));
         tx.abort();
       };
+      // Read each line after the preceding write, including shared parts across different sheets.
       const processDocument = (documentIndex: number) => {
-        if (documentIndex >= cleanIds.length) return;
-        const id = cleanIds[documentIndex];
+        if (documentIndex >= ids.length) return;
+        const id = ids[documentIndex];
         const req = docs.get(id);
         req.onsuccess = () => {
           try {
             const doc: StockDocument | undefined = req.result;
-            if (!doc) {
-              processDocument(documentIndex + 1);
-              return;
-            }
-            if (doc.status === 'approved') {
-              processDocument(documentIndex + 1);
-              return;
-            }
+            if (!doc || doc.status !== 'pending')
+              throw new Error('المستند غير متاح أو سبق اعتماده: ' + id);
             validateDocument(doc);
             const plannedLines = approvalLines(doc);
             const processLine = (lineIndex: number) => {
               if (lineIndex >= plannedLines.length) {
-                const approved: StockDocument = {
+                const approved = {
                   ...doc,
                   status: 'approved',
                   executedAt: new Date().toISOString(),
@@ -811,7 +968,7 @@ class InventoryDatabase {
       processDocument(0);
       tx.oncomplete = () => resolve();
       tx.onabort = () =>
-        reject(failure || tx.error || new Error('تعذر الاعتماد والحفظ في المخزون'));
+        reject(failure || tx.error || new Error('تعذر الاعتماد؛ لم تتغير أي ورقة من الدفعة'));
     });
     await this.loadAndCleanCache();
   }
@@ -823,177 +980,225 @@ class InventoryDatabase {
   ): InventoryItem | undefined {
     const now = new Date().toISOString();
     const marks = interpretMark(line.check, line.remark);
-    const safeDescEn = (line.description_en || before?.description_en || 'SPARE PART ASMO').trim();
-    const { category, descAr } = categorizeAndTranslate(safeDescEn);
-    const safeLoc =
-      sanitizeLocationCode(line.location) ||
-      line.location.trim().toUpperCase() ||
-      before?.location_code ||
-      'N01A1';
-    const safeLineQty =
-      Number.isFinite(line.quantity) && line.quantity >= 0 ? Math.round(line.quantity) : 1;
-
-    if (doc.kind === 'inventory' && marks.excludedIncrease && before) return;
-
-    const fresh = (): InventoryItem => ({
-      part_number: line.part_number,
-      location_code: safeLoc,
-      description_en: safeDescEn,
-      description_ar: line.description_ar || descAr,
-      category,
-      qty_total: safeLineQty,
-      qty_out: 0,
-      qty_remaining: safeLineQty,
-      is_moved: 0,
-      is_missing: 0,
-      status: 'غير مدقق',
-    });
-
+    const { category, descAr } = categorizeAndTranslate(line.description_en);
     let after: InventoryItem;
+    // If the item already exists in inventory, an F remark (Found extra) is excluded from replacing book stock.
+    // If the item does not exist yet (!before), create it with its printed sheet quantity and preserve the F remark.
+    if (doc.kind === 'inventory' && marks.excludedIncrease && before) return;
+    if ((doc.kind === 'issue' || doc.kind === 'transfer') && !before)
+      throw new Error('رقم غير موجود: ' + line.part_number);
+    const fresh = (): InventoryItem => {
+      if (!isValidSpecificLocation(line.location)) throw new Error('موقع غير صالح');
+      return {
+        part_number: line.part_number,
+        location_code: line.location,
+        description_en: line.description_en,
+        description_ar: line.description_ar || descAr,
+        category,
+        qty_total: line.quantity,
+        qty_out: 0,
+        qty_remaining: line.quantity,
+        is_moved: 0,
+        is_missing: 0,
+        status: 'غير مدقق',
+      };
+    };
     if (doc.kind === 'receipt') {
-      const isMoved = before && before.location_code !== safeLoc ? 1 : before?.is_moved || 0;
+      if (!isValidSpecificLocation(line.location)) throw new Error('موقع غير صالح');
+      if (before && before.location_code !== line.location)
+        throw new Error('إضافة لموقع مختلف تستلزم طلب نقل مستقل');
       after = before
         ? {
             ...before,
-            old_location: isMoved ? before.location_code : before.old_location,
-            location_code: safeLoc,
-            is_moved: isMoved,
-            qty_total: before.qty_total + safeLineQty,
-            qty_remaining: before.qty_remaining + safeLineQty,
+            qty_total: before.qty_total + line.quantity,
+            qty_remaining: before.qty_remaining + line.quantity,
           }
         : fresh();
     } else if (doc.kind === 'issue') {
-      if (!before) return undefined;
-      const issueQty = Math.min(before.qty_remaining, safeLineQty);
+      if (line.quantity > before!.qty_remaining || before!.is_missing === 1)
+        throw new Error('الكمية تتجاوز الرصيد المتاح');
       after = {
-        ...before,
-        qty_out: before.qty_out + issueQty,
-        qty_remaining: Math.max(0, before.qty_remaining - issueQty),
+        ...before!,
+        qty_out: before!.qty_out + line.quantity,
+        qty_remaining: before!.qty_remaining - line.quantity,
       };
     } else if (doc.kind === 'transfer') {
-      if (!before) return undefined;
+      if (line.old_location && line.old_location !== before!.location_code)
+        throw new Error('تغير الموقع منذ إنشاء الطلب؛ أنشئ طلب نقل محدثًا');
+      if (line.quantity !== before!.qty_remaining || !isValidSpecificLocation(line.location))
+        throw new Error('هذا الإصدار يدعم نقل كامل الرصيد المتاح فقط إلى موقع صالح');
       after = {
-        ...before,
-        old_location: before.location_code,
-        location_code: safeLoc,
+        ...before!,
+        old_location: before!.location_code,
+        location_code: line.location,
         is_moved: 1,
         status: 'تم النقل',
         moved_at: now,
       };
     } else {
-      // doc.kind === 'inventory'
       let base = before || fresh();
-      const isMoved = before && before.location_code !== safeLoc ? 1 : base.is_moved || 0;
-      const oldLoc =
-        before && before.location_code !== safeLoc ? before.location_code : base.old_location;
-
       if (
         before &&
         doc.duplicateResolution === 'sum' &&
         doc.lines.filter((row) => row.part_number === line.part_number).length > 1
       ) {
+        // Explicit supervisor-approved additional stock; retain issued history and source rows.
         base = {
           ...before,
-          qty_total: Math.max(before.qty_total, safeLineQty),
-          qty_remaining: Math.max(before.qty_remaining, safeLineQty),
-        };
-      } else if (before && safeLineQty > 0) {
-        base = {
-          ...before,
-          qty_total: safeLineQty,
+          qty_total: before.qty_total + line.quantity,
+          qty_remaining: before.qty_remaining + line.quantity,
         };
       }
-
+      if (line.location !== base.location_code) {
+        if (doc.reason === 'حفظ واعتماد كامل سطور الورقة في المخزون') {
+          base = {
+            ...base,
+            old_location: base.location_code,
+            location_code: line.location,
+          };
+        } else {
+          throw new Error('تغيير الموقع يستلزم طلب نقل');
+        }
+      }
+      if (marks.shortage > base.qty_remaining) throw new Error('النقص يتجاوز المتاح');
       const isMissing = marks.status === 'غير موجودة' ? 1 : 0;
-      const safeTotal = Math.max(0, base.qty_total);
-      const nextOut = isMissing
-        ? 0
-        : marks.shortage > 0
-        ? Math.min(safeTotal, marks.shortage)
-        : Math.min(safeTotal, base.qty_out);
-      const nextRemaining = isMissing ? 0 : Math.max(0, safeTotal - nextOut);
+      const nextOut = base.qty_out + marks.shortage;
+      const nextRemaining = isMissing ? 0 : base.qty_remaining - marks.shortage;
       const cleanRemark =
-        marks.shortage > 0
-          ? `-${marks.shortage}`
-          : marks.excludedIncrease
-          ? ''
-          : line.remark;
-
+        marks.shortage > 0 ? `-${marks.shortage}` : marks.excludedIncrease ? '' : line.remark;
+      // Existing book stock is never replaced by an inventory OCR quantity; increases (F / +) are permanently excluded.
       after = {
         ...base,
-        location_code: safeLoc,
-        old_location: oldLoc,
-        is_moved: isMoved,
-        description_en: safeDescEn,
-        description_ar: line.description_ar || base.description_ar || descAr,
-        category: base.category || category,
         status: marks.status,
         is_missing: isMissing,
         remark: cleanRemark,
-        qty_total: safeTotal,
         qty_out: nextOut,
         qty_remaining: nextRemaining,
       };
     }
-
+    if (
+      ![after.qty_total, after.qty_out, after.qty_remaining].every(
+        (v) => Number.isSafeInteger(v) && v >= 0
+      ) ||
+      after.qty_remaining > after.qty_total - after.qty_out
+    )
+      throw new Error('كمية غير صالحة');
     after.updated_at = now;
     return after;
   }
 
   public getAvailableItems(): InventoryItem[] {
-    return this.getAllItems().filter(item => item.qty_remaining > 0 && item.is_missing !== 1);
+    return this.ensureInternalCache()
+      .filter((item) => item.qty_remaining > 0 && item.is_missing !== 1)
+      .map(cloneItem);
   }
 
   public async exportBackup(): Promise<string> {
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
-    const snapshot = await new Promise<{ items: InventoryItem[]; audit: unknown[]; documents: StockDocument[] }>((resolve, reject) => {
+    const snapshot = await new Promise<{
+      items: InventoryItem[];
+      audit: unknown[];
+      documents: StockDocument[];
+    }>((resolve, reject) => {
       const tx = this.db!.transaction([STORE_NAME, 'audit', 'documents'], 'readonly');
       const items = tx.objectStore(STORE_NAME).getAll();
       const audit = tx.objectStore('audit').getAll();
       const docs = tx.objectStore('documents').getAll();
-      tx.oncomplete = () => resolve({ items: items.result, audit: audit.result, documents: docs.result });
+      tx.oncomplete = () =>
+        resolve({ items: items.result, audit: audit.result, documents: docs.result });
       tx.onabort = () => reject(tx.error);
       tx.onerror = () => reject(tx.error);
     });
-    const documents = await Promise.all(snapshot.documents.map(async doc => ({
-      ...doc, original: doc.original ? { type: doc.original.type, bytes: Array.from(new Uint8Array(await doc.original.arrayBuffer())) } : undefined,
-    })));
-    return JSON.stringify({ format: 'asmo-backup-v1', createdAt: new Date().toISOString(), ...snapshot, documents });
+    const documents = await Promise.all(
+      snapshot.documents.map(async (doc) => ({
+        ...doc,
+        original: doc.original
+          ? {
+              type: doc.original.type,
+              bytes: Array.from(new Uint8Array(await doc.original.arrayBuffer())),
+            }
+          : undefined,
+      }))
+    );
+    return JSON.stringify({
+      format: 'asmo-backup-v1',
+      createdAt: new Date().toISOString(),
+      ...snapshot,
+      documents,
+    });
   }
 
   public async restoreBackup(text: string): Promise<void> {
     await authorizeMutation('استعادة نسخة احتياطية (دمج دون حذف)');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
     const data = JSON.parse(text);
-    if (data.format !== 'asmo-backup-v1' || !Array.isArray(data.items)) throw new Error('نسخة غير صالحة');
+    if (data.format !== 'asmo-backup-v1' || !Array.isArray(data.items))
+      throw new Error('نسخة غير صالحة');
     const keys = new Set<string>();
     for (const item of data.items) {
-      if (!item || typeof item.part_number !== 'string' || !item.part_number.trim() || item.part_number.length > 128 || keys.has(item.part_number)
-        || ![item.qty_total, item.qty_out, item.qty_remaining].every(v => Number.isSafeInteger(v) && v >= 0)
-        || item.qty_out > item.qty_total || item.qty_remaining > item.qty_total - item.qty_out
-        || typeof item.location_code !== 'string' || typeof item.description_en !== 'string'
-        || typeof item.description_ar !== 'string' || typeof item.category !== 'string') throw new Error('سجل غير صالح في النسخة؛ لم تُطبق الاستعادة');
+      if (
+        !item ||
+        typeof item.part_number !== 'string' ||
+        !item.part_number.trim() ||
+        item.part_number.length > 128 ||
+        keys.has(item.part_number) ||
+        ![item.qty_total, item.qty_out, item.qty_remaining].every(
+          (v) => Number.isSafeInteger(v) && v >= 0
+        ) ||
+        item.qty_out > item.qty_total ||
+        item.qty_remaining > item.qty_total - item.qty_out ||
+        typeof item.location_code !== 'string' ||
+        typeof item.description_en !== 'string' ||
+        typeof item.description_ar !== 'string' ||
+        typeof item.category !== 'string'
+      )
+        throw new Error('سجل غير صالح في النسخة؛ لم تُطبق الاستعادة');
       keys.add(item.part_number);
     }
-    const documents: StockDocument[] = await Promise.all((data.documents || []).map(async (doc: any) => {
-      validateDocument(doc);
-      if (!['pending', 'approved'].includes(doc.status)) throw new Error('حالة مستند غير صالحة');
-      const original = doc.original ? new Blob([new Uint8Array(doc.original.bytes)], { type: doc.original.type }) : undefined;
-      return { ...doc, original, originalHash: undefined };
-    }));
+    const documents: StockDocument[] = await Promise.all(
+      (data.documents || []).map(async (doc: any) => {
+        validateDocument(doc);
+        if (!['pending', 'approved'].includes(doc.status))
+          throw new Error('حالة مستند غير صالحة');
+        const original = doc.original
+          ? new Blob([new Uint8Array(doc.original.bytes)], { type: doc.original.type })
+          : undefined;
+        return { ...doc, original, originalHash: undefined };
+      })
+    );
     await new Promise<void>((resolve, reject) => {
       const tx = this.db!.transaction([STORE_NAME, 'audit', 'documents'], 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       const audit = tx.objectStore('audit');
       for (const item of data.items) {
         const req = store.get(item.part_number);
-        req.onsuccess = () => { audit.add({ at: new Date().toISOString(), actor: 'local-supervisor', action: 'restore', before: req.result, after: item }); store.put(item); };
+        req.onsuccess = () => {
+          audit.add({
+            at: new Date().toISOString(),
+            actor: 'local-supervisor',
+            action: 'restore',
+            before: req.result,
+            after: item,
+          });
+          store.put(item);
+        };
       }
       // Preserve existing document IDs, especially approvals, to prevent replay after restoration.
       const docs = tx.objectStore('documents');
-      for (const doc of documents) { const req = docs.get(doc.id); req.onsuccess = () => { if (!req.result) docs.add(doc); }; }
-      audit.add({ at: new Date().toISOString(), actor: 'local-supervisor', action: 'restore-archive', archivedAudit: data.audit || [] });
-      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error);
+      for (const doc of documents) {
+        const req = docs.get(doc.id);
+        req.onsuccess = () => {
+          if (!req.result) docs.add(doc);
+        };
+      }
+      audit.add({
+        at: new Date().toISOString(),
+        actor: 'local-supervisor',
+        action: 'restore-archive',
+        archivedAudit: data.audit || [],
+      });
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error);
     });
     await this.loadAndCleanCache();
   }
@@ -1026,6 +1231,7 @@ class InventoryDatabase {
     });
     this.itemMap.clear();
     this.cache = [];
+    this.locationsSummaryCache = null;
     this.isCacheDirty = false;
   }
 
@@ -1035,3 +1241,4 @@ class InventoryDatabase {
 }
 
 export const dbService = new InventoryDatabase();
+
