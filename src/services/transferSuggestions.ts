@@ -1,5 +1,6 @@
 import type { InventoryItem } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
+import { getClientGeminiApiKey, isRunningInNativeApk } from './geminiVisionService';
 
 /**
  * الحد الأقصى الصارم لعدد الأصناف في كل رف (15 صنفاً فقط لكل رف)
@@ -1432,38 +1433,97 @@ export async function analyzePartsWithGeminiAssistant(
     return localAnalyses;
   }
 
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
-    const res = await fetch('/api/gemini/analyze-parts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ parts: items.slice(0, 45) }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.success && Array.isArray(data.analyses) && data.analyses.length > 0) {
-        const aiMap = new Map<string, any>();
-        for (const a of data.analyses) {
-          if (a?.part_number) aiMap.set(String(a.part_number), a);
-        }
-        return localAnalyses.map((loc) => {
-          const ai = aiMap.get(loc.part_number);
-          if (!ai) return loc;
-          return {
-            ...loc,
-            description_ar: ai.description_ar || loc.description_ar,
-            dimensions_calculation_ar: ai.dimensions_calculation_ar || loc.dimensions_calculation_ar,
-            material_ar: ai.material_ar || loc.material_ar,
-            source: 'gemini-ai',
-          };
-        });
-      }
+  const mergeAiAnalyses = (analyses: any[]): GeminiPartAnalysis[] => {
+    const aiMap = new Map<string, any>();
+    for (const a of analyses) {
+      if (a?.part_number) aiMap.set(String(a.part_number), a);
     }
-  } catch {
-    // استخدام المحلل الهندسي والمالي المحلي الفوري
+    return localAnalyses.map((loc) => {
+      const ai = aiMap.get(loc.part_number);
+      if (!ai) return loc;
+      return {
+        ...loc,
+        description_ar: ai.description_ar || loc.description_ar,
+        dimensions_calculation_ar: ai.dimensions_calculation_ar || loc.dimensions_calculation_ar,
+        material_ar: ai.material_ar || loc.material_ar,
+        source: 'gemini-ai',
+      };
+    });
+  };
+
+  if (!isRunningInNativeApk()) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const res = await fetch('/api/gemini/analyze-parts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parts: items.slice(0, 45) }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.success && Array.isArray(data.analyses) && data.analyses.length > 0) {
+          return mergeAiAnalyses(data.analyses);
+        }
+      }
+    } catch {
+      // المتابعة للاتصال المباشر أو المحلل الهندسي المحلي
+    }
+  }
+
+  const apiKey = getClientGeminiApiKey();
+  if (apiKey) {
+    try {
+      const inputSummary = items.slice(0, 45).map((p: any, idx: number) => ({
+        index: idx + 1,
+        part_number: String(p.part_number || `ITEM-${idx + 1}`),
+        description_en: String(p.description_en || ''),
+        current_location: String(p.location_code || 'N11A1'),
+        quantity: Number((p as any).quantity || p.qty_remaining || 1),
+      }));
+
+      const prompt = `أنت مساعد هندسي ذكي (Gemini Industrial Assistant) متخصص في مستودعات قطع الغيار الصناعية (SAP Inventory Controller - ASMO).
+المطلوب لكل قطعة في القائمة المرفقة:
+1. "part_number": رقم القطعة كما هو.
+2. "description_ar": ترجمة عربية هندسية دقيقة وواضحة لوصف القطعة الإنجليزي مع ذكر الصنف والمقاس بالملم.
+3. "dimensions_calculation_ar": حسبة تفصيلية للمقاسات والأبعاد المذكورة في الوصف مع تحويل أي مقاس بالبوصة (IN أو ") إلى المليمتر (MM) بدقة (1 بوصة = 25.4 ملم).
+4. "material_ar": نوع المعدن أو المادة بالعربية.
+القطع المطلوب تحليلها:
+${JSON.stringify(inputSummary)}`;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 16000);
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              responseMimeType: 'application/json',
+            },
+          }),
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const data = await res.json();
+        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (rawText) {
+          const parsed = JSON.parse(rawText);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            return mergeAiAnalyses(parsed);
+          }
+        }
+      }
+    } catch {
+      // استخدام المحلل الهندسي والمالي المحلي الفوري
+    }
   }
 
   return localAnalyses;

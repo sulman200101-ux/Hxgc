@@ -1,7 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../services/db';
 import { generateReportPdfBlob, savePdfFile } from '../utils/pdfExportUtil';
-import { getCandidateApiUrls } from '../services/geminiVisionService';
+import {
+  getCandidateApiUrls,
+  isRunningInNativeApk,
+  checkDirectGeminiStatusOnDevice,
+} from '../services/geminiVisionService';
 import { CheckCircle2, XCircle, RefreshCw, Activity, FileText, Download } from 'lucide-react';
 
 interface EngineStatusState {
@@ -23,7 +27,7 @@ export function ReportsPanel() {
     checking: false,
     geminiActive: null,
     localOcrActive: true,
-    model: 'gemini-3.8-flash',
+    model: 'gemini-3-flash-preview',
     statusLabel: 'جاري التحقق...',
     details: 'اضغط على "فحص حالة محرك جمني الآن" للتأكد من حالة الاتصال السحابي والمحرك المحلي.',
   });
@@ -35,10 +39,30 @@ export function ReportsPanel() {
       statusLabel: 'جاري فحص المحرك...',
     }));
     const startMs = Date.now();
+
+    if (isRunningInNativeApk()) {
+      const directRes = await checkDirectGeminiStatusOnDevice();
+      if (directRes.geminiActive) {
+        setEngineStatus({
+          checking: false,
+          geminiActive: true,
+          localOcrActive: true,
+          model: directRes.model || 'gemini-3-flash-preview',
+          latencyMs: directRes.latencyMs,
+          statusLabel: 'يعمل ونشط 🟢',
+          details:
+            directRes.details ||
+            'محرك جمني السحابي متصل مباشرة من الهاتف ويعمل بكفاءة لقراءة الجداول وتحليل القطع.',
+          checkedAt: new Date().toLocaleTimeString('ar-SA'),
+        });
+        return;
+      }
+    }
+
     const urls = getCandidateApiUrls('/api/gemini/status');
     for (const url of urls) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12000);
+      const timer = setTimeout(() => controller.abort(), 10000);
       try {
         const res = await fetch(url, {
           method: 'POST',
@@ -49,36 +73,53 @@ export function ReportsPanel() {
         clearTimeout(timer);
         if (res.ok) {
           const data = await res.json();
-          setEngineStatus({
-            checking: false,
-            geminiActive: Boolean(data.geminiActive),
-            localOcrActive: data.localOcrActive !== false,
-            model: data.model || 'gemini-3.8-flash',
-            latencyMs: data.latencyMs ?? Date.now() - startMs,
-            statusLabel: data.geminiActive ? 'يعمل ونشط 🟢' : 'متوقف 🔴 (يعمل المحرك المحلي تلقائياً)',
-            details:
-              data.details ||
-              (data.geminiActive
-                ? 'محرك جمني متصل ويعمل بكفاءة لقراءة الجداول وتحليل القطع.'
-                : 'محرك جمني السحابي متوقف حالياً؛ يعمل محرك القراءة المحلي الذكي تلقائياً بدقة 100%.'),
-            checkedAt: new Date().toLocaleTimeString('ar-SA'),
-          });
-          return;
+          if (data.geminiActive) {
+            setEngineStatus({
+              checking: false,
+              geminiActive: true,
+              localOcrActive: data.localOcrActive !== false,
+              model: data.model || 'gemini-3-flash-preview',
+              latencyMs: data.latencyMs ?? Date.now() - startMs,
+              statusLabel: 'يعمل ونشط 🟢',
+              details:
+                data.details ||
+                'محرك جمني متصل ويعمل بكفاءة لقراءة الجداول وتحليل القطع.',
+              checkedAt: new Date().toLocaleTimeString('ar-SA'),
+            });
+            return;
+          }
         }
       } catch {
         clearTimeout(timer);
       }
     }
 
+    const fallbackDirect = await checkDirectGeminiStatusOnDevice();
+    if (fallbackDirect.geminiActive) {
+      setEngineStatus({
+        checking: false,
+        geminiActive: true,
+        localOcrActive: true,
+        model: fallbackDirect.model || 'gemini-3-flash-preview',
+        latencyMs: fallbackDirect.latencyMs,
+        statusLabel: 'يعمل ونشط 🟢',
+        details:
+          fallbackDirect.details ||
+          'محرك جمني متصل ويعمل بكفاءة لقراءة الجداول وتحليل القطع.',
+        checkedAt: new Date().toLocaleTimeString('ar-SA'),
+      });
+      return;
+    }
+
     setEngineStatus({
       checking: false,
       geminiActive: false,
       localOcrActive: true,
-      model: 'gemini-3.8-flash',
+      model: 'gemini-3-flash-preview',
       latencyMs: Date.now() - startMs,
       statusLabel: 'متوقف 🔴 (يعمل المحرك المحلي الذكي بدون إنترنت)',
       details:
-        'تعذر الوصول للخادم السحابي من الهاتف حالياً؛ محرك القراءة المحلي المدمج (WASM SIMD + معايرة الـ 37 سطراً) يعمل وجاهز لقراءة الأوراق بدقة 100%.',
+        'تعذر الوصول للخادم السحابي من الهاتف حالياً؛ محرك القراءة المحلي المدمج (WASM SIMD) يعمل وجاهز لقراءة الأوراق.',
       checkedAt: new Date().toLocaleTimeString('ar-SA'),
     });
   };

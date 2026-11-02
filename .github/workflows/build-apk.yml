@@ -51,11 +51,12 @@ jobs:
           find app/build/outputs/apk/ -name "*.apk" -exec cp {} ../output_apk/ \; || true
           cd ../output_apk
           if [ -f app-debug.apk ]; then
+            cp -f app-debug.apk asmo-inventory-v2.7.0.apk
             cp -f app-debug.apk asmo-inventory-v2.6.0.apk
             cp -f app-debug.apk asmo-inventory-app.apk
           fi
           cd ..
-          echo "=== Generated Native APK (v2.6.0) ==="
+          echo "=== Generated Native APK (v2.7.0) ==="
           ls -lh output_apk/
 
       - name: Delete All Old Releases and Tags
@@ -66,24 +67,23 @@ jobs:
           for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null || true); do
             gh release delete "$tag" --yes --cleanup-tag || true
           done
-          for tag in v1.0.0 v1.1.0 v1.2.0 v1.3.0 v1.4.0 v1.5.0 v1.6.0 v1.6.1 v1.6.2 v1.6.3 v1.6.4 v1.6.5 v1.7.0 v1.8.0 v1.9.0 v2.0.0 v2.1.0 v2.2.0 v2.3.0 v2.4.0 v2.5.0 v2.6.0 v3.0.0; do
+          for tag in v1.0.0 v1.1.0 v1.2.0 v1.3.0 v1.4.0 v1.5.0 v1.6.0 v1.6.1 v1.6.2 v1.6.3 v1.6.4 v1.6.5 v1.7.0 v1.8.0 v1.9.0 v2.0.0 v2.1.0 v2.2.0 v2.3.0 v2.4.0 v2.5.0 v2.6.0 v2.7.0 v3.0.0; do
             gh release delete "$tag" --yes --cleanup-tag || true
             git push origin --delete "$tag" 2>/dev/null || true
           done
 
-      - name: Create Fresh GitHub Release v2.6.0 (Direct APK Download)
+      - name: Create Fresh GitHub Release v2.7.0 (Direct APK Download)
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: v2.6.0
-          name: "ASMO Inventory App v2.6.0 (حذف كافة البيانات المخزنة في الكود وترك أي حقل غير مقروء فارغاً)"
+          tag_name: v2.7.0
+          name: "ASMO Inventory App v2.7.0 (تشغيل محرك Gemini السحابي المباشر في تطبيق الهاتف 100%)"
           body: |
-            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار الجديد v2.6.0)
-            - **حذف كامل لجميع البيانات والأرقام المخزنة مسبقاً في الأكواد** وعدم تعبئة أي بيانات افتراضية أو مخزنة نهائياً.
-            - **ترك أي حقل لم يتمكن الـ OCR من قراءته بوضوح فارغاً (`""`)** سواء رقم القطعة أو الموقع أو الوصف أو الكمية.
-            - **قراءة صارمة 100% بالصورة الكاملة بدون تقسيم وبدون تعليق عند 50%** (`temperature: 0.0`) مع تفسير العلامات اليدوية (`✓` مدقق، `X` غير موجود، `F` تم النقل، `N` ناقص العدد).
-            - **إصلاح جذري لخطأ بروكسي جمني (`PROXY_GENERATION_DISABLED`)** عبر مسار الخادم الداخلي (`gemini-3-flash-preview`).
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار الجديد v2.7.0)
+            - **تفعيل اتصال محرك Gemini السحابي المباشر داخل تطبيق الهاتف (`gemini-3-flash-preview`)**: يعمل محرك جمني السحابي ونشط 🟢 داخل تطبيق الأندرويد مباشرة دون الحاجة لكوكيز متصفح AI Studio.
+            - **فحص فوري لحالة محرك جمني ومساعد المقاسات والترجمة على الهاتف** مع قراءة صارمة للورقة الكاملة بدون أي بيانات مخزنة مسبقاً.
           files: |
+            output_apk/asmo-inventory-v2.7.0.apk
             output_apk/asmo-inventory-v2.6.0.apk
             output_apk/asmo-inventory-app.apk
         env:

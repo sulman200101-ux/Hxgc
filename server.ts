@@ -751,26 +751,30 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v2.7.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v2.6.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.7.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.6.0.apk'),
+  path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
 ];
 
 const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.6.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.7.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.6.0/asmo-inventory-v2.6.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.7.0/asmo-inventory-v2.7.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v2.7.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.6.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.5.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.4.0.apk', handleApkDownload);

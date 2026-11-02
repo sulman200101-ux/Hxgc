@@ -66,7 +66,7 @@ export const Header: React.FC<HeaderProps> = ({
                     قطع الغيار - أسمو
                   </h1>
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/25 text-emerald-300 font-black border border-emerald-400/50 font-mono">
-                    v2.6.0
+                    v2.7.0
                   </span>
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-orange-500/25 text-amber-200 font-bold border border-amber-400/40">
                     سقف 15 صنف للرف
