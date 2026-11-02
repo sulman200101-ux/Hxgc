@@ -4,14 +4,18 @@ import type { StockDocument, DocumentLine } from '../services/documents';
 import { dbService } from '../services/db';
 import {
   buildSimilaritySwapPlans,
+  buildHighValueConsolidationPlans,
   getAdjacentStorageBins,
-  parseShelfElevation,
   estimatePartSizeProfile,
-  SHELF_ELEVATION_GUIDE,
+  suggestHeavyItemsToLocationD,
+  isDLocation,
+  isCLocation,
+  isHeavyDutyDOrCLocation,
+  MAX_ITEMS_PER_SHELF,
   type SimilaritySwapPlan,
+  type HighValueShelfPlan,
 } from '../services/transferSuggestions';
 import { sanitizeLocationCode, isValidSpecificLocation } from '../utils/regexSanitizer';
-import { GeminiEngineeringAssistantPanel } from './GeminiEngineeringAssistantPanel';
 import {
   Layers,
   ArrowRightLeft,
@@ -23,10 +27,13 @@ import {
   Printer,
   ArrowUpDown,
   Ruler,
+  Search,
+  Filter,
 } from 'lucide-react';
 
 interface SimilarItemsPlannerViewProps {
   items: InventoryItem[];
+  isActive?: boolean;
   onRefresh: () => void;
   onOpenRelocationReport: (movedItems?: InventoryItem[]) => void;
   onOpenLocation?: (locationCode: string) => void;
@@ -34,6 +41,7 @@ interface SimilarItemsPlannerViewProps {
 
 export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = ({
   items,
+  isActive = true,
   onRefresh,
   onOpenRelocationReport,
   onOpenLocation,
@@ -42,7 +50,14 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
   const [customTargetBins, setCustomTargetBins] = useState<Record<string, string>>({});
   const [customEvictBins, setCustomEvictBins] = useState<Record<string, string>>({});
   const [includeEvictionsMap, setIncludeEvictionsMap] = useState<Record<string, boolean>>({});
-  const [sizeSortOrder, setSizeSortOrder] = useState<'desc' | 'asc'>('desc');
+  const [expandedPlans, setExpandedPlans] = useState<Record<string, boolean>>({});
+  const [visiblePlansLimit, setVisiblePlansLimit] = useState(12);
+  const [visibleHeavyLimit, setVisibleHeavyLimit] = useState(15);
+  const [sizeSortOrder, setSizeSortOrder] = useState<'price_desc' | 'desc' | 'asc'>('price_desc');
+  const [selectedFamilyFilter, setSelectedFamilyFilter] = useState<string>('ALL');
+  const [selectedSizeFilter, setSelectedSizeFilter] = useState<string>('ALL');
+  const [mmFilterRange, setMmFilterRange] = useState<string>('ALL');
+  const [mmSearchText, setMmSearchText] = useState<string>('');
   const [busy, setBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
     text: string;
@@ -50,9 +65,11 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
   } | null>(null);
   const [lastApprovedPlanItems, setLastApprovedPlanItems] = useState<InventoryItem[]>([]);
 
-  // حالة النقل المباشر السريع لأي قطعة
+  const [quickSearchFilter, setQuickSearchFilter] = useState('');
   const [quickPartNumber, setQuickPartNumber] = useState('');
   const [quickNewLocation, setQuickNewLocation] = useState('');
+  const [heavyTargetOverride, setHeavyTargetOverride] = useState('');
+  const [expensiveShelfOverride, setExpensiveShelfOverride] = useState('');
 
   const refreshDocs = async () => {
     const docs = await dbService.getDocuments();
@@ -60,10 +77,11 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
   };
 
   useEffect(() => {
+    if (!isActive) return;
     refreshDocs().catch((err) =>
       setStatusMessage({ text: String(err), type: 'error' })
     );
-  }, [items.length]);
+  }, [items.length, isActive]);
 
   const pendingTransferDocs = useMemo(
     () => documents.filter((doc) => doc.kind === 'transfer' && doc.status === 'pending'),
@@ -80,6 +98,14 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     [pendingTransferDocs]
   );
 
+  const itemByPartMap = useMemo(() => {
+    const map = new Map<string, InventoryItem>();
+    for (let i = 0; i < items.length; i++) {
+      map.set(items[i].part_number, items[i]);
+    }
+    return map;
+  }, [items]);
+
   const allBins = useMemo(
     () =>
       Array.from(
@@ -92,9 +118,31 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     [items]
   );
 
+  const quickSelectableItems = useMemo(() => {
+    if (!isActive) return [];
+    const q = quickSearchFilter.trim().toLowerCase();
+    if (!q) return items.slice(0, 120);
+    const matches: InventoryItem[] = [];
+    for (let i = 0; i < items.length && matches.length < 120; i++) {
+      const it = items[i];
+      const sz = estimatePartSizeProfile(it);
+      if (
+        it.part_number.toLowerCase().includes(q) ||
+        it.location_code.toLowerCase().includes(q) ||
+        it.description_ar.toLowerCase().includes(q) ||
+        it.description_en.toLowerCase().includes(q) ||
+        it.category.toLowerCase().includes(q) ||
+        sz.mmLabel.toLowerCase().includes(q)
+      ) {
+        matches.push(it);
+      }
+    }
+    return matches;
+  }, [items, quickSearchFilter, isActive]);
+
   const selectedQuickItem = useMemo(
-    () => items.find((i) => i.part_number === quickPartNumber.trim()) || null,
-    [items, quickPartNumber]
+    () => itemByPartMap.get(quickPartNumber.trim()) || null,
+    [itemByPartMap, quickPartNumber]
   );
 
   const selectedQuickItemSize = useMemo(
@@ -102,26 +150,87 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     [selectedQuickItem]
   );
 
-  const selectedQuickItemElev = useMemo(
-    () => (selectedQuickItem ? parseShelfElevation(selectedQuickItem.location_code) : null),
-    [selectedQuickItem]
-  );
-
   const quickNearbyBins = useMemo(() => {
     if (!selectedQuickItem) return allBins.slice(0, 6);
-    return getAdjacentStorageBins(selectedQuickItem.location_code, allBins, 8);
-  }, [selectedQuickItem, allBins]);
+    const adj = getAdjacentStorageBins(selectedQuickItem.location_code, allBins, 8);
+    if (selectedQuickItemSize?.sizeCategory === 'كبير / ثقيل') {
+      return Array.from(
+        new Set([selectedQuickItemSize.targetHeavyLocation, 'D1', 'C1', 'D2', 'C2', ...adj])
+      ).slice(0, 8);
+    }
+    return adj;
+  }, [selectedQuickItem, selectedQuickItemSize, allBins]);
 
-  const swapPlans = useMemo(
-    () => buildSimilaritySwapPlans(items, pendingPartNumbers, 'warehouse'),
-    [items, pendingPartNumbers]
-  );
+  // قائمة القطع الثقيلة جداً المقترح نقلها إلى الموقعين D و C (بحد أقصى 15 صنفاً لكل رف)
+  const heavyToDSuggestions = useMemo(() => {
+    if (!isActive) return [];
+    return suggestHeavyItemsToLocationD(items, pendingPartNumbers);
+  }, [items, pendingPartNumbers, isActive]);
 
-  // نقل قطعة واحدة فوراً إلى موقعها الجديد مع طلب اعتماد المشرف
+  // خطط فرز وتجميع القطع الأغلى سعراً في رف واحد (بحد أقصى 15 صنفاً لكل رف)
+  const highValueShelfPlans = useMemo(() => {
+    if (!isActive) return [];
+    return buildHighValueConsolidationPlans(
+      items,
+      pendingPartNumbers,
+      expensiveShelfOverride.trim() || undefined
+    );
+  }, [items, pendingPartNumbers, expensiveShelfOverride, isActive]);
+
+  const swapPlans = useMemo(() => {
+    if (!isActive) return [];
+    return buildSimilaritySwapPlans(items, pendingPartNumbers, 'warehouse');
+  }, [items, pendingPartNumbers, isActive]);
+
+  const filteredSwapPlans = useMemo(() => {
+    return swapPlans.filter((plan) => {
+      if (selectedFamilyFilter !== 'ALL' && plan.family !== selectedFamilyFilter) {
+        return false;
+      }
+      if (selectedSizeFilter !== 'ALL') {
+        if (selectedSizeFilter === 'EXPENSIVE') {
+          const hasExpensive = plan.allGroupItemsSortedBySize.some(
+            (e) => e.sizeProfile.priceCategory === 'أغلى سعراً / قيمة عالية'
+          );
+          if (!hasExpensive) return false;
+        } else {
+          const hasSize =
+            plan.groupSizeCategory === selectedSizeFilter ||
+            plan.allGroupItemsSortedBySize.some((e) => e.sizeProfile.sizeCategory === selectedSizeFilter);
+          if (!hasSize) return false;
+        }
+      }
+      if (mmFilterRange !== 'ALL') {
+        const matchesRange = plan.allGroupItemsSortedBySize.some((e) => {
+          const mm = e.sizeProfile.primaryMm;
+          if (mmFilterRange === 'LT20') return mm > 0 && mm < 20;
+          if (mmFilterRange === '20_60') return mm >= 20 && mm <= 60;
+          if (mmFilterRange === '61_150') return mm > 60 && mm <= 150;
+          if (mmFilterRange === 'GT150') return mm > 150;
+          return true;
+        });
+        if (!matchesRange) return false;
+      }
+      if (mmSearchText.trim()) {
+        const q = mmSearchText.trim().toLowerCase();
+        const matchesMmText = plan.allGroupItemsSortedBySize.some(
+          (e) =>
+            e.sizeProfile.mmLabel.toLowerCase().includes(q) ||
+            String(e.sizeProfile.primaryMm).includes(q) ||
+            e.item.part_number.includes(q) ||
+            e.item.description_ar.toLowerCase().includes(q) ||
+            e.item.description_en.toLowerCase().includes(q)
+        );
+        if (!matchesMmText) return false;
+      }
+      return true;
+    });
+  }, [swapPlans, selectedFamilyFilter, selectedSizeFilter, mmFilterRange, mmSearchText]);
+
   const handleDirectMoveSingleItem = async (partNumber: string, targetLocation: string) => {
     const cleanTarget = sanitizeLocationCode(targetLocation) || targetLocation.trim().toUpperCase();
     if (!cleanTarget || !isValidSpecificLocation(cleanTarget)) {
-      setStatusMessage({ text: 'يرجى إدخال رمز الموقع الجديد بشكل صحيح (مثل N11FL1 أو N11C2)', type: 'error' });
+      setStatusMessage({ text: 'يرجى إدخال رمز الموقع الجديد بشكل صحيح (مثل D1 أو C1 أو N11D1 أو N11C1)', type: 'error' });
       return;
     }
 
@@ -136,9 +245,9 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
       onRefresh();
       setLastApprovedPlanItems([updated]);
       setQuickNewLocation('');
-      const targetElev = parseShelfElevation(updated.location_code);
+      const sz = estimatePartSizeProfile(updated);
       setStatusMessage({
-        text: `✅ تم اعتماد ونقل القطعة (${partNumber}) من (${updated.old_location || 'السابق'}) إلى موقعها الجديد (${updated.location_code} — ${targetElev.shortLabelAr}) بنجاح!`,
+        text: `✅ تم اعتماد ونقل القطعة (${partNumber} — الصنف: ${updated.category} — الحجم: ${sz.sizeCategory} — المقاس: ${sz.mmLabel} — السعر: ${sz.estimatedPriceSar.toLocaleString()} ر.س) من (${updated.old_location || 'السابق'}) إلى موقعها الجديد (${updated.location_code}) بنجاح!`,
         type: 'success',
       });
       onOpenRelocationReport([updated]);
@@ -149,8 +258,110 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     }
   };
 
+  // نقل جميع القطع الثقيلة جداً إلى الموقعين D و C مع الالتزام بحد 15 صنفاً لكل رف
+  const handleMoveAllHeavyToDC = async () => {
+    setBusy(true);
+    setStatusMessage(null);
+    try {
+      const movedHeavy = await dbService.relocateAllHeavyItemsToLocationD(
+        heavyTargetOverride.trim() || undefined
+      );
+      if (!movedHeavy.length) {
+        throw new Error('جميع القطع الثقيلة مستقرة بالفعل في مواقع الثقيلة المعتمدة (D و C)!');
+      }
+      await refreshDocs();
+      onRefresh();
+      setLastApprovedPlanItems(movedHeavy);
+      setStatusMessage({
+        text: `✅ تم اعتماد ونقل كافة القطع الثقيلة جداً (${movedHeavy.length} قطعة) إلى مواقع القطع الثقيلة المعتمدة (D و C) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف!`,
+        type: 'success',
+      });
+      onOpenRelocationReport(movedHeavy);
+    } catch (err) {
+      setStatusMessage({ text: (err as Error).message, type: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // اعتماد وتنفيذ تجميع القطع الأغلى سعراً في رف واحد (بحد أقصى 15 صنفاً فقط لكل رف)
+  const handleExecuteHighValueShelfPlan = async (hvPlan: HighValueShelfPlan) => {
+    setBusy(true);
+    setStatusMessage(null);
+    try {
+      const targetBin = (expensiveShelfOverride.trim() || hvPlan.targetBin).toUpperCase();
+      const lines: DocumentLine[] = [
+        ...hvPlan.evictions
+          .filter((ev) => ev.fromBin !== ev.evictToBin)
+          .map((ev) => ({
+            part_number: ev.partNumber,
+            old_location: ev.fromBin,
+            location: ev.evictToBin,
+            quantity: ev.quantity,
+            description_en: ev.descriptionEn,
+            description_ar: ev.descriptionAr,
+            check: '',
+            remark: ev.reason,
+            reviewed: true,
+          })),
+        ...hvPlan.items
+          .slice(0, MAX_ITEMS_PER_SHELF)
+          .filter((entry) => entry.fromBin !== targetBin)
+          .map((entry) => ({
+            part_number: entry.item.part_number,
+            old_location: entry.fromBin,
+            location: targetBin,
+            quantity: entry.item.qty_remaining,
+            description_en: entry.item.description_en,
+            description_ar: entry.item.description_ar,
+            check: '',
+            remark: `تجميع القطع الأغلى سعراً (${entry.sizeProfile.estimatedPriceSar.toLocaleString()} ر.س) في الرف (${targetBin}) — بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف فقط`,
+            reviewed: true,
+          })),
+      ];
+
+      if (!lines.length) {
+        throw new Error(`جميع القطع الأغلى سعراً (${hvPlan.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف) مستقرة بالفعل في الرف الموحد (${targetBin})!`);
+      }
+
+      const docId = `EXPENSIVE-15-${hvPlan.shelfIndex}-${Date.now().toString().slice(-5)}`;
+      await dbService.submitDocument({
+        id: docId,
+        kind: 'transfer',
+        requester: 'فرز وتجميع القطع الأغلى سعراً (15 صنف للرف)',
+        reason: hvPlan.summaryReason,
+        status: 'pending',
+        createdAt: '',
+        lines,
+      });
+      await dbService.approveDocument(docId);
+      await refreshDocs();
+      onRefresh();
+
+      const movedParts = Array.from(
+        new Map(
+          lines
+            .map((l) => dbService.getItemByPartNumber(l.part_number))
+            .filter((i): i is InventoryItem => Boolean(i))
+            .map((i) => [i.part_number, i])
+        ).values()
+      );
+
+      setLastApprovedPlanItems(movedParts);
+      setStatusMessage({
+        text: `✅ تم اعتماد وتجميع القطع الأغلى سعراً (${hvPlan.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف فقط) في الرف الموحد (${targetBin}) بنجاح!`,
+        type: 'success',
+      });
+      onOpenRelocationReport(movedParts);
+    } catch (err) {
+      setStatusMessage({ text: (err as Error).message, type: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const buildDocumentLinesForPlan = (plan: SimilaritySwapPlan): DocumentLine[] => {
-    const targetBin = (customTargetBins[plan.id] || plan.targetBin).trim().toUpperCase();
+    const customTarget = customTargetBins[plan.id]?.trim().toUpperCase();
     const includeEvictions = includeEvictionsMap[plan.id] ?? true;
     const lines: DocumentLine[] = [];
 
@@ -170,47 +381,64 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
             description_en: evict.descriptionEn,
             description_ar: evict.descriptionAr,
             check: '',
-            remark: 'إخراج لإحلال المتشابهات',
+            remark: 'إخراج لإحلال المتشابهات (التزام بسقف 15 صنف للرف)',
             reviewed: true,
           });
         }
       }
     }
 
-    for (const entry of plan.allGroupItemsSortedBySize) {
-      const fromBin = entry.item.location_code.trim().toUpperCase();
-      if (fromBin !== targetBin) {
-        lines.push({
-          part_number: entry.item.part_number,
-          old_location: fromBin,
-          location: targetBin,
-          quantity: entry.item.qty_remaining,
-          description_en: entry.item.description_en,
-          description_ar: entry.item.description_ar,
-          check: '',
-          remark: `تجميع وترتيب عائلة ${plan.family} (${entry.sizeProfile.sizeCategory})`,
-          reviewed: true,
-        });
+    // الالتزام الصارم بحد 15 صنفاً لكل رف عند تجميع المتشابهات
+    const batches =
+      plan.shelfBatches && plan.shelfBatches.length > 0
+        ? plan.shelfBatches
+        : [
+            {
+              shelfBin: customTarget || plan.targetBin,
+              batchIndex: 1,
+              itemsCount: Math.min(MAX_ITEMS_PER_SHELF, plan.allGroupItemsSortedBySize.length),
+              maxCapacity: MAX_ITEMS_PER_SHELF,
+              items: plan.allGroupItemsSortedBySize.slice(0, MAX_ITEMS_PER_SHELF),
+            },
+          ];
+
+    for (const batch of batches) {
+      const targetBin =
+        batch.batchIndex === 1 && customTarget ? customTarget : batch.shelfBin.trim().toUpperCase();
+      for (const entry of batch.items.slice(0, MAX_ITEMS_PER_SHELF)) {
+        const fromBin = entry.item.location_code.trim().toUpperCase();
+        if (fromBin !== targetBin) {
+          lines.push({
+            part_number: entry.item.part_number,
+            old_location: fromBin,
+            location: targetBin,
+            quantity: entry.item.qty_remaining,
+            description_en: entry.item.description_en,
+            description_ar: entry.item.description_ar,
+            check: '',
+            remark: `تجميع متشابهات ${plan.family} في ${targetBin} (دفعة #${batch.batchIndex}: ${batch.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف — ${entry.sizeProfile.mmLabel})`,
+            reviewed: true,
+          });
+        }
       }
     }
 
     return lines;
   };
 
-  // اعتماد وتنفيذ خطة النقل والتبديل فوراً ثم فتح تقرير PDF والواتساب
   const handleApproveAndExecutePlanNow = async (plan: SimilaritySwapPlan) => {
     setBusy(true);
     setStatusMessage(null);
     try {
       const lines = buildDocumentLinesForPlan(plan);
       if (!lines.length) {
-        throw new Error('جميع قطع هذه المجموعة موجودة بالفعل في الموقع المحدد — اختر رفاً آخر إذا أردت نقل المجموعة بالكامل');
+        throw new Error('جميع قطع هذا الصنف موجودة بالفعل في الموقع المحدد — اختر موقعاً آخر إذا أردت نقل المجموعة بالكامل');
       }
       const docId = `SWAP-${plan.family}-${Date.now().toString().slice(-5)}`;
       await dbService.submitDocument({
         id: docId,
         kind: 'transfer',
-        requester: 'مخطط المتشابهات وترتيب الأحجام الذكي',
+        requester: 'مخطط المتشابهات (15 صنف لكل رف)',
         reason: plan.summaryReason,
         status: 'pending',
         createdAt: '',
@@ -231,7 +459,7 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
 
       setLastApprovedPlanItems(movedParts);
       setStatusMessage({
-        text: `✅ تم اعتماد ونقل جميع قطع مجموعة (${plan.familyAr}) مع ترتيبها حسب الحجم والارتفاع (${movedParts.length} قطعة)!`,
+        text: `✅ تم اعتماد ونقل جميع متشابهات الصنف (${plan.familyAr}) مع التزام سقف (${MAX_ITEMS_PER_SHELF} صنف فقط لكل رف) — (${movedParts.length} قطعة)!`,
         type: 'success',
       });
       onOpenRelocationReport(movedParts);
@@ -242,7 +470,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     }
   };
 
-  // اعتماد مستند نقل معلق وفتح تقرير PDF والواتساب مباشرة
   const handleApprovePendingDoc = async (doc: StockDocument) => {
     setBusy(true);
     setStatusMessage(null);
@@ -273,20 +500,27 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     }
   };
 
+  const displayedPlans = filteredSwapPlans.slice(0, visiblePlansLimit);
+
   return (
     <div className="space-y-4" dir="rtl">
-      {/* ترويسة التخطيط لنقل القطع المتشابهة وترتيب الأحجام والارتفاعات */}
+      {/* ترويسة التخطيط لتجميع المتشابهات + الأغلى سعراً + الثقيلة جداً لـ D و C + 15 صنف للرف */}
       <div className="bg-[#251914] rounded-2xl border border-amber-700/40 p-4 shadow-lg flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
             <Layers className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="text-base sm:text-lg font-black text-white">
-              التخطيط الذكي لنقل القطع المتشابهة وترتيبها حسب الحجم وارتفاع الرف
-            </h2>
-            <p className="text-xs text-neutral-300">
-              ترتيب القطع المتشابهة من حيث الحجم والوزن وتوجيهها للرف المناسب (FL على الأرض، A=1م، B=2م، BB=3م، C=4م، D=5م)
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base sm:text-lg font-black text-white">
+                تجميع المتشابهات (الصنف + الحجم + ملم) وفرز الأغلى سعراً ونقل الثقيلة جداً إلى (D و C)
+              </h2>
+              <span className="px-2.5 py-0.5 rounded-full bg-amber-500 text-stone-950 text-xs font-black">
+                حد صارم: {MAX_ITEMS_PER_SHELF} صنف فقط لكل رف
+              </span>
+            </div>
+            <p className="text-xs text-neutral-300 mt-0.5">
+              توجيه القطع الثقيلة جداً إلى الموقعين (D و C)، وفرز القطع الأغلى سعراً لتجميعها في رف واحد، على أن يستوعب كل رف {MAX_ITEMS_PER_SHELF} صنفاً فقط كحد أقصى
             </p>
           </div>
         </div>
@@ -294,14 +528,20 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         <div className="flex items-center gap-2 flex-wrap">
           <button
             type="button"
-            onClick={() => setSizeSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+            onClick={() =>
+              setSizeSortOrder((prev) =>
+                prev === 'price_desc' ? 'desc' : prev === 'desc' ? 'asc' : 'price_desc'
+              )
+            }
             className="px-3 py-2 rounded-xl bg-[#19110D] hover:bg-[#32211A] text-amber-300 border border-amber-600/50 text-xs font-black flex items-center gap-1.5 cursor-pointer"
           >
             <ArrowUpDown className="w-3.5 h-3.5" />
             <span>
-              {sizeSortOrder === 'desc'
-                ? 'الترتيب الحالي: من الأكبر للأصغر حجماً ⬇'
-                : 'الترتيب الحالي: من الأصغر للأكبر حجماً ⬆'}
+              {sizeSortOrder === 'price_desc'
+                ? 'الفرز الحالي: الأغلى سعراً أولاً 💰'
+                : sizeSortOrder === 'desc'
+                ? 'الفرز الحالي: الأكبر حجماً وملم أولاً ⬇'
+                : 'الفرز الحالي: الأصغر حجماً وملم أولاً ⬆'}
             </span>
           </button>
 
@@ -320,51 +560,99 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       </div>
 
-      {/* دليل ارتفاعات الرفوف في المستودع (FL, A, B, BB, C, D) */}
-      <div className="bg-[#1E1410] rounded-2xl border border-amber-600/40 p-3.5 shadow-md space-y-2.5">
+      {/* شريط الفلترة الذكية للمتشابهات حسب الصنف والحجم والسعر والمقاس بالملم */}
+      <div className="bg-[#1E1410] rounded-2xl border border-amber-600/40 p-3.5 shadow-md space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Ruler className="w-4 h-4 text-amber-400" />
             <h3 className="text-xs sm:text-sm font-black text-amber-300">
-              دليل ارتفاعات الرفوف المعتمد لترتيب القطع حسب الحجم والوزن:
+              فلترة المتشابهات حسب (الصنف — الحجم / السعر — المليمتر ملم — سعة {MAX_ITEMS_PER_SHELF} صنف للرف):
             </h3>
           </div>
-          <span className="text-[11px] text-neutral-300 font-bold">
-            القطع الثقيلة والكبيرة توضع في الأسفل (FL / A) والخفيفة والصغيرة في الأعلى (C / D)
+          <span className="text-[11px] text-cyan-300 font-bold">
+            إجمالي مجموعات الأصناف المتشابهة: {filteredSwapPlans.length} من {swapPlans.length} مجموعة
           </span>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          {SHELF_ELEVATION_GUIDE.map((level) => {
-            const elevInfo = parseShelfElevation(`N11${level.code}1`);
-            return (
-              <div
-                key={level.code}
-                className={`p-2.5 rounded-xl border ${elevInfo.badgeColorClass} flex flex-col justify-between gap-1`}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <span className="font-mono font-black text-sm px-2 py-0.5 rounded bg-black/40 border border-current/30">
-                    {level.code}
-                  </span>
-                  <span className="text-[11px] font-black">
-                    {level.meters === 0 ? 'على الأرض (0م)' : `ارتفاع ${level.meters} متر`}
-                  </span>
-                </div>
-                <p className="text-[10px] opacity-90 leading-snug font-bold mt-0.5">
-                  {level.suitableForAr}
-                </p>
-              </div>
-            );
-          })}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+          <div>
+            <label className="block text-[11px] font-bold text-neutral-300 mb-1">
+              1. تصفية حسب الصنف (Category):
+            </label>
+            <select
+              value={selectedFamilyFilter}
+              onChange={(e) => {
+                setSelectedFamilyFilter(e.target.value);
+                setVisiblePlansLimit(12);
+              }}
+              className="w-full px-3 py-2 rounded-xl bg-[#140D0A] border border-amber-700/50 text-amber-200 text-xs font-bold focus:outline-none focus:border-amber-400"
+            >
+              <option value="ALL">كل الأصناف المتشابهة ({swapPlans.length} صنف)</option>
+              {swapPlans.map((p) => (
+                <option key={p.id} value={p.family}>
+                  {p.family} — {p.familyAr} ({p.allGroupItemsSortedBySize.length} قطع)
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-neutral-300 mb-1">
+              2. تصفية حسب الحجم أو الأغلى سعراً:
+            </label>
+            <select
+              value={selectedSizeFilter}
+              onChange={(e) => {
+                setSelectedSizeFilter(e.target.value);
+                setVisiblePlansLimit(12);
+              }}
+              className="w-full px-3 py-2 rounded-xl bg-[#140D0A] border border-amber-700/50 text-amber-200 text-xs font-bold focus:outline-none focus:border-amber-400"
+            >
+              <option value="ALL">جميع الأحجام والأسعار</option>
+              <option value="EXPENSIVE">الأغلى سعراً / قيمة عالية جداً 💰</option>
+              <option value="كبير / ثقيل">ثقيلة جداً (تنقل إلى الموقعين D و C)</option>
+              <option value="متوسط الحجم">متوسط الحجم</option>
+              <option value="صغير / خفيف">صغير / خفيف</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-cyan-300 mb-1">
+              3. تصفية حسب نطاق المقاس بالملم (MM):
+            </label>
+            <select
+              value={mmFilterRange}
+              onChange={(e) => {
+                setMmFilterRange(e.target.value);
+                setVisiblePlansLimit(12);
+              }}
+              className="w-full px-3 py-2 rounded-xl bg-[#140D0A] border border-cyan-700/50 text-cyan-200 text-xs font-bold focus:outline-none focus:border-cyan-400"
+            >
+              <option value="ALL">كل المقاسات بالملم (MM)</option>
+              <option value="LT20">دقيق وصغير: أقل من 20 ملم</option>
+              <option value="20_60">متوسط: من 20 ملم إلى 60 ملم</option>
+              <option value="61_150">كبير: من 61 ملم إلى 150 ملم</option>
+              <option value="GT150">ثقيل جداً: أكبر من 150 ملم</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-cyan-300 mb-1">
+              4. بحث دقيق بالملم أو الصنف (مثال: 100 ملم أو M10):
+            </label>
+            <div className="relative">
+              <Filter className="w-3.5 h-3.5 absolute right-3 top-1/2 -translate-y-1/2 text-cyan-400" />
+              <input
+                type="text"
+                value={mmSearchText}
+                onChange={(e) => setMmSearchText(e.target.value)}
+                placeholder="اكتب المقاس بالملم (مثلاً 80.5 أو 215)..."
+                className="w-full pr-8 pl-2.5 py-2 rounded-xl bg-[#140D0A] border border-cyan-700/50 text-white text-xs focus:outline-none focus:border-cyan-400"
+              />
+            </div>
+          </div>
         </div>
       </div>
-
-      {/* مساعد جمني الذكي للترجمة وحسبة المقاسات والأماكن المناسبة للحجم والوزن */}
-      <GeminiEngineeringAssistantPanel
-        items={items}
-        onRefresh={onRefresh}
-        onMoveItemToShelf={handleDirectMoveSingleItem}
-      />
 
       {/* تنبيه الحالة */}
       {statusMessage && (
@@ -395,30 +683,281 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       )}
 
-      {/* القسم الأول: نقل مباشر وسريع لأي قطعة إلى موقع جديد */}
+      {/* القسم الأول (الجديد): فرز القطع الأغلى سعراً لتجميعها في رف واحد (بحد أقصى 15 صنفاً فقط لكل رف) */}
+      {items.length > 0 && highValueShelfPlans.length > 0 && (
+        <div className="bg-[#271C11] border-2 border-amber-400/80 rounded-2xl p-4 space-y-3 shadow-xl">
+          {(() => {
+            const topPlan = highValueShelfPlans[0];
+            const activeExpensiveBin = (expensiveShelfOverride.trim() || topPlan.targetBin).toUpperCase();
+            return (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-700/40 pb-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="px-2.5 py-1 rounded-lg bg-amber-400 text-stone-950 font-black text-xs">
+                        رف القطع الأغلى سعراً 💰 ({topPlan.itemsCount}/{MAX_ITEMS_PER_SHELF} صنف فقط)
+                      </span>
+                      <h3 className="text-sm sm:text-base font-black text-white">
+                        فرز القطع الأغلى سعراً لتجميعها في رف واحد ({activeExpensiveBin}) — حد الرف {MAX_ITEMS_PER_SHELF} صنفاً فقط
+                      </h3>
+                    </div>
+                    <p className="text-xs text-amber-200/90">
+                      تم فرز المخزون تنازلياً من الأغلى سعراً ({topPlan.maxUnitPriceSar.toLocaleString()} ر.س) إلى ({topPlan.minUnitPriceSar.toLocaleString()} ر.س) بإجمالي قيمة ~{topPlan.totalShelfValueSar.toLocaleString()} ر.س، مع الاكتفاء بـ {MAX_ITEMS_PER_SHELF} صنفاً كحد أقصى في الرف الواحد.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      dir="ltr"
+                      value={expensiveShelfOverride}
+                      onChange={(e) => setExpensiveShelfOverride(e.target.value.toUpperCase())}
+                      placeholder={`الرف الموحد (${topPlan.targetBin})`}
+                      className="w-40 px-3 py-2 rounded-xl bg-black/50 border border-amber-400/70 text-amber-200 font-mono font-bold text-xs text-center"
+                      title="حدد رمز الرف المراد تجميع الـ 15 قطعة الأغلى سعراً فيه"
+                    />
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => handleExecuteHighValueShelfPlan(topPlan)}
+                      className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-stone-950 text-xs font-black flex items-center gap-1.5 shadow-lg cursor-pointer"
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>
+                        اعتماد وتجميع الأغلى سعراً ({topPlan.itemsCount}/{MAX_ITEMS_PER_SHELF} صنف) في ({activeExpensiveBin}) 💰
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-80 overflow-y-auto pr-1">
+                  {topPlan.items.slice(0, MAX_ITEMS_PER_SHELF).map((entry, idx) => {
+                    const { item, sizeProfile, fromBin } = entry;
+                    const isAlreadyThere = fromBin === activeExpensiveBin;
+                    return (
+                      <div
+                        key={`exp-${item.part_number}-${idx}`}
+                        className="p-2.5 rounded-xl bg-[#18110A] border border-amber-600/40 flex flex-col justify-between gap-2 text-xs"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-black text-[11px] border border-amber-500/40">
+                              #{idx + 1} / {MAX_ITEMS_PER_SHELF}
+                            </span>
+                            <span className="font-mono font-black text-white bg-black/50 px-2 py-0.5 rounded border border-stone-700">
+                              {item.part_number}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-amber-400 text-stone-950 font-black text-[11px]">
+                              {sizeProfile.estimatedPriceSar.toLocaleString()} ر.س
+                            </span>
+                          </div>
+                          <div className="font-bold text-amber-100 truncate" title={item.description_ar}>
+                            {item.description_ar}
+                          </div>
+                          <div className="text-[11px] text-neutral-400 font-mono truncate" dir="ltr" title={item.description_en}>
+                            {item.description_en}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 pt-1 border-t border-amber-900/40">
+                          <span className="font-mono text-[11px] text-neutral-300">
+                            من: <strong className="text-amber-300">{fromBin}</strong> ⬅ إلى:{' '}
+                            <strong className="text-emerald-400">{activeExpensiveBin}</strong>
+                          </span>
+                          {isAlreadyThere ? (
+                            <span className="text-[11px] text-emerald-400 font-bold">✓ في الرف</span>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleDirectMoveSingleItem(item.part_number, activeExpensiveBin)}
+                              className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold text-[11px] cursor-pointer"
+                            >
+                              نقل للرف
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* القسم الثاني: نقل القطع الثقيلة جداً إلى الموقعين D و C تلقائياً (بحد أقصى 15 صنفاً لكل رف) */}
+      {items.length > 0 && (
+        <div className="bg-[#1A261E] border-2 border-emerald-500/70 rounded-2xl p-4 space-y-3 shadow-xl">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-2.5 py-1 rounded-lg bg-emerald-500 text-stone-950 font-black text-xs">
+                  مواقع الثقيلة جداً: D و C (بحد {MAX_ITEMS_PER_SHELF} صنف للرف)
+                </span>
+                <h3 className="text-sm sm:text-base font-black text-white">
+                  توجيه ونقل القطع الثقيلة جداً إلى الموقعين D و C ({heavyToDSuggestions.length} قطعة ثقيلة للتوزيع)
+                </h3>
+              </div>
+              <p className="text-xs text-emerald-200/90">
+                يتم توجيه القطع الثقيلة جداً أولاً إلى الرف (D) حتى يكتمل بـ {MAX_ITEMS_PER_SHELF} صنفاً، ثم ينتقل الفائض تلقائياً إلى الرف (C) بحد {MAX_ITEMS_PER_SHELF} صنفاً لكل رف دون تكديس.
+              </p>
+            </div>
+
+            {heavyToDSuggestions.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={heavyTargetOverride}
+                  onChange={(e) => setHeavyTargetOverride(e.target.value.toUpperCase())}
+                  placeholder="تلقائي (D و C — 15/رف)"
+                  className="w-44 px-3 py-2 rounded-xl bg-black/50 border border-emerald-500/60 text-white font-mono font-bold text-xs text-center"
+                  title="اتركه فارغاً لتوزيع الثقيلة تلقائياً على D ثم C بحد 15 صنفاً لكل رف"
+                />
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleMoveAllHeavyToDC}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-lg cursor-pointer"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>
+                    اعتماد ونقل كافة القطع الثقيلة إلى D و C ({heavyToDSuggestions.length} قطعة) 🟢
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {heavyToDSuggestions.length === 0 ? (
+            <div className="p-3 rounded-xl bg-black/30 border border-emerald-700/40 text-xs text-emerald-300 font-bold flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>جميع القطع الثقيلة في المخزون مستقرة حالياً في مواقع الثقيلة المعتمدة (D و C) ضمن حد 15 صنفاً لكل رف!</span>
+            </div>
+          ) : (
+            <div className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
+              {heavyToDSuggestions.slice(0, visibleHeavyLimit).map((sug, idx) => {
+                const item = itemByPartMap.get(sug.partNumber);
+                if (!item) return null;
+                const sz = estimatePartSizeProfile(item);
+                const destBin = heavyTargetOverride.trim() || sug.to;
+                const isTargetC = isCLocation(destBin);
+                return (
+                  <div
+                    key={`${sug.partNumber}-${idx}`}
+                    className="p-2.5 rounded-xl bg-[#111914] border border-emerald-700/50 flex flex-wrap items-center justify-between gap-2 text-xs"
+                  >
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-black text-amber-300 bg-black/50 px-2 py-0.5 rounded border border-amber-600/40">
+                          {sug.partNumber}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-amber-950/90 text-amber-200 border border-amber-600/50 font-bold text-[11px]">
+                          الصنف: {item.category}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-red-950/90 text-red-200 border border-red-600/60 font-bold text-[11px]">
+                          الحجم: {sz.sizeCategory}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-cyan-950/90 text-cyan-200 border border-cyan-600/60 font-mono font-bold text-[11px]">
+                          المقاس: {sz.mmLabel}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/50 font-mono font-bold text-[11px]">
+                          السعر: {sz.estimatedPriceSar.toLocaleString()} ر.س
+                        </span>
+                        <span className="font-bold text-white">{item.description_ar}</span>
+                      </div>
+                      <p className="text-[11px] text-neutral-400 font-mono" dir="ltr">
+                        {item.description_en}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="px-2.5 py-1 rounded-lg bg-black/50 border border-emerald-700/50 font-mono font-bold text-neutral-200">
+                        من: <strong className="text-amber-300">{sug.from}</strong> ⬅ إلى موقع الثقيلة ({isTargetC ? 'C' : 'D'}):{' '}
+                        <strong className="text-emerald-400">{destBin}</strong> (الكمية: {sug.quantity})
+                      </span>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => handleDirectMoveSingleItem(sug.partNumber, destBin)}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-black cursor-pointer"
+                      >
+                        نقل إلى {destBin} 🟢
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {heavyToDSuggestions.length > visibleHeavyLimit && (
+                <div className="pt-2 text-center">
+                  <button
+                    type="button"
+                    onClick={() => setVisibleHeavyLimit((prev) => prev + 25)}
+                    className="px-4 py-1.5 rounded-xl bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-600/50 text-xs font-bold cursor-pointer"
+                  >
+                    عرض المزيد من القطع الثقيلة ({heavyToDSuggestions.length - visibleHeavyLimit} متبقية)
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* القسم الثالث: نقل مباشر وسريع لأي قطعة إلى موقع جديد */}
       {items.length > 0 && (
         <div className="bg-[#221612] border-2 border-emerald-700/50 rounded-2xl p-4 space-y-3 shadow-md">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-2">
               <ArrowRightLeft className="w-4 h-4 text-emerald-400" />
               <h3 className="text-sm font-black text-emerald-300">
-                1. نقل سريع لأي قطعة إلى موقع وارتفاع جديد (تنتقل فوراً بعد الاعتماد)
+                1. نقل سريع لأي قطعة إلى موقع جديد (يدعم البحث بالصنف والحجم والملم والسعر في {items.length.toLocaleString()} قطعة)
               </h3>
             </div>
-            {selectedQuickItem && selectedQuickItemSize && selectedQuickItemElev && (
+            {selectedQuickItem && selectedQuickItemSize && (
               <div className="flex items-center gap-2 flex-wrap text-[11px]">
-                <span className={`px-2.5 py-0.5 rounded-lg border font-bold ${selectedQuickItemElev.badgeColorClass}`}>
-                  الارتفاع الحالي: {selectedQuickItemElev.shortLabelAr}
+                <span className="px-2.5 py-0.5 rounded-lg bg-stone-900 text-amber-200 border border-amber-600/50 font-bold">
+                  الموقع الحالي: {selectedQuickItem.location_code} | الصنف: {selectedQuickItem.category}
                 </span>
                 <span className="px-2.5 py-0.5 rounded-lg bg-amber-950/90 text-amber-200 border border-amber-500/60 font-bold">
-                  الحجم: {selectedQuickItemSize.sizeCategory} ({selectedQuickItemSize.dimensionsLabel}) — ينصح بـ: {selectedQuickItemSize.recommendedShelfTextAr}
+                  الحجم: {selectedQuickItemSize.sizeCategory}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-lg bg-cyan-950/90 text-cyan-200 border border-cyan-500/60 font-mono font-bold">
+                  المقاس بالملم: {selectedQuickItemSize.mmLabel}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/50 font-mono font-bold">
+                  السعر: {selectedQuickItemSize.estimatedPriceSar.toLocaleString()} ر.س
                 </span>
               </div>
             )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-            {/* اختيار القطعة */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+            <div>
+              <label className="block text-xs font-bold text-neutral-300 mb-1">
+                بحث سريع بالرقم أو الصنف أو الملم:
+              </label>
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute right-3 top-1/2 -translate-y-1/2 text-amber-400" />
+                <input
+                  type="text"
+                  value={quickSearchFilter}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setQuickSearchFilter(val);
+                    if (/^\d{10}$/.test(val.trim()) && itemByPartMap.has(val.trim())) {
+                      setQuickPartNumber(val.trim());
+                    }
+                  }}
+                  placeholder="ابحث بالرقم أو الصنف أو الملم..."
+                  className="w-full pr-8 pl-2.5 py-2.5 rounded-xl bg-[#160E0B] border border-[#4A3227] text-white text-xs focus:outline-none focus:border-amber-500"
+                />
+              </div>
+            </div>
+
             <div>
               <label className="block text-xs font-bold text-neutral-300 mb-1">
                 اختر القطعة المراد نقلها:
@@ -426,40 +965,48 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
               <select
                 value={quickPartNumber}
                 onChange={(e) => {
-                  setQuickPartNumber(e.target.value);
-                  setQuickNewLocation('');
+                  const p = e.target.value;
+                  setQuickPartNumber(p);
+                  const found = itemByPartMap.get(p);
+                  if (found) {
+                    const sz = estimatePartSizeProfile(found);
+                    if (sz.sizeCategory === 'كبير / ثقيل' && !isHeavyDutyDOrCLocation(found.location_code)) {
+                      setQuickNewLocation(sz.targetHeavyLocation);
+                    } else {
+                      setQuickNewLocation('');
+                    }
+                  }
                 }}
                 className="w-full px-3 py-2.5 rounded-xl bg-[#160E0B] border border-[#4A3227] text-amber-200 text-xs font-bold focus:outline-none focus:border-amber-500"
               >
-                <option value="">-- اختر رقم القطعة من المخزون ({items.length}) --</option>
-                {items.map((item, idx) => {
-                  const elev = parseShelfElevation(item.location_code);
+                <option value="">
+                  -- اختر رقم القطعة (عرض {quickSelectableItems.length} من {items.length.toLocaleString()}) --
+                </option>
+                {quickSelectableItems.map((item, idx) => {
                   const sz = estimatePartSizeProfile(item);
                   return (
                     <option key={`${item.part_number}-${idx}`} value={item.part_number}>
-                      {item.part_number} — {item.location_code} ({elev.shortLabelAr}) — [{sz.sizeCategory}] {item.description_ar}
+                      {item.part_number} — {item.location_code} — [{item.category} | {sz.sizeCategory} | {sz.mmLabel} | {sz.estimatedPriceSar} ر.س] {item.description_ar}
                     </option>
                   );
                 })}
               </select>
             </div>
 
-            {/* إدخال الموقع الجديد */}
             <div>
               <label className="block text-xs font-bold text-emerald-300 mb-1">
-                الموقع الجديد {quickNewLocation ? `(${parseShelfElevation(quickNewLocation).shortLabelAr})` : ''}:
+                الموقع الجديد {quickNewLocation && isHeavyDutyDOrCLocation(quickNewLocation) ? '(موقع الثقيلة D/C)' : ''}:
               </label>
               <input
                 type="text"
                 dir="ltr"
                 value={quickNewLocation}
                 onChange={(e) => setQuickNewLocation(e.target.value.toUpperCase())}
-                placeholder="مثال: N11FL1 (أرضي) أو N11A1 (1م) أو N11B1 (2م)"
+                placeholder="مثال: N11D1 أو N11C1 أو D1 أو C1"
                 className="w-full px-3 py-2.5 rounded-xl bg-[#160E0B] border border-emerald-600/60 text-white font-mono font-bold text-xs text-center focus:outline-none focus:border-emerald-400"
               />
             </div>
 
-            {/* زر الاعتماد والنقل */}
             <button
               type="button"
               disabled={busy || !selectedQuickItem || !quickNewLocation.trim()}
@@ -474,14 +1021,13 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
             </button>
           </div>
 
-          {/* أزرار المواقع المتقاربة السريعة مع توضيح الارتفاع */}
           {selectedQuickItem && quickNearbyBins.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs">
-              <span className="text-neutral-400">رفوف مقترحة في نفس الممر (حسب الارتفاع):</span>
+              <span className="text-neutral-400">مواقع مقترحة (مواقع D و C للثقيلة والمواقع المجاورة في نفس الممر):</span>
               {quickNearbyBins
                 .filter((b) => b !== selectedQuickItem.location_code)
                 .map((bin) => {
-                  const binElev = parseShelfElevation(bin);
+                  const isDC = isHeavyDutyDOrCLocation(bin);
                   return (
                     <button
                       key={bin}
@@ -490,13 +1036,17 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                       className={`px-2.5 py-1 rounded-lg font-mono font-bold border cursor-pointer flex items-center gap-1 ${
                         quickNewLocation === bin
                           ? 'bg-emerald-600 text-white border-emerald-400'
+                          : isDC
+                          ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500/60 hover:bg-emerald-900'
                           : 'bg-[#19110D] text-amber-200 border-[#3D271F] hover:border-amber-500'
                       }`}
                     >
                       <span>{bin}</span>
-                      <span className="text-[10px] font-sans text-neutral-300">
-                        ({binElev.meters === 0 ? 'أرضي 0م' : `${binElev.meters}م`})
-                      </span>
+                      {isDC && (
+                        <span className="text-[10px] font-sans text-emerald-300">
+                          (ثقيلة {isCLocation(bin) ? 'C' : 'D'})
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -521,7 +1071,7 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                 <div className="text-xs space-y-1">
                   <span className="font-mono font-bold text-amber-300">{doc.id}</span>
                   <div className="flex flex-wrap gap-1.5">
-                    {doc.lines.map((line, idx) => (
+                    {doc.lines.slice(0, 12).map((line, idx) => (
                       <span
                         key={idx}
                         className="px-2 py-0.5 rounded bg-[#261A15] border border-[#3D271F] font-mono text-[11px] text-neutral-200"
@@ -529,6 +1079,11 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                         {line.part_number}: {line.old_location || '—'} ⬅ {line.location}
                       </span>
                     ))}
+                    {doc.lines.length > 12 && (
+                      <span className="text-[11px] text-amber-300 font-bold">
+                        +{doc.lines.length - 12} قطعة أخرى
+                      </span>
+                    )}
                   </div>
                 </div>
                 <button
@@ -546,84 +1101,111 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
         </div>
       )}
 
-      {/* القسم الثاني: بطاقات المتشابهات مرتبة حسب الحجم وارتفاع الرف */}
-      {swapPlans.length === 0 ? (
+      {/* القسم الرابع: بطاقات المتشابهات من كل صنف مع تقسيم الرفوف بحد أقصى 15 صنفاً لكل رف */}
+      {filteredSwapPlans.length === 0 ? (
         <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] p-8 text-center space-y-2">
           <Sparkles className="w-8 h-8 text-amber-400 mx-auto" />
           <h3 className="text-sm sm:text-base font-bold text-white">
             {items.length === 0
-              ? 'المخزون فارغ حالياً — اقرأ ورقة جرد بالماسح الذكي (Gemini Vision) لتظهر خطط تجميع المتشابهات وترتيب الأحجام'
-              : 'لا توجد مجموعات متناثرة حالياً — يمكنك استخدام النقل السريع أعلاه'}
+              ? 'المخزون فارغ حالياً — اقرأ ورقة جرد بالماسح الذكي لتظهر خطط تجميع المتشابهات بالحجم والصنف والملم'
+              : 'لا توجد مجموعات مطابقة للفلتر الحالي — جرب اختيار كل الأصناف أو مسح نص البحث بالملم'}
           </h3>
         </div>
       ) : (
         <div className="space-y-4">
           <h3 className="text-sm font-black text-amber-300 px-1">
-            2. خطط تجميع القطع المتشابهة وترتيبها حسب الحجم وارتفاع الرف ({swapPlans.length} مجموعة):
+            2. خطط تجميع المتشابهات من كل صنف (بحد أقصى {MAX_ITEMS_PER_SHELF} صنفاً فقط لكل رف) ({filteredSwapPlans.length} مجموعة):
           </h3>
 
-          {swapPlans.map((plan) => {
+          {displayedPlans.map((plan) => {
             const activeTargetBin = customTargetBins[plan.id] || plan.targetBin;
-            const activeTargetElev = parseShelfElevation(activeTargetBin);
+            const isTargetHeavyDC = isHeavyDutyDOrCLocation(activeTargetBin);
             const includeEvictions = includeEvictionsMap[plan.id] ?? true;
+            const isPlanExpanded = expandedPlans[plan.id] ?? false;
             const adjacentCandidates = getAdjacentStorageBins(activeTargetBin, allBins, 8);
 
-            const sortedGroupEntries = [...plan.allGroupItemsSortedBySize].sort((a, b) =>
-              sizeSortOrder === 'desc'
-                ? b.sizeProfile.sizeScore - a.sizeProfile.sizeScore
-                : a.sizeProfile.sizeScore - b.sizeProfile.sizeScore
-            );
+            const sortedGroupEntries = [...plan.allGroupItemsSortedBySize].sort((a, b) => {
+              if (sizeSortOrder === 'price_desc') {
+                return (
+                  b.sizeProfile.estimatedPriceSar - a.sizeProfile.estimatedPriceSar ||
+                  b.sizeProfile.primaryMm - a.sizeProfile.primaryMm
+                );
+              }
+              if (sizeSortOrder === 'desc') {
+                return (
+                  b.sizeProfile.primaryMm - a.sizeProfile.primaryMm ||
+                  b.sizeProfile.sizeScore - a.sizeProfile.sizeScore
+                );
+              }
+              return (
+                a.sizeProfile.primaryMm - b.sizeProfile.primaryMm ||
+                a.sizeProfile.sizeScore - b.sizeProfile.sizeScore
+              );
+            });
+            const visibleEntries = isPlanExpanded
+              ? sortedGroupEntries.slice(0, 100)
+              : sortedGroupEntries.slice(0, MAX_ITEMS_PER_SHELF);
 
             return (
               <div
                 key={plan.id}
                 className="bg-[#251914] rounded-2xl border border-[#4A3227] shadow-lg overflow-hidden"
               >
-                {/* رأس المجموعة مع معلومات الحجم والارتفاع */}
                 <div className="p-3.5 bg-[#1E1410] border-b border-[#3D271F] flex flex-wrap items-center justify-between gap-3">
-                  <div className="space-y-1">
+                  <div className="space-y-1.5">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/40 font-mono font-black text-xs">
-                        {plan.family}
+                        الصنف: {plan.family}
                       </span>
                       <h4 className="text-sm sm:text-base font-black text-white">
                         {plan.familyAr}
                       </h4>
-                      <span className="px-2.5 py-0.5 rounded-lg bg-stone-900 border border-amber-600/40 text-amber-200 text-xs font-bold">
-                        تصنيف حجم المجموعة: {plan.groupSizeCategory}
+                      <span className="px-2.5 py-0.5 rounded-lg bg-amber-500 text-stone-950 font-black text-xs">
+                        سعة الرف: {Math.min(MAX_ITEMS_PER_SHELF, plan.allGroupItemsSortedBySize.length)} / {MAX_ITEMS_PER_SHELF} صنف كحد أقصى
                       </span>
-                      <span className={`px-2.5 py-0.5 rounded-lg border text-xs font-bold ${activeTargetElev.badgeColorClass}`}>
-                        {activeTargetBin}: {activeTargetElev.shortLabelAr}
+                      <span
+                        className={`px-2.5 py-0.5 rounded-lg border text-xs font-bold ${
+                          plan.groupSizeCategory === 'كبير / ثقيل'
+                            ? 'bg-red-950 text-red-200 border-red-500/60'
+                            : 'bg-stone-900 border-amber-600/40 text-amber-200'
+                        }`}
+                      >
+                        الحجم السائد: {plan.groupSizeCategory}
                       </span>
+                      <span className="px-2.5 py-0.5 rounded-lg bg-cyan-950/90 text-cyan-200 border border-cyan-500/60 font-mono text-xs font-bold">
+                        نطاق المقاس بالملم: {plan.groupMmSummary}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-lg bg-amber-950/90 text-amber-200 border border-amber-500/60 font-mono text-xs font-bold">
+                        إجمالي قيمة المجموعة: ~{plan.groupTotalValueSar.toLocaleString()} ر.س
+                      </span>
+                      {isTargetHeavyDC && (
+                        <span className="px-2.5 py-0.5 rounded-lg bg-emerald-950/90 text-emerald-300 border border-emerald-500/70 text-xs font-bold">
+                          موقع الثقيلة ({isCLocation(activeTargetBin) ? 'C' : 'D'}): {activeTargetBin}
+                        </span>
+                      )}
                     </div>
-                    <p className="text-[11px] text-neutral-300">
-                      إجمالي قطع العائلة: <strong>{plan.allGroupItemsSortedBySize.length}</strong> قطعة (مرتبة {sizeSortOrder === 'desc' ? 'من الأكبر/الأثقل إلى الأصغر/الأخف' : 'من الأصغر/الأخف إلى الأكبر/الأثقل'}) — الرف الموصى به حسب الوزن والحجم:{' '}
-                      <strong className="text-emerald-300 font-mono">
-                        {plan.recommendedHeightBin} ({plan.recommendedHeightElevation.shortLabelAr})
-                      </strong>
-                    </p>
+
+                    {plan.shelfBatches && plan.shelfBatches.length > 0 && (
+                      <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                        <span className="text-[11px] text-amber-300 font-bold">
+                          توزيع الرفوف (حد {MAX_ITEMS_PER_SHELF} صنف لكل رف):
+                        </span>
+                        {plan.shelfBatches.map((batch) => (
+                          <span
+                            key={`${plan.id}-batch-${batch.batchIndex}`}
+                            className="px-2 py-0.5 rounded-md bg-[#140D0A] border border-amber-600/50 text-[11px] text-amber-200 font-mono font-bold"
+                          >
+                            رف #{batch.batchIndex} ({batch.shelfBin}): {batch.itemsCount}/{batch.maxCapacity} صنف
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
-                  {/* اختيار الموقع الموحد وارتفاع الرف */}
                   <div className="flex items-center gap-2 flex-wrap">
-                    {plan.recommendedHeightBin !== activeTargetBin && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setCustomTargetBins((prev) => ({
-                            ...prev,
-                            [plan.id]: plan.recommendedHeightBin,
-                          }))
-                        }
-                        className="px-2.5 py-1.5 rounded-xl bg-emerald-950/90 hover:bg-emerald-900 text-emerald-200 border border-emerald-500/60 text-[11px] font-black cursor-pointer"
-                      >
-                        اختيار الرف الأنسب للحجم: {plan.recommendedHeightBin} ({plan.recommendedHeightElevation.meters}م)
-                      </button>
-                    )}
-
                     <div className="flex items-center gap-2 text-xs bg-[#160E0B] px-3 py-1.5 rounded-xl border border-[#38241C]">
                       <MapPin className="w-3.5 h-3.5 text-amber-400" />
-                      <span className="text-neutral-300 font-bold">الموقع الموحد:</span>
+                      <span className="text-neutral-300 font-bold">الرف الموحد (بحد {MAX_ITEMS_PER_SHELF} صنف):</span>
                       <select
                         value={activeTargetBin}
                         onChange={(e) =>
@@ -635,37 +1217,38 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                         className="bg-[#2A1B15] text-amber-300 font-mono font-black px-2 py-1 rounded border border-amber-600/50 text-xs"
                       >
                         <option value={plan.targetBin}>
-                          {plan.targetBin} — {parseShelfElevation(plan.targetBin).shortLabelAr} (المقترح)
+                          {plan.targetBin} {isHeavyDutyDOrCLocation(plan.targetBin) ? '— موقع الثقيلة D/C' : '— الموقع المقترح'}
                         </option>
-                        {adjacentCandidates.map((adj) => {
-                          const elev = parseShelfElevation(adj);
-                          return (
-                            <option key={adj} value={adj}>
-                              {adj} — {elev.shortLabelAr} ({elev.suitabilityAr})
-                            </option>
-                          );
-                        })}
+                        {adjacentCandidates.map((adj) => (
+                          <option key={adj} value={adj}>
+                            {adj} {isHeavyDutyDOrCLocation(adj) ? '— موقع الثقيلة D/C' : '— موقع مجاور'}
+                          </option>
+                        ))}
                       </select>
                     </div>
                   </div>
                 </div>
 
-                {/* قائمة جميع قطع المجموعة مرتبة حسب الحجم مع بيان موقعها وارتفاعها */}
                 <div className="p-3.5 space-y-2.5 text-xs">
                   <div className="font-bold text-amber-300 flex items-center justify-between flex-wrap gap-2">
                     <span>
-                      ترتيب القطع المتشابهة حسب الحجم والمقاس ({sortedGroupEntries.length} قطع):
+                      قائمة المتشابهات في الصنف ({plan.familyAr}) (عرض {visibleEntries.length} من {sortedGroupEntries.length} — بحد {MAX_ITEMS_PER_SHELF} صنف لكل رف):
                     </span>
                     <span className="text-[11px] text-neutral-400">
-                      مرتبة بالتدرج الحجمي لسهولة صفّها في الرف ({activeTargetBin} — {activeTargetElev.shortLabelAr})
+                      مرتبة حسب السعر والمقاس بالملم (MM) والحجم
                     </span>
                   </div>
 
                   <div className="space-y-1.5">
-                    {sortedGroupEntries.map((entry, idx) => {
-                      const { item, sizeProfile, currentElevation } = entry;
+                    {visibleEntries.map((entry, idx) => {
+                      const { item, sizeProfile } = entry;
                       const currentBin = item.location_code.trim().toUpperCase();
-                      const isAlreadyInTarget = currentBin === activeTargetBin;
+                      const batchIdx = Math.floor(idx / MAX_ITEMS_PER_SHELF);
+                      const assignedShelfBin =
+                        batchIdx === 0
+                          ? activeTargetBin
+                          : plan.shelfBatches?.[batchIdx]?.shelfBin || activeTargetBin;
+                      const isAlreadyInTarget = currentBin === assignedShelfBin;
 
                       return (
                         <div
@@ -679,10 +1262,16 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                           <div className="space-y-1 flex-1 min-w-[240px]">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-black text-[11px] border border-amber-500/40">
-                                #{idx + 1} بالحجم
+                                #{(idx % MAX_ITEMS_PER_SHELF) + 1}/{MAX_ITEMS_PER_SHELF} (رف {assignedShelfBin})
                               </span>
                               <span className="font-mono font-black text-amber-300 text-xs">
                                 {item.part_number}
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-amber-400 text-stone-950 font-black text-[11px]">
+                                السعر: {sizeProfile.estimatedPriceSar.toLocaleString()} ر.س
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-[#3A271F] text-amber-200 border border-amber-700/40 text-[11px] font-bold">
+                                الصنف: {item.category}
                               </span>
                               <span
                                 className={`px-2 py-0.5 rounded font-bold text-[11px] border ${
@@ -693,10 +1282,13 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                                     : 'bg-sky-950/80 text-sky-200 border-sky-600/60'
                                 }`}
                               >
-                                الحجم: {sizeProfile.sizeCategory} ({sizeProfile.dimensionsLabel})
+                                الحجم: {sizeProfile.sizeCategory}
                               </span>
-                              <span className={`px-2 py-0.5 rounded text-[11px] font-bold border ${currentElevation.badgeColorClass}`}>
-                                {currentBin}: {currentElevation.shortLabelAr}
+                              <span className="px-2 py-0.5 rounded bg-cyan-950/90 text-cyan-200 border border-cyan-500/60 font-mono font-bold text-[11px]">
+                                المقاس بالملم: {sizeProfile.mmLabel}
+                              </span>
+                              <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-stone-900 text-neutral-200 border border-stone-700">
+                                الموقع الحالي: {currentBin}
                               </span>
                               <span className="text-neutral-300 font-mono font-bold">
                                 (الكمية: {item.qty_remaining})
@@ -714,19 +1306,19 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                           <div className="flex items-center gap-2 flex-wrap">
                             {isAlreadyInTarget ? (
                               <span className="px-3 py-1 rounded-lg bg-emerald-950/80 border border-emerald-600/60 text-emerald-300 font-bold text-[11px]">
-                                ✓ مستقرة في الموقع الموحد ({activeTargetBin})
+                                ✓ مستقرة في الرف ({assignedShelfBin})
                               </span>
                             ) : (
                               <>
                                 <span className="px-2.5 py-1 rounded-lg bg-stone-900 border border-stone-700 font-mono font-bold text-neutral-200">
-                                  من: <strong className="text-amber-300">{currentBin}</strong> ({currentElevation.meters}م) ⬅ إلى:{' '}
-                                  <strong className="text-emerald-400">{activeTargetBin}</strong> ({activeTargetElev.meters}م)
+                                  من: <strong className="text-amber-300">{currentBin}</strong> ⬅ إلى:{' '}
+                                  <strong className="text-emerald-400">{assignedShelfBin}</strong>
                                 </span>
                                 <button
                                   type="button"
                                   disabled={busy}
                                   onClick={() =>
-                                    handleDirectMoveSingleItem(item.part_number, activeTargetBin)
+                                    handleDirectMoveSingleItem(item.part_number, assignedShelfBin)
                                   }
                                   className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold cursor-pointer"
                                 >
@@ -740,7 +1332,25 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                     })}
                   </div>
 
-                  {/* ب. القطع غير المتشابهة المقترح إخراجها من الموقع */}
+                  {sortedGroupEntries.length > MAX_ITEMS_PER_SHELF && (
+                    <div className="pt-1 text-center">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedPlans((prev) => ({
+                            ...prev,
+                            [plan.id]: !isPlanExpanded,
+                          }))
+                        }
+                        className="px-3 py-1 rounded-lg bg-stone-900 hover:bg-stone-800 text-amber-300 border border-amber-700/40 text-xs font-bold cursor-pointer"
+                      >
+                        {isPlanExpanded
+                          ? 'طي القائمة ▲'
+                          : `عرض الدفعة التالية في الرف الرديف (${sortedGroupEntries.length - MAX_ITEMS_PER_SHELF} قطعة إضافية) ▼`}
+                      </button>
+                    </div>
+                  )}
+
                   {plan.evictions.length > 0 && (
                     <div className="space-y-1.5 pt-2 border-t border-[#38241C]">
                       <label className="flex items-center gap-2 font-bold text-orange-300 cursor-pointer">
@@ -756,14 +1366,13 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                           className="accent-orange-500"
                         />
                         <span>
-                          إخراج القطع غير المتشابهة من ({plan.targetBin}) إلى موقع مجاور يناسب حجمها ({plan.evictions.length}):
+                          إخراج الأصناف غير المتشابهة من ({plan.targetBin}) إلى موقع مجاور للحفاظ على سقف {MAX_ITEMS_PER_SHELF} صنفاً ({plan.evictions.length}):
                         </span>
                       </label>
 
-                      {plan.evictions.map((ev, idx) => {
+                      {plan.evictions.slice(0, 15).map((ev, idx) => {
                         const evKey = `${plan.id}:${ev.partNumber}`;
                         const selectedEvictBin = customEvictBins[evKey] || ev.evictToBin;
-                        const evictDestElev = parseShelfElevation(selectedEvictBin);
                         return (
                           <div
                             key={`${ev.partNumber}-${ev.fromBin}-${idx}`}
@@ -780,7 +1389,7 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                                   {ev.descriptionAr}
                                 </span>
                                 <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-200 border border-stone-700 text-[10px] font-bold">
-                                  {ev.sizeProfile.sizeCategory} ({ev.sizeProfile.dimensionsLabel})
+                                  الصنف: {ev.categoryAr} | الحجم: {ev.sizeProfile.sizeCategory} | المقاس: {ev.sizeProfile.mmLabel}
                                 </span>
                               </div>
                             </div>
@@ -801,9 +1410,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                                 }
                                 className="w-24 bg-[#120B09] text-amber-300 font-mono font-bold px-2 py-1 rounded border border-amber-700/50 text-center"
                               />
-                              <span className="text-[10px] text-neutral-400">
-                                ({evictDestElev.shortLabelAr})
-                              </span>
                               <button
                                 type="button"
                                 disabled={busy}
@@ -822,7 +1428,6 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                   )}
                 </div>
 
-                {/* زر اعتماد ونقل المجموعة بالكامل */}
                 <div className="p-3 bg-[#19110D] border-t border-[#3D271F] flex flex-wrap items-center justify-between gap-2">
                   {onOpenLocation ? (
                     <button
@@ -830,7 +1435,7 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                       onClick={() => onOpenLocation(activeTargetBin)}
                       className="px-3 py-1.5 rounded-xl bg-[#2C1E18] hover:bg-[#3A271F] text-neutral-200 border border-[#4D3429] text-xs font-bold cursor-pointer"
                     >
-                      عرض الموقع {activeTargetBin} ({activeTargetElev.shortLabelAr})
+                      عرض الموقع {activeTargetBin}
                     </button>
                   ) : (
                     <span />
@@ -844,15 +1449,28 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
                   >
                     <ShieldCheck className="w-4 h-4" />
                     <span>
-                      اعتماد ونقل المجموعة بالكامل ({activeTargetBin} — {activeTargetElev.shortLabelAr}) + تقرير PDF وواتساب 📲
+                      اعتماد وتجميع متشابهات ({plan.familyAr}) بحد {MAX_ITEMS_PER_SHELF} صنف للرف + تقرير PDF وواتساب 📲
                     </span>
                   </button>
                 </div>
               </div>
             );
           })}
+
+          {filteredSwapPlans.length > visiblePlansLimit && (
+            <div className="py-3 text-center">
+              <button
+                type="button"
+                onClick={() => setVisiblePlansLimit((prev) => prev + 12)}
+                className="px-6 py-2.5 rounded-xl bg-[#2C1E18] hover:bg-[#3A271F] text-amber-300 border border-amber-500/40 font-bold text-xs shadow-lg cursor-pointer"
+              >
+                عرض المزيد من خطط تجميع الأصناف ({filteredSwapPlans.length - visiblePlansLimit} خطة متبقية)
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 };
+
