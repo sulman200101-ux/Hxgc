@@ -8,7 +8,9 @@ export type ItemStatus =
   | 'تم النقل'
   | 'لم تنتقل'
   | 'محدث'
-  | 'غير موجودة';
+  | 'غير موجودة'
+  | 'غير موجود'
+  | 'ناقص العدد';
 
 export interface InventoryItem {
   id?: number;
@@ -26,6 +28,8 @@ export interface InventoryItem {
   is_moved: number; // 0 or 1
   is_missing?: number; // 0 or 1 (1 = علامة × بخط اليد في الجدول أي غير موجودة)
   remark?: string; // ملاحظات العمود Remark مثل F1, -4, F2
+  mark_symbol?: '✓' | 'X' | 'F' | 'N' | null;
+  audit_meaning?: string | null;
   unit_price?: number; // السعر التقديري أو الفعلي للقطعة بالريال
   status: ItemStatus;
   updated_at?: string;

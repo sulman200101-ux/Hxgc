@@ -7,6 +7,8 @@ export interface DocumentLine {
   description_ar: string;
   check: string;
   remark: string;
+  mark_symbol?: '✓' | 'X' | 'F' | 'N' | null;
+  audit_meaning?: string | null;
   reviewed: boolean;
 }
 
@@ -93,9 +95,10 @@ function normalizeDigitsAndMinus(val: string): string {
 
 function parseShortageValue(raw: string): number {
   if (!raw) return 0;
-  // نمط -3 أو - 4
-  const directMinus = raw.match(/^-\s*(\d+)$/);
-  if (directMinus) return Number(directMinus[1]);
+  // نمط -3 أو - 4 أو N1
+  const directMinus = raw.match(/^(?:-\s*(\d+)|N\s*(\d+))$/i);
+  if (directMinus) return Number(directMinus[1] || directMinus[2]);
+  if (/^(?:N|-)$/i.test(raw.trim())) return 1;
   // نمط 4 - 3 (العدد الأصلي مطروحاً منه العدد الناقص)
   const exprMinus = raw.match(/^\d+\s*-\s*(\d+)$/);
   if (exprMinus) return Number(exprMinus[1]);
@@ -107,11 +110,43 @@ export function interpretMark(check: string, remark: string) {
   const note = normalizeDigitsAndMinus(remark);
   const shortage = parseShortageValue(note) || parseShortageValue(mark);
   const isCross = /^[X×✗✘]$/.test(mark);
-  const isVerified = /^(✓|✔|CHECK)$/.test(mark) || (!isCross && parseShortageValue(mark) > 0);
+  const isF = /^F(?:\s*\d+)?$/i.test(mark) || /^F(?:\s*\d+)?$/i.test(note);
+  const isN = /^N(?:\s*\d+)?$/i.test(mark) || /^N(?:\s*\d+)?$/i.test(note) || shortage > 0;
+  const isVerified = /^(✓|✔|CHECK)$/.test(mark) || (!isCross && !isF && shortage > 0);
   const excludedIncrease =
-    /^(?:F\s*\d+|\+\s*\d+)$/.test(note) || /^(?:F\s*\d+|\+\s*\d+)$/.test(mark);
+    isF || /^(?:F\s*\d+|\+\s*\d+)$/.test(note) || /^(?:F\s*\d+|\+\s*\d+)$/.test(mark);
+
+  const mark_symbol: '✓' | 'X' | 'F' | 'N' | null = isCross
+    ? 'X'
+    : isF
+    ? 'F'
+    : isN
+    ? 'N'
+    : isVerified
+    ? '✓'
+    : null;
+
+  const audit_meaning: string | null =
+    mark_symbol === '✓'
+      ? 'القطع موجودة'
+      : mark_symbol === 'X'
+      ? 'القطع غير موجودة'
+      : mark_symbol === 'F'
+      ? 'تم نقل العدد الزائد إلى مكان آخر'
+      : mark_symbol === 'N'
+      ? 'ناقص العدد'
+      : null;
+
   return {
-    status: isCross ? 'غير موجودة' : isVerified ? 'مدقق' : 'غير مدقق',
+    status: isCross
+      ? 'غير موجودة'
+      : isF
+      ? 'تم النقل'
+      : isVerified
+      ? 'مدقق'
+      : 'غير مدقق',
+    mark_symbol,
+    audit_meaning,
     shortage: excludedIncrease ? 0 : shortage,
     excludedIncrease,
   } as const;

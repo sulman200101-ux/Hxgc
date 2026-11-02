@@ -150,7 +150,16 @@ export function BatchDocumentsPanel({
             return;
           }
           const mappedLines: DocumentLine[] = result.rows.map((row) => {
-            const marks = interpretMark('', row.remark || '');
+            const sym =
+              row.mark_symbol ||
+              (row.is_missing === 1
+                ? 'X'
+                : row.remark && /^F/i.test(row.remark)
+                ? 'F'
+                : row.remark && /^[-N]/i.test(row.remark)
+                ? 'N'
+                : '');
+            const marks = interpretMark(sym, row.remark || '');
             return {
               part_number: row.part_number,
               quantity: Number.isFinite(row.qty_total) && row.qty_total > 0 ? row.qty_total : 1,
@@ -158,8 +167,10 @@ export function BatchDocumentsPanel({
               description_en:
                 row.description_en && row.description_en !== 'غير محدد' ? row.description_en : '',
               description_ar: row.description_ar || '',
-              check: row.is_missing === 1 ? 'X' : '',
-              remark: marks.shortage > 0 ? `-${marks.shortage}` : '',
+              check: marks.mark_symbol || '',
+              remark: marks.shortage > 0 ? `-${marks.shortage}` : sym === 'F' ? 'F' : '',
+              mark_symbol: marks.mark_symbol,
+              audit_meaning: row.audit_meaning || marks.audit_meaning,
               reviewed: true,
             };
           });
@@ -494,15 +505,21 @@ export function BatchDocumentsPanel({
                       <select
                         className="bg-stone-800 px-1.5 py-1 rounded text-xs"
                         value={line.check}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          const marks = interpretMark(val, line.remark);
                           patchLine(sheet.key, index, {
-                            check: e.target.value,
-                          })
-                        }
+                            check: val,
+                            mark_symbol: marks.mark_symbol,
+                            audit_meaning: marks.audit_meaning,
+                          });
+                        }}
                       >
                         <option value="">غير مدققة</option>
-                        <option value="✓">✓</option>
-                        <option value="X">X</option>
+                        <option value="✓">✓ (القطع موجودة)</option>
+                        <option value="X">X (القطع غير موجودة)</option>
+                        <option value="F">F (تم نقل العدد الزائد إلى مكان آخر)</option>
+                        <option value="N">N (ناقص العدد)</option>
                       </select>
                       <input
                         placeholder="ناقص -N"

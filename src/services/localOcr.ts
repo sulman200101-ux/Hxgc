@@ -40,6 +40,8 @@ export interface ExtractedSparePart {
   qty_remaining: number;
   is_missing?: number;
   remark?: string;
+  mark_symbol?: '✓' | 'X' | 'F' | 'N' | null;
+  audit_meaning?: string | null;
   status?: ItemStatus;
   confidence?: string;
 }

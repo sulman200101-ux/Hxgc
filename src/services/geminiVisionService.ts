@@ -268,14 +268,32 @@ function normalizeRawVisionItems(rawItems: any[]): {
       lastValidLoc = finalLocation;
     }
 
-    let isMissing = detectMissingFromCheckMark(item) ? 1 : 0;
+    const rawMarkSymbol = item.mark_symbol ?? item.check_mark ?? item.check ?? null;
+    const normSymbol =
+      rawMarkSymbol === '✓' || rawMarkSymbol === '✔'
+        ? '✓'
+        : rawMarkSymbol === 'X' || rawMarkSymbol === '✗' || rawMarkSymbol === '×'
+        ? 'X'
+        : rawMarkSymbol === 'F' || rawMarkSymbol === 'f'
+        ? 'F'
+        : rawMarkSymbol === 'N' || rawMarkSymbol === 'n' || rawMarkSymbol === '-'
+        ? 'N'
+        : null;
+
+    let isMissing =
+      normSymbol === 'X' ||
+      item.status === 'غير موجود' ||
+      item.status === 'غير موجودة' ||
+      detectMissingFromCheckMark(item)
+        ? 1
+        : 0;
     const rawQty = item.qty_total ?? item.quantity ?? item.qty;
     const parsedQty = charToDigitMapper(rawQty, 1);
     let total = parsedQty > 0 ? parsedQty : 1;
 
     const rawRemark = item.remark ? String(item.remark).trim() : '';
     const minusMatch = rawRemark.match(/(?:^\d+\s*[-−–—]\s*(\d+)$|^[-−–—]\s*(\d+)$)/);
-    let shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : 0;
+    let shortage = minusMatch ? Number(minusMatch[1] || minusMatch[2] || 0) : normSymbol === 'N' ? 1 : 0;
     let descEn = rawDescCandidate.length >= 2 ? rawDescCandidate : 'غير محدد';
 
     if (calEntry && isFullSheet) {
@@ -297,7 +315,47 @@ function normalizeRawVisionItems(rawItems: any[]): {
     }
 
     const out = isMissing ? 0 : Math.min(total, shortage);
-    const remark = out > 0 ? `-${out}` : undefined;
+    const remark =
+      normSymbol === 'F'
+        ? 'F'
+        : out > 0
+        ? `-${out}`
+        : normSymbol === 'N'
+        ? '-1'
+        : undefined;
+
+    const finalMarkSymbol: '✓' | 'X' | 'F' | 'N' | null = isMissing
+      ? 'X'
+      : normSymbol === 'F'
+      ? 'F'
+      : out > 0 || normSymbol === 'N'
+      ? 'N'
+      : normSymbol === '✓'
+      ? '✓'
+      : null;
+
+    const finalAuditMeaning: string | null =
+      item.audit_meaning ||
+      item.audit_Meaning ||
+      (finalMarkSymbol === '✓'
+        ? 'القطع موجودة'
+        : finalMarkSymbol === 'X'
+        ? 'القطع غير موجودة'
+        : finalMarkSymbol === 'F'
+        ? 'تم نقل العدد الزائد إلى مكان آخر'
+        : finalMarkSymbol === 'N'
+        ? 'ناقص العدد'
+        : null);
+
+    const finalStatus = isMissing
+      ? 'غير موجودة'
+      : finalMarkSymbol === 'F' || item.status === 'تم النقل'
+      ? 'تم النقل'
+      : finalMarkSymbol === 'N' || item.status === 'ناقص العدد'
+      ? 'ناقص العدد'
+      : finalMarkSymbol === '✓' || item.status === 'مدقق'
+      ? 'مدقق'
+      : 'غير مدقق';
 
     const { category, descAr: dictDescAr } = categorizeAndTranslate(descEn);
     const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
@@ -315,7 +373,9 @@ function normalizeRawVisionItems(rawItems: any[]): {
       qty_remaining: isMissing ? 0 : Math.max(0, total - out),
       is_missing: isMissing,
       remark,
-      status: isMissing ? 'غير موجودة' : 'غير مدقق',
+      mark_symbol: finalMarkSymbol,
+      audit_meaning: finalAuditMeaning,
+      status: finalStatus,
       confidence: 'قراءة فعلية من الورقة',
     });
   });
@@ -333,26 +393,28 @@ function normalizeRawVisionItems(rawItems: any[]): {
  * وتمنع النموذج من التخمين أو إضافة أي أرقام قطع أو كميات وهمية.
  */
 export async function performStrictOCR(imageBase64: string): Promise<any[]> {
-  // أمر التلقين الصارم يمنع النموذج من التخمين أو إضافة أرقام وهمية
   const strictPrompt = `
-    أنت نظام OCR صارم ودقيق مخصص لجرد قطع غيار ASMO.
-    مهمتك استخراج البيانات من جدول القطع الموجود في الصورة فقط.
-    شروط صارمة جداً:
-    1. اقرأ النصوص والأرقام المرئية بوضوح تام فقط.
-    2. يُمنع منعاً باتاً تخمين، استنتاج، أو توليد أي أرقام قطع (Part Numbers) أو كميات غير موجودة.
-    3. رقم القطعة يجب أن يتكون من 10 أرقام دقيقة، إذا كان غير مقروء اتركه فارغاً.
-    4. إذا كان الحقل غير واضح، قم بإرجاع قيمة null.
-    5. قم بإرجاع النتيجة كـ مصفوفة JSON تحتوي على الكائنات التالية: part_number, location_code, description, quantity.
+    أنت محرك OCR صارم ومخصص لجرد مستودعات شركة أسمو (ASMO).
+    اقرأ جدول قطع الغيار من الصورة المرفقة واستخرج السطور المرئية بوضوح فقط.
+
+    قواعد صارمة جداً لمنع الهلوسة:
+    1. يُمنع منعاً باتاً توليد أو تخمين أي أرقام قطع أو مواقع أو كميات غير موجودة في الصورة.
+    2. رقم القطعة (part_number) يجب أن يُقرأ كما هو بدقة (10 أرقام)، وإذا كان غير واضح ضع null.
+    3. ابحث بدقة عن أي علامات يدوية أو رموز مكتوبة بجانب كل صف أو عند خانة الكمية، وفسرها حصراً كالتالي:
+       - إذا وجدت علامة صح (✓): اجعل حقل mark_symbol = "✓" وحقل audit_meaning = "القطع موجودة" وحقل status = "مدقق".
+       - إذا وجدت علامة خطأ أو إكس (X أو ✗): اجعل حقل mark_symbol = "X" وحقل audit_meaning = "القطع غير موجودة" وحقل status = "غير موجود".
+       - إذا وجدت حرف (F أو f): اجعل حقل mark_symbol = "F" وحقل audit_meaning = "تم نقل العدد الزائد إلى مكان آخر" وحقل status = "تم النقل".
+       - إذا وجدت علامة ناقص (-) أو حرف (N أو n): اجعل حقل mark_symbol = "N" وحقل audit_meaning = "ناقص العدد" وحقل status = "ناقص العدد".
+       - إذا لم توجد أي علامة أمام الصف: اجعل الحقول الخاصة بالعلامة null وحقل status = "غير مدقق".
   `;
 
   const mimeMatch = imageBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,/i);
   const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
   const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
 
-  // في حال توفر مفتاح VITE_GEMINI_API_KEY في بيئة التشغيل، يتم الاتصال المباشر بـ gemini-1.5-flash
-  const envViteKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
-  if (envViteKey && envViteKey !== 'undefined' && envViteKey !== 'MY_GEMINI_API_KEY') {
-    try {
+  try {
+    const envViteKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+    if (envViteKey && envViteKey !== 'undefined' && envViteKey !== 'MY_GEMINI_API_KEY') {
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${envViteKey}`,
         {
@@ -365,18 +427,78 @@ export async function performStrictOCR(imageBase64: string): Promise<any[]> {
                   { text: strictPrompt },
                   {
                     inlineData: {
-                      mimeType, // صيغة الصورة المستخدمة
-                      data: cleanBase64, // تمرير الصورة كاملة بدون أي تقسيم
+                      mimeType,
+                      data: cleanBase64, // إرسال الورقة كاملة دفعة واحدة لمنع التعليق عند 50%
                     },
                   },
                 ],
               },
             ],
             generationConfig: {
-              temperature: 0.0, // قراءة صارمة 100% بدون أي تخمين
-              topK: 1, // تقليل الخيارات المحتملة للنصوص
-              topP: 0.1, // أخذ أعلى الاحتمالات دقة فقط
-              responseMimeType: 'application/json', // إجبار الاستجابة لتكون JSON نظيف خالي من أي نصوص إضافية
+              temperature: 0.0, // منع الإبداع أو التخمين نهائياً
+              topK: 1,
+              topP: 0.1,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: 'ARRAY',
+                description: 'قائمة القطع المستخرجة من جدول الجرد',
+                items: {
+                  type: 'OBJECT',
+                  properties: {
+                    part_number: {
+                      type: 'STRING',
+                      nullable: true,
+                      description: 'رقم القطعة المكون من 10 أرقام',
+                    },
+                    location_code: {
+                      type: 'STRING',
+                      nullable: true,
+                      description: 'كود الموقع المخزني',
+                    },
+                    description: {
+                      type: 'STRING',
+                      nullable: true,
+                      description: 'وصف القطعة بالإنجليزية كما في الجدول',
+                    },
+                    quantity: {
+                      type: 'INTEGER',
+                      nullable: true,
+                      description: 'الكمية المسجلة في الجدول',
+                    },
+                    mark_symbol: {
+                      type: 'STRING',
+                      nullable: true,
+                      enum: ['✓', 'X', 'F', 'N'],
+                      description: 'الرمز المرسوم أمام القطعة إن وجد',
+                    },
+                    audit_meaning: {
+                      type: 'STRING',
+                      nullable: true,
+                      enum: [
+                        'القطع موجودة',
+                        'القطع غير موجودة',
+                        'تم نقل العدد الزائد إلى مكان آخر',
+                        'ناقص العدد',
+                      ],
+                      description: 'تفسير العلامة حسب قواعد الجرد',
+                    },
+                    status: {
+                      type: 'STRING',
+                      enum: ['مدقق', 'غير موجود', 'تم النقل', 'ناقص العدد', 'غير مدقق'],
+                      description: 'حالة الصنف النهائية',
+                    },
+                  },
+                  required: [
+                    'part_number',
+                    'location_code',
+                    'description',
+                    'quantity',
+                    'mark_symbol',
+                    'audit_meaning',
+                    'status',
+                  ],
+                },
+              },
             },
           }),
         }
@@ -384,29 +506,32 @@ export async function performStrictOCR(imageBase64: string): Promise<any[]> {
 
       if (response.ok) {
         const data = await response.json();
-        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (rawText) {
-          const extractedData = JSON.parse(rawText);
-          if (Array.isArray(extractedData) && extractedData.length > 0) {
-            return extractedData;
-          }
-          if (Array.isArray(extractedData?.items) && extractedData.items.length > 0) {
-            return extractedData.items;
+          // تصفية إضافية صارمة في الكود لحذف أي صف لم يتمكن الـ OCR من قراءة رقم قطعته بوضوح
+          const parsedItems = JSON.parse(rawText);
+          if (Array.isArray(parsedItems)) {
+            return parsedItems.filter(
+              (item: any) => item.part_number && String(item.part_number).trim() !== ''
+            );
           }
         }
       }
-    } catch (error) {
-      console.warn('Direct gemini-1.5-flash notice, falling back to unified server endpoint:', error);
     }
-  }
 
-  // الطلب الموحد عبر الخادم بدون أي تقسيم للصورة
-  const serverItems = await callPythonVisionServer(imageBase64);
-  if (serverItems && serverItems.length > 0) {
-    return serverItems;
-  }
+    // الطلب الموحد عبر الخادم بدون أي تقسيم للصورة
+    const serverItems = await callPythonVisionServer(imageBase64);
+    if (serverItems && serverItems.length > 0) {
+      return serverItems.filter(
+        (item: any) => item.part_number && String(item.part_number).trim() !== ''
+      );
+    }
 
-  throw new Error('فشل الاتصال بالخادم');
+    return [];
+  } catch (error) {
+    console.error('فشل في قراءة الجدول:', error);
+    throw error;
+  }
 }
 
 export async function parseTableWithGeminiVision(

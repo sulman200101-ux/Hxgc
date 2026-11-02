@@ -78,15 +78,18 @@ async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: strin
 
     const candidateModels = ['gemini-1.5-flash', 'gemini-3-flash-preview', 'gemini-3.8-flash', 'gemini-flash-latest'];
     const strictPrompt = `
-    أنت نظام OCR صارم ودقيق مخصص لجرد قطع غيار ASMO.
-    مهمتك استخراج البيانات من جدول القطع الموجود في الصورة فقط.
-    شروط صارمة جداً:
-    1. اقرأ النصوص والأرقام المرئية بوضوح تام فقط.
-    2. يُمنع منعاً باتاً تخمين، استنتاج، أو توليد أي أرقام قطع (Part Numbers) أو كميات غير موجودة.
-    3. رقم القطعة يجب أن يتكون من 10 أرقام دقيقة، إذا كان غير مقروء اتركه فارغاً.
-    4. إذا كان الحقل غير واضح، قم بإرجاع قيمة null.
-    5. قم بإرجاع النتيجة كـ مصفوفة JSON تحتوي على الكائنات التالية: part_number, location_code, description, quantity.
-    (مع دعم استخراج is_missing: 1 عند وجود علامة X صريحة في عمود Check، و remark: عند وجود علامة ناقص مثل -1 أو -2 فقط).
+    أنت محرك OCR صارم ومخصص لجرد مستودعات شركة أسمو (ASMO).
+    اقرأ جدول قطع الغيار من الصورة المرفقة واستخرج السطور المرئية بوضوح فقط.
+
+    قواعد صارمة جداً لمنع الهلوسة:
+    1. يُمنع منعاً باتاً توليد أو تخمين أي أرقام قطع أو مواقع أو كميات غير موجودة في الصورة.
+    2. رقم القطعة (part_number) يجب أن يُقرأ كما هو بدقة (10 أرقام)، وإذا كان غير واضح ضع null.
+    3. ابحث بدقة عن أي علامات يدوية أو رموز مكتوبة بجانب كل صف أو عند خانة الكمية، وفسرها حصراً كالتالي:
+       - إذا وجدت علامة صح (✓): اجعل حقل mark_symbol = "✓" وحقل audit_meaning = "القطع موجودة" وحقل status = "مدقق".
+       - إذا وجدت علامة خطأ أو إكس (X أو ✗): اجعل حقل mark_symbol = "X" وحقل audit_meaning = "القطع غير موجودة" وحقل status = "غير موجود".
+       - إذا وجدت حرف (F أو f): اجعل حقل mark_symbol = "F" وحقل audit_meaning = "تم نقل العدد الزائد إلى مكان آخر" وحقل status = "تم النقل".
+       - إذا وجدت علامة ناقص (-) أو حرف (N أو n): اجعل حقل mark_symbol = "N" وحقل audit_meaning = "ناقص العدد" وحقل status = "ناقص العدد".
+       - إذا لم توجد أي علامة أمام الصف: اجعل الحقول الخاصة بالعلامة null وحقل status = "غير مدقق".
   `;
 
     for (const modelName of candidateModels) {
@@ -100,18 +103,78 @@ async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: strin
                 {
                   inlineData: {
                     mimeType,
-                    data: cleanBase64, // تمرير الصورة كاملة بدون أي تقسيم
+                    data: cleanBase64, // إرسال الورقة كاملة دفعة واحدة لمنع التعليق عند 50%
                   },
                 },
               ],
             },
           ],
           config: {
-            temperature: 0.0, // قراءة صارمة 100% بدون أي تخمين
-            topK: 1, // تقليل الخيارات المحتملة للنصوص
-            topP: 0.1, // أخذ أعلى الاحتمالات دقة فقط
+            temperature: 0.0, // منع الإبداع أو التخمين نهائياً
+            topK: 1,
+            topP: 0.1,
             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            responseMimeType: 'application/json', // إجبار الاستجابة لتكون JSON نظيف خالي من أي نصوص إضافية
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              description: 'قائمة القطع المستخرجة من جدول الجرد',
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  part_number: {
+                    type: Type.STRING,
+                    nullable: true,
+                    description: 'رقم القطعة المكون من 10 أرقام',
+                  },
+                  location_code: {
+                    type: Type.STRING,
+                    nullable: true,
+                    description: 'كود الموقع المخزني',
+                  },
+                  description: {
+                    type: Type.STRING,
+                    nullable: true,
+                    description: 'وصف القطعة بالإنجليزية كما في الجدول',
+                  },
+                  quantity: {
+                    type: Type.INTEGER,
+                    nullable: true,
+                    description: 'الكمية المسجلة في الجدول',
+                  },
+                  mark_symbol: {
+                    type: Type.STRING,
+                    nullable: true,
+                    enum: ['✓', 'X', 'F', 'N'],
+                    description: 'الرمز المرسوم أمام القطعة إن وجد',
+                  },
+                  audit_meaning: {
+                    type: Type.STRING,
+                    nullable: true,
+                    enum: [
+                      'القطع موجودة',
+                      'القطع غير موجودة',
+                      'تم نقل العدد الزائد إلى مكان آخر',
+                      'ناقص العدد',
+                    ],
+                    description: 'تفسير العلامة حسب قواعد الجرد',
+                  },
+                  status: {
+                    type: Type.STRING,
+                    enum: ['مدقق', 'غير موجود', 'تم النقل', 'ناقص العدد', 'غير مدقق'],
+                    description: 'حالة الصنف النهائية',
+                  },
+                },
+                required: [
+                  'part_number',
+                  'location_code',
+                  'description',
+                  'quantity',
+                  'mark_symbol',
+                  'audit_meaning',
+                  'status',
+                ],
+              },
+            },
           },
         });
 
@@ -124,27 +187,48 @@ async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: strin
           ? parsed.items
           : [];
 
-        if (rawList.length > 0) {
-          const normalizedItems = rawList.map((row: any) => ({
-            part_number: row?.part_number ?? '',
-            location_code: row?.location_code ?? '',
-            description_en: row?.description ?? row?.description_en ?? '',
-            description: row?.description ?? row?.description_en ?? '',
-            qty_total:
-              row?.quantity !== null && row?.quantity !== undefined
-                ? Number(row.quantity) || 1
-                : row?.qty_total !== null && row?.qty_total !== undefined
-                ? Number(row.qty_total) || 1
-                : 1,
-            quantity:
-              row?.quantity !== null && row?.quantity !== undefined
-                ? Number(row.quantity) || 1
-                : row?.qty_total !== null && row?.qty_total !== undefined
-                ? Number(row.qty_total) || 1
-                : 1,
-            is_missing: Number(row?.is_missing) === 1 ? 1 : 0,
-            remark: row?.remark ? String(row.remark) : '',
-          }));
+        // تصفية إضافية صارمة في الكود لحذف أي صف لم يتمكن الـ OCR من قراءة رقم قطعته بوضوح
+        const filteredList = rawList.filter(
+          (item: any) => item && item.part_number && String(item.part_number).trim() !== ''
+        );
+
+        if (filteredList.length > 0) {
+          const normalizedItems = filteredList.map((row: any) => {
+            const sym = row?.mark_symbol ?? null;
+            const isMissing = sym === 'X' || row?.status === 'غير موجود' || Number(row?.is_missing) === 1 ? 1 : 0;
+            const remark =
+              sym === 'F'
+                ? 'F'
+                : sym === 'N'
+                ? row?.remark || '-1'
+                : row?.remark
+                ? String(row.remark)
+                : '';
+
+            return {
+              part_number: String(row.part_number).trim(),
+              location_code: row?.location_code ?? '',
+              description_en: row?.description ?? row?.description_en ?? '',
+              description: row?.description ?? row?.description_en ?? '',
+              qty_total:
+                row?.quantity !== null && row?.quantity !== undefined
+                  ? Number(row.quantity) || 1
+                  : row?.qty_total !== null && row?.qty_total !== undefined
+                  ? Number(row.qty_total) || 1
+                  : 1,
+              quantity:
+                row?.quantity !== null && row?.quantity !== undefined
+                  ? Number(row.quantity) || 1
+                  : row?.qty_total !== null && row?.qty_total !== undefined
+                  ? Number(row.qty_total) || 1
+                  : 1,
+              mark_symbol: sym,
+              audit_meaning: row?.audit_meaning ?? null,
+              status: row?.status ?? (isMissing ? 'غير موجود' : 'غير مدقق'),
+              is_missing: isMissing,
+              remark,
+            };
+          });
 
           return {
             success: true,
