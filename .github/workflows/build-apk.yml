@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build Capacitor Android APK (v2.4.0)
+    name: Build Capacitor Android APK (v2.5.0)
     runs-on: ubuntu-latest
 
     steps:
@@ -51,11 +51,11 @@ jobs:
           find app/build/outputs/apk/ -name "*.apk" -exec cp {} ../output_apk/ \; || true
           cd ../output_apk
           if [ -f app-debug.apk ]; then
-            cp -f app-debug.apk asmo-inventory-v2.4.0.apk
+            cp -f app-debug.apk asmo-inventory-v2.5.0.apk
             cp -f app-debug.apk asmo-inventory-app.apk
           fi
           cd ..
-          echo "=== Generated Native APK (v2.4.0) ==="
+          echo "=== Generated Native APK (v2.5.0) ==="
           ls -lh output_apk/
 
       - name: Delete All Old Releases and Tags
@@ -66,25 +66,25 @@ jobs:
           for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null || true); do
             gh release delete "$tag" --yes --cleanup-tag || true
           done
-          for tag in v1.0.0 v1.1.0 v1.2.0 v1.3.0 v1.4.0 v1.5.0 v1.6.0 v1.6.1 v1.6.2 v1.6.3 v1.6.4 v1.6.5 v1.7.0 v1.8.0 v1.9.0 v2.0.0 v2.1.0 v2.2.0 v2.3.0 v2.4.0 v3.0.0; do
+          for tag in v1.0.0 v1.1.0 v1.2.0 v1.3.0 v1.4.0 v1.5.0 v1.6.0 v1.6.1 v1.6.2 v1.6.3 v1.6.4 v1.6.5 v1.7.0 v1.8.0 v1.9.0 v2.0.0 v2.1.0 v2.2.0 v2.3.0 v2.4.0 v2.5.0 v3.0.0; do
             gh release delete "$tag" --yes --cleanup-tag || true
             git push origin --delete "$tag" 2>/dev/null || true
           done
 
-      - name: Create Fresh GitHub Release v2.4.0 (Direct APK Download)
+      - name: Create Fresh GitHub Release v2.5.0 (Direct APK Download)
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: v2.4.0
-          name: "ASMO Inventory App v2.4.0 (سقف 15 صنف للرف، رف الأغلى سعراً، مواقع D و C للثقيلة جداً، وOCR بدون هلوسة)"
+          tag_name: v2.5.0
+          name: "ASMO Inventory App v2.5.0 (قراءة صارمة 100% بالصورة الكاملة، حل خطأ البروكسي، وحالة جمني في التقارير)"
           body: |
-            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار الجديد v2.4.0)
-            - **سقف صارم 15 صنفاً لكل رف (`MAX_ITEMS_PER_SHELF = 15`)** مع تنبيهات فورية وتوزيع تلقائي للفائض.
-            - **رف موحد للـ 15 قطعة الأغلى سعراً** مع حساب الأسعار التقديرية بالريال السعودي والفرز بالأغلى سعراً أولاً.
-            - **توزيع القطع الثقيلة جداً على مواقع `D` و `C`** بحد أقصى 15 صنفاً للرف الواحد.
-            - **محرك مسح ضوئي (37 سطراً) بدون أي قوائم ثابتة أو هلوسة** مع معالجة Gemini عبر الخادم.
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار الجديد v2.5.0)
+            - **قراءة صارمة 100% بالصورة الكاملة بدون تقسيم وبدون تعليق عند 50%** (`temperature: 0.0`) مع تفسير العلامات اليدوية (`✓` مدقق، `X` غير موجود، `F` تم النقل، `N` ناقص العدد).
+            - **إصلاح جذري لخطأ بروكسي جمني (`PROXY_GENERATION_DISABLED`)** عبر مسار الخادم الداخلي (`gemini-3-flash-preview`).
+            - **لوحة فحص حالة محرك جمني في واجهة التقارير** للتأكد الفوري من عمل المحرك (`يعمل ونشط 🟢`).
+            - **سقف صارم 15 صنفاً لكل رف (`MAX_ITEMS_PER_SHELF = 15`)** وتوجيه القطع الثقيلة لمواقع `D` و `C` وتجميع الـ 15 قطعة الأغلى سعراً.
           files: |
-            output_apk/asmo-inventory-v2.4.0.apk
+            output_apk/asmo-inventory-v2.5.0.apk
             output_apk/asmo-inventory-app.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
