@@ -49,7 +49,11 @@ if (fs.existsSync(ocrStaticPath)) {
 let pythonEnvUnavailable = false;
 let geminiKeyInvalid = false;
 
-function getServerGeminiClient(): GoogleGenAI | null {
+function getServerGeminiClient(customApiKey?: string): GoogleGenAI | null {
+  const cleanCustom = (customApiKey || '').trim();
+  if (cleanCustom) {
+    return new GoogleGenAI({ apiKey: cleanCustom });
+  }
   if (geminiKeyInvalid) return null;
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY') {
@@ -65,8 +69,12 @@ function getServerGeminiClient(): GoogleGenAI | null {
   });
 }
 
-async function runGeminiVisionTableOcr(imageBase64: string, customPrompt?: string): Promise<any | null> {
-  const ai = getServerGeminiClient();
+async function runGeminiVisionTableOcr(
+  imageBase64: string,
+  customPrompt?: string,
+  customApiKey?: string
+): Promise<any | null> {
+  const ai = getServerGeminiClient(customApiKey);
   if (!ai) return null;
 
   try {
@@ -452,9 +460,10 @@ function runPythonTableOcr(imageBase64: string): Promise<any> {
 async function runBestServerTableOcr(
   imageBase64: string,
   preprocessedBase64?: string,
-  customPrompt?: string
+  customPrompt?: string,
+  customApiKey?: string
 ): Promise<any> {
-  const geminiResult = await runGeminiVisionTableOcr(imageBase64, customPrompt);
+  const geminiResult = await runGeminiVisionTableOcr(imageBase64, customPrompt, customApiKey);
   if (geminiResult?.success && Array.isArray(geminiResult.items) && geminiResult.items.length > 0) {
     return geminiResult;
   }
@@ -474,7 +483,7 @@ async function runBestServerTableOcr(
 
 app.post('/api/gemini/parse-table', async (req, res) => {
   try {
-    const { imageBase64, preprocessedBase64, customPrompt } = req.body;
+    const { imageBase64, preprocessedBase64, customPrompt, apiKey } = req.body;
     if (!imageBase64) {
       return res.status(200).json({
         success: false,
@@ -487,7 +496,8 @@ app.post('/api/gemini/parse-table', async (req, res) => {
     const result = await runBestServerTableOcr(
       String(imageBase64),
       preprocessedBase64 ? String(preprocessedBase64) : undefined,
-      customPrompt ? String(customPrompt) : undefined
+      customPrompt ? String(customPrompt) : undefined,
+      apiKey ? String(apiKey) : undefined
     );
     return res.status(200).json(result);
   } catch (error: any) {
@@ -569,7 +579,8 @@ app.post('/api/gemini/extract-part', async (req, res) => {
 const handleGeminiStatusCheck = async (req: express.Request, res: express.Response) => {
   const startMs = Date.now();
   const shouldLiveTest = req.query.test === '1' || req.body?.test === true;
-  const ai = getServerGeminiClient();
+  const customApiKey = req.body?.apiKey ? String(req.body.apiKey).trim() : undefined;
+  const ai = getServerGeminiClient(customApiKey);
 
   if (!ai) {
     return res.status(200).json({
@@ -583,7 +594,7 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
     });
   }
 
-  if (!shouldLiveTest) {
+  if (!shouldLiveTest && !customApiKey) {
     return res.status(200).json({
       ok: true,
       geminiActive: !geminiKeyInvalid,
@@ -607,7 +618,7 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
     });
     const reply = (response.text || '').trim();
     const isWorking = reply.length > 0;
-    if (isWorking) {
+    if (isWorking && !customApiKey) {
       geminiKeyInvalid = false;
     }
     return res.status(200).json({
@@ -623,7 +634,7 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
     });
   } catch (err: any) {
     const msg = String(err?.message || '');
-    if (msg.includes('API key not valid') || msg.includes('UNAUTHENTICATED')) {
+    if (!customApiKey && (msg.includes('API key not valid') || msg.includes('UNAUTHENTICATED'))) {
       geminiKeyInvalid = true;
     }
     return res.status(200).json({
@@ -643,7 +654,7 @@ app.post('/api/gemini/status', handleGeminiStatusCheck);
 
 app.post('/api/gemini/analyze-parts', async (req, res) => {
   try {
-    const { parts } = req.body;
+    const { parts, apiKey } = req.body;
     if (!Array.isArray(parts) || parts.length === 0) {
       return res.status(200).json({
         success: false,
@@ -652,7 +663,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
       });
     }
 
-    const ai = getServerGeminiClient();
+    const ai = getServerGeminiClient(apiKey ? String(apiKey) : undefined);
     if (!ai) {
       return res.status(200).json({
         success: false,
@@ -751,9 +762,11 @@ ${JSON.stringify(inputSummary)}`;
 });
 
 const apkCandidates = [
+  path.resolve(__dirname, 'public', 'asmo-inventory-v2.8.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v2.7.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-v2.6.0.apk'),
   path.resolve(__dirname, 'public', 'asmo-inventory-app.apk'),
+  path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.8.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.7.0.apk'),
   path.resolve(__dirname, 'downloads', 'asmo-inventory-v2.6.0.apk'),
   path.resolve(__dirname, 'public', 'downloads', 'asmo-inventory.apk'),
@@ -763,17 +776,18 @@ const handleApkDownload = (_req: express.Request, res: express.Response) => {
   for (const candidate of apkCandidates) {
     if (fs.existsSync(candidate)) {
       res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.7.0.apk"');
+      res.setHeader('Content-Disposition', 'attachment; filename="asmo-inventory-v2.8.0.apk"');
       return res.sendFile(candidate);
     }
   }
-  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.7.0/asmo-inventory-v2.7.0.apk');
+  return res.redirect('https://github.com/sulman200101-ux/Hxgc/releases/download/v2.8.0/asmo-inventory-v2.8.0.apk');
 };
 
 app.get('/download/asmo-inventory.apk', handleApkDownload);
 app.get('/downloads/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory.apk', handleApkDownload);
 app.get('/asmo-inventory-app.apk', handleApkDownload);
+app.get('/asmo-inventory-v2.8.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.7.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.6.0.apk', handleApkDownload);
 app.get('/asmo-inventory-v2.5.0.apk', handleApkDownload);

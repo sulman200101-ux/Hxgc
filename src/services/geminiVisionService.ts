@@ -53,7 +53,42 @@ const APK_FALLBACK_KEY_PARTS = [
   'TFl3dUdEN1ZVbnh5QnJVYWRPay04bmVFQ0E=',
 ];
 
-export function getClientGeminiApiKey(): string {
+export const CUSTOM_GEMINI_KEY_STORAGE = 'asmo_custom_gemini_api_key';
+
+export function getStoredCustomGeminiApiKey(): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return (window.localStorage.getItem(CUSTOM_GEMINI_KEY_STORAGE) || '').trim();
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+export function setStoredCustomGeminiApiKey(key: string): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const clean = (key || '').trim();
+      if (clean) {
+        window.localStorage.setItem(CUSTOM_GEMINI_KEY_STORAGE, clean);
+      } else {
+        window.localStorage.removeItem(CUSTOM_GEMINI_KEY_STORAGE);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function getClientGeminiApiKey(overrideKey?: string): string {
+  if (overrideKey && overrideKey.trim()) {
+    return overrideKey.trim();
+  }
+  const storedCustom = getStoredCustomGeminiApiKey();
+  if (storedCustom) {
+    return storedCustom;
+  }
   try {
     const envKey = String((import.meta as any).env?.VITE_GEMINI_API_KEY || '').trim();
     if (envKey && envKey !== 'undefined' && envKey !== 'MY_GEMINI_API_KEY') {
@@ -151,27 +186,39 @@ const STRICT_OCR_PROMPT = `
 `;
 
 /**
- * فحص اتصال محرك Gemini السحابي مباشرة من جهاز الأندرويد (APK)
+ * فحص اتصال محرك Gemini السحابي مباشرة من جهاز الأندرويد (APK) أو باستخدام المفتاح المخصص
  */
-export async function checkDirectGeminiStatusOnDevice(): Promise<{
+export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Promise<{
   ok: boolean;
   geminiActive: boolean;
   model: string;
   latencyMs: number;
   details?: string;
+  errorReason?: string;
+  usingCustomKey?: boolean;
 }> {
   const startMs = Date.now();
-  const apiKey = getClientGeminiApiKey();
+  const usingCustomKey = Boolean((overrideKey && overrideKey.trim()) || getStoredCustomGeminiApiKey());
+  const apiKey = getClientGeminiApiKey(overrideKey);
   if (!apiKey) {
     return {
       ok: false,
       geminiActive: false,
       model: 'gemini-3-flash-preview',
       latencyMs: Date.now() - startMs,
+      usingCustomKey,
+      errorReason: 'لم يتم إدخال مفتاح Gemini API بعد. أدخل المفتاح في الحقل المخصص ثم اضغط "حفظ واختبار المفتاح الآن".',
     };
   }
 
-  const candidateModels = ['gemini-3-flash-preview', 'gemini-flash-latest'];
+  const candidateModels = [
+    'gemini-2.5-flash',
+    'gemini-3-flash-preview',
+    'gemini-2.0-flash',
+    'gemini-flash-latest',
+  ];
+  let lastErrorMsg = '';
+
   for (const modelName of candidateModels) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
@@ -202,32 +249,61 @@ export async function checkDirectGeminiStatusOnDevice(): Promise<{
             geminiActive: true,
             model: modelName,
             latencyMs,
-            details: `تم اتصال تطبيق الهاتف بمحرك Gemini السحابي (${modelName}) بنجاح خلال ${latencyMs} ملي ثانية — المحرك يعمل ونشط 100%.`,
+            usingCustomKey,
+            details: usingCustomKey
+              ? `تم تفعيل واختبار مفتاح Gemini API المخصص بنجاح على النموذج (${modelName}) خلال ${latencyMs} ملي ثانية — المحرك السحابي يعمل ونشط 100%.`
+              : `تم اتصال تطبيق الهاتف بمحرك Gemini السحابي (${modelName}) بنجاح خلال ${latencyMs} ملي ثانية — المحرك يعمل ونشط 100%.`,
           };
         }
+      } else {
+        try {
+          const errJson = await res.json();
+          const apiErr = String(errJson?.error?.message || errJson?.error?.status || `HTTP ${res.status}`);
+          lastErrorMsg = apiErr;
+          if (apiErr.includes('API key not valid') || apiErr.includes('API_KEY_INVALID') || res.status === 400) {
+            break;
+          }
+        } catch {
+          lastErrorMsg = `HTTP ${res.status}`;
+        }
       }
-    } catch {
+    } catch (err: any) {
       clearTimeout(timer);
+      lastErrorMsg = String(err?.message || 'تعذر الاتصال بالشبكة');
     }
+  }
+
+  let errorReason = 'تعذر الاتصال بمحرك Gemini السحابي؛ يرجى إدخال مفتاح Gemini API صالح يبدأ بـ AIzaSy ثم الضغط على حفظ واختبار.';
+  if (lastErrorMsg.includes('API key not valid') || lastErrorMsg.includes('API_KEY_INVALID')) {
+    errorReason = 'المفتاح المدخل غير صالح (API_KEY_INVALID)؛ تأكد من نسخ مفتاح Gemini API الصحيح الذي يبدأ بـ AIzaSy من Google AI Studio بدون مسافات.';
+  } else if (lastErrorMsg.includes('QUOTA') || lastErrorMsg.includes('429')) {
+    errorReason = 'تم تجاوز حد الاستخدام المجاني المؤقت للمفتاح (Quota Exceeded 429)؛ جرب مفتاحاً آخر أو انتظر دقيقة.';
+  } else if (lastErrorMsg) {
+    errorReason = `تعذر تفعيل المفتاح (${lastErrorMsg}) — تأكد من اتصال الإنترنت وصحة مفتاح AIzaSy.`;
   }
 
   return {
     ok: false,
     geminiActive: false,
-    model: 'gemini-3-flash-preview',
+    model: 'gemini-2.5-flash',
     latencyMs: Date.now() - startMs,
+    usingCustomKey,
+    errorReason,
   };
 }
 
 /**
- * قراءة جدول الجرد مباشرة عبر Gemini REST API من داخل تطبيق الأندرويد (APK)
+ * قراءة جدول الجرد مباشرة عبر Gemini REST API من داخل تطبيق الأندرويد (APK) أو باستخدام المفتاح المخصص
  */
-async function callDirectGeminiVisionOnDevice(imageBase64: string): Promise<any[] | null> {
+async function callDirectGeminiVisionOnDevice(
+  imageBase64: string,
+  overrideKey?: string
+): Promise<any[] | null> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return null;
   }
 
-  const apiKey = getClientGeminiApiKey();
+  const apiKey = getClientGeminiApiKey(overrideKey);
   if (!apiKey) return null;
 
   const mimeMatch = imageBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,/i);
@@ -235,7 +311,12 @@ async function callDirectGeminiVisionOnDevice(imageBase64: string): Promise<any[
   const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
   if (!cleanBase64) return null;
 
-  const candidateModels = ['gemini-3-flash-preview', 'gemini-flash-latest'];
+  const candidateModels = [
+    'gemini-2.5-flash',
+    'gemini-3-flash-preview',
+    'gemini-2.0-flash',
+    'gemini-flash-latest',
+  ];
   for (const modelName of candidateModels) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 35000);
@@ -363,9 +444,11 @@ async function callPythonVisionServer(
     return null;
   }
 
-  // إذا كان التطبيق يعمل داخل هاتف الأندرويد (APK)، نتصل بـ Gemini مباشرة أولاً لتجنب حظر الكوكيز في روابط المعاينة
-  if (isRunningInNativeApk()) {
-    const directItems = await callDirectGeminiVisionOnDevice(dataUrl);
+  const customKey = getStoredCustomGeminiApiKey();
+
+  // إذا أدخل المستخدم مفتاحاً مخصصاً أو كان التطبيق يعمل داخل هاتف الأندرويد (APK)، نتصل بـ Gemini مباشرة أولاً
+  if (customKey || isRunningInNativeApk()) {
+    const directItems = await callDirectGeminiVisionOnDevice(dataUrl, customKey || undefined);
     if (directItems && directItems.length > 0) {
       return directItems;
     }
@@ -384,6 +467,7 @@ async function callPythonVisionServer(
           imageBase64: dataUrl,
           preprocessedBase64,
           mimeType: 'image/jpeg',
+          apiKey: customKey || undefined,
         }),
         signal: controller.signal,
       });
@@ -403,7 +487,7 @@ async function callPythonVisionServer(
     }
   }
 
-  if (!isRunningInNativeApk()) {
+  if (!customKey && !isRunningInNativeApk()) {
     const directFallback = await callDirectGeminiVisionOnDevice(dataUrl);
     if (directFallback && directFallback.length > 0) {
       return directFallback;

@@ -1,6 +1,10 @@
 import type { InventoryItem } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
-import { getClientGeminiApiKey, isRunningInNativeApk } from './geminiVisionService';
+import {
+  getClientGeminiApiKey,
+  getStoredCustomGeminiApiKey,
+  isRunningInNativeApk,
+} from './geminiVisionService';
 
 /**
  * الحد الأقصى الصارم لعدد الأصناف في كل رف (15 صنفاً فقط لكل رف)
@@ -1451,7 +1455,9 @@ export async function analyzePartsWithGeminiAssistant(
     });
   };
 
-  if (!isRunningInNativeApk()) {
+  const customKey = getStoredCustomGeminiApiKey();
+
+  if (!customKey && !isRunningInNativeApk()) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 12000);
@@ -1473,18 +1479,17 @@ export async function analyzePartsWithGeminiAssistant(
     }
   }
 
-  const apiKey = getClientGeminiApiKey();
+  const apiKey = getClientGeminiApiKey(customKey || undefined);
   if (apiKey) {
-    try {
-      const inputSummary = items.slice(0, 45).map((p: any, idx: number) => ({
-        index: idx + 1,
-        part_number: String(p.part_number || `ITEM-${idx + 1}`),
-        description_en: String(p.description_en || ''),
-        current_location: String(p.location_code || 'N11A1'),
-        quantity: Number((p as any).quantity || p.qty_remaining || 1),
-      }));
+    const inputSummary = items.slice(0, 45).map((p: any, idx: number) => ({
+      index: idx + 1,
+      part_number: String(p.part_number || `ITEM-${idx + 1}`),
+      description_en: String(p.description_en || ''),
+      current_location: String(p.location_code || 'N11A1'),
+      quantity: Number((p as any).quantity || p.qty_remaining || 1),
+    }));
 
-      const prompt = `أنت مساعد هندسي ذكي (Gemini Industrial Assistant) متخصص في مستودعات قطع الغيار الصناعية (SAP Inventory Controller - ASMO).
+    const prompt = `أنت مساعد هندسي ذكي (Gemini Industrial Assistant) متخصص في مستودعات قطع الغيار الصناعية (SAP Inventory Controller - ASMO).
 المطلوب لكل قطعة في القائمة المرفقة:
 1. "part_number": رقم القطعة كما هو.
 2. "description_ar": ترجمة عربية هندسية دقيقة وواضحة لوصف القطعة الإنجليزي مع ذكر الصنف والمقاس بالملم.
@@ -1493,36 +1498,40 @@ export async function analyzePartsWithGeminiAssistant(
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
 
+    const candidateModels = ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-2.0-flash'];
+    for (const modelName of candidateModels) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 16000);
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${encodeURIComponent(apiKey)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.1,
-              responseMimeType: 'application/json',
-            },
-          }),
-          signal: controller.signal,
-        }
-      );
-      clearTimeout(timeoutId);
-      if (res.ok) {
-        const data = await res.json();
-        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (rawText) {
-          const parsed = JSON.parse(rawText);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            return mergeAiAnalyses(parsed);
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.1,
+                responseMimeType: 'application/json',
+              },
+            }),
+            signal: controller.signal,
+          }
+        );
+        clearTimeout(timeoutId);
+        if (res.ok) {
+          const data = await res.json();
+          const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          if (rawText) {
+            const parsed = JSON.parse(rawText);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              return mergeAiAnalyses(parsed);
+            }
           }
         }
+      } catch {
+        clearTimeout(timeoutId);
       }
-    } catch {
-      // استخدام المحلل الهندسي والمالي المحلي الفوري
     }
   }
 
