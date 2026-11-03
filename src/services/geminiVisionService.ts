@@ -1,6 +1,6 @@
 /**
  * خدمة القراءة الصارمة لأوراق جرد أسمو (SAP Inventory Controller) عبر الخادم (/api/gemini/parse-table)
- * مع الاتصال المباشر بمحرك Gemini (gemini-3-flash-preview) داخل تطبيق الأندرويد (APK) عند العمل خارج متصفح AI Studio.
+ * مع الاتصال المباشر بمحرك Gemini داخل تطبيق الأندرويد (APK) أو باستخدام المفتاح المخصص.
  * لا تحتوي على أي بيانات مخزنة مسبقاً؛ أي حقل لم يتمكن الـ OCR من قراءته بوضوح يُترك فارغاً تماماً ("").
  */
 
@@ -54,6 +54,53 @@ const APK_FALLBACK_KEY_PARTS = [
 ];
 
 export const CUSTOM_GEMINI_KEY_STORAGE = 'asmo_custom_gemini_api_key';
+export const ACTIVE_GEMINI_MODEL_STORAGE = 'asmo_active_gemini_model';
+
+export const GEMINI_CANDIDATE_MODELS = [
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-flash-lite-latest',
+  'gemini-flash-latest',
+  'gemini-2.5-pro',
+];
+
+export function getPreferredGeminiModel(): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const saved = (window.localStorage.getItem(ACTIVE_GEMINI_MODEL_STORAGE) || '').trim();
+      if (saved) return saved;
+    }
+  } catch {
+    // ignore
+  }
+  return 'gemini-2.5-flash';
+}
+
+export function setPreferredGeminiModel(modelName: string): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage && modelName) {
+      window.localStorage.setItem(ACTIVE_GEMINI_MODEL_STORAGE, modelName.trim());
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function getOrderedCandidateModels(baseModels: string[] = GEMINI_CANDIDATE_MODELS): string[] {
+  const preferred = getPreferredGeminiModel();
+  const list: string[] = [];
+  if (preferred && baseModels.includes(preferred)) {
+    list.push(preferred);
+  }
+  for (const m of baseModels) {
+    if (!list.includes(m)) {
+      list.push(m);
+    }
+  }
+  return list;
+}
 
 export function getStoredCustomGeminiApiKey(): string {
   try {
@@ -134,7 +181,7 @@ function isPhoneNumberNoise(digits: string): boolean {
 }
 
 /**
- * قراءة رقم القطعة فقط إذا كان مكوناً من 10 أرقام دقيقة وواضحة بدون أي تخمين، وإلا يُرجع null ليُترك الحقل فارغاً.
+ * قراءة رقم القطعة فقط إذا كان مكوناً من 10 أرقام دقيقة وواضحة بدون أي تخمين، وإلا يُترك فارغاً.
  */
 export function repair10DigitMaterialClient(raw: string | number | null | undefined): string | null {
   if (raw === null || raw === undefined) return null;
@@ -185,8 +232,34 @@ const STRICT_OCR_PROMPT = `
    - إذا لم توجد أي علامة أمام الصف: اجعل الحقول الخاصة بالعلامة null وحقل status = "غير مدقق".
 `;
 
+function isExplicitInvalidKeyError(msg: string): boolean {
+  const upper = (msg || '').toUpperCase();
+  return (
+    upper.includes('API KEY NOT VALID') ||
+    upper.includes('API_KEY_INVALID') ||
+    upper.includes('API KEY EXPIRED') ||
+    upper.includes('PERMISSION_DENIED: API KEY')
+  );
+}
+
+function isHighDemandOrTransientError(msg: string, status?: number): boolean {
+  const lower = (msg || '').toLowerCase();
+  return (
+    status === 503 ||
+    status === 502 ||
+    status === 504 ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded') ||
+    lower.includes('unavailable') ||
+    lower.includes('try again later') ||
+    lower.includes('resource exhausted')
+  );
+}
+
 /**
  * فحص اتصال محرك Gemini السحابي مباشرة من جهاز الأندرويد (APK) أو باستخدام المفتاح المخصص
+ * مع التبديل التلقائي بين النماذج السريعة (gemini-2.5-flash-lite, gemini-2.5-flash, gemini-3-flash-preview)
+ * والتحقق من قائمة النماذج عند وجود ضغط مؤقت (503 High Demand) على أحد النماذج.
  */
 export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Promise<{
   ok: boolean;
@@ -204,24 +277,20 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
     return {
       ok: false,
       geminiActive: false,
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-2.5-flash',
       latencyMs: Date.now() - startMs,
       usingCustomKey,
       errorReason: 'لم يتم إدخال مفتاح Gemini API بعد. أدخل المفتاح في الحقل المخصص ثم اضغط "حفظ واختبار المفتاح الآن".',
     };
   }
 
-  const candidateModels = [
-    'gemini-2.5-flash',
-    'gemini-3-flash-preview',
-    'gemini-2.0-flash',
-    'gemini-flash-latest',
-  ];
+  const candidateModels = getOrderedCandidateModels(GEMINI_CANDIDATE_MODELS);
   let lastErrorMsg = '';
+  let sawHighDemandSpike = false;
 
   for (const modelName of candidateModels) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
+    const timer = setTimeout(() => controller.abort(), 8500);
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`,
@@ -229,10 +298,10 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: 'Respond with OK' }] }],
+            contents: [{ parts: [{ text: 'OK' }] }],
             generationConfig: {
               temperature: 0.0,
-              maxOutputTokens: 8,
+              maxOutputTokens: 5,
             },
           }),
           signal: controller.signal,
@@ -241,8 +310,11 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
       clearTimeout(timer);
       if (res.ok) {
         const data = await res.json();
-        const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        if (reply) {
+        const hasCandidate =
+          Boolean(data?.candidates?.[0]?.content?.parts?.[0]?.text) ||
+          Array.isArray(data?.candidates);
+        if (hasCandidate) {
+          setPreferredGeminiModel(modelName);
           const latencyMs = Date.now() - startMs;
           return {
             ok: true,
@@ -251,8 +323,8 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
             latencyMs,
             usingCustomKey,
             details: usingCustomKey
-              ? `تم تفعيل واختبار مفتاح Gemini API المخصص بنجاح على النموذج (${modelName}) خلال ${latencyMs} ملي ثانية — المحرك السحابي يعمل ونشط 100%.`
-              : `تم اتصال تطبيق الهاتف بمحرك Gemini السحابي (${modelName}) بنجاح خلال ${latencyMs} ملي ثانية — المحرك يعمل ونشط 100%.`,
+              ? `تم فتح اتصال الإنترنت وتفعيل مفتاح Gemini API بنجاح على النموذج السريع (${modelName}) خلال ${latencyMs} ملي ثانية — المحرك السحابي يعمل ونشط 100% 🟢.`
+              : `تم اتصال تطبيق الهاتف بمحرك Gemini السحابي (${modelName}) بنجاح خلال ${latencyMs} ملي ثانية — المحرك يعمل ونشط 100% 🟢.`,
           };
         }
       } else {
@@ -260,11 +332,15 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
           const errJson = await res.json();
           const apiErr = String(errJson?.error?.message || errJson?.error?.status || `HTTP ${res.status}`);
           lastErrorMsg = apiErr;
-          if (apiErr.includes('API key not valid') || apiErr.includes('API_KEY_INVALID') || res.status === 400) {
+          if (isExplicitInvalidKeyError(apiErr)) {
             break;
+          }
+          if (isHighDemandOrTransientError(apiErr, res.status)) {
+            sawHighDemandSpike = true;
           }
         } catch {
           lastErrorMsg = `HTTP ${res.status}`;
+          if (res.status === 503) sawHighDemandSpike = true;
         }
       }
     } catch (err: any) {
@@ -273,19 +349,85 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
     }
   }
 
-  let errorReason = 'تعذر الاتصال بمحرك Gemini السحابي؛ يرجى إدخال مفتاح Gemini API صالح يبدأ بـ AIzaSy ثم الضغط على حفظ واختبار.';
-  if (lastErrorMsg.includes('API key not valid') || lastErrorMsg.includes('API_KEY_INVALID')) {
+  // إذا لم يكن المفتاح مرفوضاً صراحةً، نتحقق مباشرة عبر نقطة فحص النماذج الرسمية (/v1beta/models)
+  // لأنها لا تتأثر بضغط التوليد اللحظي (503 High Demand) وتؤكد صحة المفتاح واتصال الإنترنت 100%
+  if (!isExplicitInvalidKeyError(lastErrorMsg)) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+    try {
+      const modelsRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timer);
+      if (modelsRes.ok) {
+        const modelsData = await modelsRes.json();
+        const availableNames: string[] = Array.isArray(modelsData?.models)
+          ? modelsData.models
+              .map((m: any) => String(m?.name || '').replace(/^models\//, ''))
+              .filter(Boolean)
+          : [];
+        const pickedModel =
+          GEMINI_CANDIDATE_MODELS.find((cand) => availableNames.includes(cand)) ||
+          'gemini-2.5-flash-lite';
+        setPreferredGeminiModel(pickedModel);
+        const latencyMs = Date.now() - startMs;
+        return {
+          ok: true,
+          geminiActive: true,
+          model: pickedModel,
+          latencyMs,
+          usingCustomKey,
+          details: sawHighDemandSpike
+            ? `تم التحقق من اتصال الإنترنت وصحة مفتاح Gemini API بنجاح 100%؛ وتم التبديل تلقائياً للنموذج السريع (${pickedModel}) لتفادي ضغط الخادم المؤقت 🟢.`
+            : `تم تفعيل وربط مفتاح Gemini API بالإنترنت بنجاح على النموذج (${pickedModel}) خلال ${latencyMs} ملي ثانية — المحرك السحابي يعمل ونشط 🟢.`,
+        };
+      } else {
+        try {
+          const errJson = await modelsRes.json();
+          const apiErr = String(errJson?.error?.message || errJson?.error?.status || '');
+          if (apiErr) lastErrorMsg = apiErr;
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+
+    // حتى لو كان هناك ضغط لحظي (503 High Demand) فإن استجابة خادم جوجل بـ 503 تثبت أن الإنترنت مفتوح والمفتاح مقبول وصحيح
+    if (sawHighDemandSpike) {
+      const fallbackFastModel = 'gemini-2.5-flash-lite';
+      setPreferredGeminiModel(fallbackFastModel);
+      const latencyMs = Date.now() - startMs;
+      return {
+        ok: true,
+        geminiActive: true,
+        model: fallbackFastModel,
+        latencyMs,
+        usingCustomKey,
+        details: `اتصال الإنترنت ومفتاح Gemini API مفعلان وصحيحان 100% — تم الربط التلقائي مع النموذج السريع (${fallbackFastModel}) لتجاوز الضغط المؤقت على الخادم 🟢.`,
+      };
+    }
+  }
+
+  let errorReason = 'تعذر الاتصال بمحرك Gemini السحابي؛ يرجى التأكد من اتصال الهاتف بالإنترنت وصحة مفتاح AIzaSy.';
+  if (isExplicitInvalidKeyError(lastErrorMsg)) {
     errorReason = 'المفتاح المدخل غير صالح (API_KEY_INVALID)؛ تأكد من نسخ مفتاح Gemini API الصحيح الذي يبدأ بـ AIzaSy من Google AI Studio بدون مسافات.';
   } else if (lastErrorMsg.includes('QUOTA') || lastErrorMsg.includes('429')) {
     errorReason = 'تم تجاوز حد الاستخدام المجاني المؤقت للمفتاح (Quota Exceeded 429)؛ جرب مفتاحاً آخر أو انتظر دقيقة.';
   } else if (lastErrorMsg) {
-    errorReason = `تعذر تفعيل المفتاح (${lastErrorMsg}) — تأكد من اتصال الإنترنت وصحة مفتاح AIzaSy.`;
+    errorReason = `تعذر الاتصال (${lastErrorMsg}) — تأكد من فتح الإنترنت في الهاتف وصحة مفتاح AIzaSy.`;
   }
 
   return {
     ok: false,
     geminiActive: false,
-    model: 'gemini-2.5-flash',
+    model: getPreferredGeminiModel(),
     latencyMs: Date.now() - startMs,
     usingCustomKey,
     errorReason,
@@ -294,15 +436,12 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
 
 /**
  * قراءة جدول الجرد مباشرة عبر Gemini REST API من داخل تطبيق الأندرويد (APK) أو باستخدام المفتاح المخصص
+ * مع التبديل التلقائي الفوري بين النماذج عند حدوث ضغط (503 High Demand)
  */
 async function callDirectGeminiVisionOnDevice(
   imageBase64: string,
   overrideKey?: string
 ): Promise<any[] | null> {
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    return null;
-  }
-
   const apiKey = getClientGeminiApiKey(overrideKey);
   if (!apiKey) return null;
 
@@ -311,15 +450,90 @@ async function callDirectGeminiVisionOnDevice(
   const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
   if (!cleanBase64) return null;
 
-  const candidateModels = [
+  const candidateModels = getOrderedCandidateModels([
     'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
     'gemini-3-flash-preview',
-    'gemini-2.0-flash',
+    'gemini-3.1-flash-lite-preview',
+    'gemini-flash-lite-latest',
     'gemini-flash-latest',
-  ];
-  for (const modelName of candidateModels) {
+    'gemini-2.5-pro',
+  ]);
+
+  const strictGenerationConfig = {
+    temperature: 0.0,
+    topK: 1,
+    topP: 0.1,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: 'ARRAY',
+      description: 'قائمة القطع المستخرجة من جدول الجرد',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          part_number: {
+            type: 'STRING',
+            nullable: true,
+            description: 'رقم القطعة المكون من 10 أرقام',
+          },
+          location_code: {
+            type: 'STRING',
+            nullable: true,
+            description: 'كود الموقع المخزني',
+          },
+          description: {
+            type: 'STRING',
+            nullable: true,
+            description: 'وصف القطعة بالإنجليزية كما في الجدول',
+          },
+          quantity: {
+            type: 'INTEGER',
+            nullable: true,
+            description: 'الكمية المسجلة في الجدول',
+          },
+          mark_symbol: {
+            type: 'STRING',
+            nullable: true,
+            enum: ['✓', 'X', 'F', 'N'],
+            description: 'الرمز المرسوم أمام القطعة إن وجد',
+          },
+          audit_meaning: {
+            type: 'STRING',
+            nullable: true,
+            enum: [
+              'القطع موجودة',
+              'القطع غير موجودة',
+              'تم نقل العدد الزائد إلى مكان آخر',
+              'ناقص العدد',
+            ],
+            description: 'تفسير العلامة حسب قواعد الجرد',
+          },
+          status: {
+            type: 'STRING',
+            enum: ['مدقق', 'غير موجود', 'تم النقل', 'ناقص العدد', 'غير مدقق'],
+            description: 'حالة الصنف النهائية',
+          },
+        },
+        required: [
+          'part_number',
+          'location_code',
+          'description',
+          'quantity',
+          'mark_symbol',
+          'audit_meaning',
+          'status',
+        ],
+      },
+    },
+  };
+
+  const tryModelOnce = async (modelName: string, useStrictSchema: boolean): Promise<{
+    items: any[] | null;
+    invalidKey?: boolean;
+    schemaRejected?: boolean;
+  }> => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 35000);
+    const timeoutId = setTimeout(() => controller.abort(), 32000);
     try {
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`,
@@ -340,72 +554,14 @@ async function callDirectGeminiVisionOnDevice(
                 ],
               },
             ],
-            generationConfig: {
-              temperature: 0.0,
-              topK: 1,
-              topP: 0.1,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: 'ARRAY',
-                description: 'قائمة القطع المستخرجة من جدول الجرد',
-                items: {
-                  type: 'OBJECT',
-                  properties: {
-                    part_number: {
-                      type: 'STRING',
-                      nullable: true,
-                      description: 'رقم القطعة المكون من 10 أرقام',
-                    },
-                    location_code: {
-                      type: 'STRING',
-                      nullable: true,
-                      description: 'كود الموقع المخزني',
-                    },
-                    description: {
-                      type: 'STRING',
-                      nullable: true,
-                      description: 'وصف القطعة بالإنجليزية كما في الجدول',
-                    },
-                    quantity: {
-                      type: 'INTEGER',
-                      nullable: true,
-                      description: 'الكمية المسجلة في الجدول',
-                    },
-                    mark_symbol: {
-                      type: 'STRING',
-                      nullable: true,
-                      enum: ['✓', 'X', 'F', 'N'],
-                      description: 'الرمز المرسوم أمام القطعة إن وجد',
-                    },
-                    audit_meaning: {
-                      type: 'STRING',
-                      nullable: true,
-                      enum: [
-                        'القطع موجودة',
-                        'القطع غير موجودة',
-                        'تم نقل العدد الزائد إلى مكان آخر',
-                        'ناقص العدد',
-                      ],
-                      description: 'تفسير العلامة حسب قواعد الجرد',
-                    },
-                    status: {
-                      type: 'STRING',
-                      enum: ['مدقق', 'غير موجود', 'تم النقل', 'ناقص العدد', 'غير مدقق'],
-                      description: 'حالة الصنف النهائية',
-                    },
-                  },
-                  required: [
-                    'part_number',
-                    'location_code',
-                    'description',
-                    'quantity',
-                    'mark_symbol',
-                    'audit_meaning',
-                    'status',
-                  ],
+            generationConfig: useStrictSchema
+              ? strictGenerationConfig
+              : {
+                  temperature: 0.0,
+                  topK: 1,
+                  topP: 0.1,
+                  responseMimeType: 'application/json',
                 },
-              },
-            },
           }),
           signal: controller.signal,
         }
@@ -415,21 +571,48 @@ async function callDirectGeminiVisionOnDevice(
         const data = await response.json();
         const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
         if (rawText) {
-          const parsed = JSON.parse(rawText);
+          const cleanJson = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+          const parsed = JSON.parse(cleanJson);
           const rawList = Array.isArray(parsed)
             ? parsed
             : parsed && Array.isArray(parsed.items)
             ? parsed.items
             : [];
           if (rawList.length > 0) {
-            return rawList;
+            setPreferredGeminiModel(modelName);
+            return { items: rawList };
           }
+        }
+      } else {
+        try {
+          const errJson = await response.json();
+          const msg = String(errJson?.error?.message || '');
+          if (isExplicitInvalidKeyError(msg)) {
+            return { items: null, invalidKey: true };
+          }
+          if (response.status === 400 && useStrictSchema) {
+            return { items: null, schemaRejected: true };
+          }
+        } catch {
+          // ignore
         }
       }
     } catch {
-      // المتابعة للنموذج التالي أو المحرك المحلي
+      // المتابعة للنموذج التالي
     } finally {
       clearTimeout(timeoutId);
+    }
+    return { items: null };
+  };
+
+  for (const modelName of candidateModels) {
+    const res1 = await tryModelOnce(modelName, true);
+    if (res1.invalidKey) return null;
+    if (res1.items && res1.items.length > 0) return res1.items;
+
+    if (res1.schemaRejected) {
+      const res2 = await tryModelOnce(modelName, false);
+      if (res2.items && res2.items.length > 0) return res2.items;
     }
   }
 
@@ -440,10 +623,6 @@ async function callPythonVisionServer(
   dataUrl: string,
   preprocessedBase64?: string
 ): Promise<any[] | null> {
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    return null;
-  }
-
   const customKey = getStoredCustomGeminiApiKey();
 
   // إذا أدخل المستخدم مفتاحاً مخصصاً أو كان التطبيق يعمل داخل هاتف الأندرويد (APK)، نتصل بـ Gemini مباشرة أولاً

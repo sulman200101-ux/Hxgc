@@ -4,6 +4,8 @@ import {
   getClientGeminiApiKey,
   getStoredCustomGeminiApiKey,
   isRunningInNativeApk,
+  getOrderedCandidateModels,
+  setPreferredGeminiModel,
 } from './geminiVisionService';
 
 /**
@@ -1433,9 +1435,6 @@ export async function analyzePartsWithGeminiAssistant(
   items: Array<Partial<InventoryItem> & { part_number: string; description_en: string; location_code?: string }>
 ): Promise<GeminiPartAnalysis[]> {
   const localAnalyses = items.map((item) => computeLocalPartEngineeringAnalysis(item));
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    return localAnalyses;
-  }
 
   const mergeAiAnalyses = (analyses: any[]): GeminiPartAnalysis[] => {
     const aiMap = new Map<string, any>();
@@ -1498,7 +1497,7 @@ export async function analyzePartsWithGeminiAssistant(
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
 
-    const candidateModels = ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-2.0-flash'];
+    const candidateModels = getOrderedCandidateModels();
     for (const modelName of candidateModels) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 16000);
@@ -1523,8 +1522,10 @@ ${JSON.stringify(inputSummary)}`;
           const data = await res.json();
           const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
           if (rawText) {
-            const parsed = JSON.parse(rawText);
+            const cleanJson = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+            const parsed = JSON.parse(cleanJson);
             if (Array.isArray(parsed) && parsed.length > 0) {
+              setPreferredGeminiModel(modelName);
               return mergeAiAnalyses(parsed);
             }
           }

@@ -1,4 +1,4 @@
-import { getCandidateApiUrls } from './geminiVisionService';
+import { getCandidateApiUrls, parseTableWithGeminiVision } from './geminiVisionService';
 
 export interface ExtractedSparePartData {
   part_number: string;
@@ -22,12 +22,27 @@ export const DENSE_TABLE_SYSTEM_PROMPT = `أنت نظام متطور لاستخ�
 export const extractInventoryTable = async (
   base64Image: string
 ): Promise<ExtractedInventoryTableRow[]> => {
+  try {
+    const directVision = await parseTableWithGeminiVision(base64Image);
+    if (directVision.success && directVision.items.length > 0) {
+      return directVision.items.map((item) => ({
+        material_number: item.part_number,
+        storage_bin: item.location_code,
+        qty: item.qty_total,
+        remark: item.remark || '',
+        description: item.description_en,
+      }));
+    }
+  } catch {
+    // المتابعة للخادم
+  }
+
   const base64Data = base64Image.replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '');
   const urls = getCandidateApiUrls('/api/gemini/extract-inventory-table');
 
   for (const url of urls) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
     try {
       const serverRes = await fetch(url, {
         method: 'POST',
@@ -58,12 +73,27 @@ export const extractInventoryTable = async (
 export const extractSparePartData = async (
   base64Image: string
 ): Promise<ExtractedSparePartData> => {
+  try {
+    const directVision = await parseTableWithGeminiVision(base64Image);
+    const first = directVision.items?.[0];
+    if (first && first.part_number) {
+      return {
+        part_number: first.part_number || '',
+        description_en: first.description_en || '',
+        description_ar: first.description_ar || '',
+        category: first.category || '',
+      };
+    }
+  } catch {
+    // المتابعة للخادم
+  }
+
   const base64Data = base64Image.replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '');
   const urls = getCandidateApiUrls('/api/gemini/extract-part');
 
   for (const url of urls) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
     try {
       const serverRes = await fetch(url, {
         method: 'POST',
