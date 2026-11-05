@@ -1361,9 +1361,51 @@ class InventoryDatabase {
   }
 
   public async restoreBackup(text: string): Promise<void> {
-    await authorizeMutation('استعادة نسخة احتياطية (دمج دون حذف)');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
-    const data = JSON.parse(text);
+    const trimmed = (text || '').replace(/^\ufeff/, '').trim();
+    if (!trimmed) throw new Error('الملف فارغ');
+
+    // دعم استيراد ملفات CSV المصدرة من زر (مشاركة Excel 📊) أو من جدول التقارير
+    if (!trimmed.startsWith('{')) {
+      const csvLines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const parsedCsvItems: any[] = [];
+      for (const line of csvLines) {
+        const cols = line.split(',').map((c) => c.replace(/^"|"$/g, '').trim());
+        const partCandidate = cols.find((c) => /^\d{10}$/.test(c));
+        if (!partCandidate) continue;
+        const partIdx = cols.indexOf(partCandidate);
+        const locCandidate =
+          cols.find(
+            (c, i) => i !== partIdx && /^[A-Z]{1,3}\d{0,3}[A-Z0-9-]*$/i.test(c) && !/^\d+$/.test(c)
+          ) || cols[1] || '';
+        const qtyCandidate =
+          cols.find((c, i) => i !== partIdx && /^\d{1,6}$/.test(c)) || cols[2] || '0';
+        const descCandidate =
+          cols
+            .filter(
+              (c, i) =>
+                i !== partIdx &&
+                c !== locCandidate &&
+                c !== qtyCandidate &&
+                c.length > 2
+            )
+            .join(' ') || cols[3] || '';
+        parsedCsvItems.push({
+          part_number: partCandidate,
+          location_code: locCandidate.toUpperCase(),
+          qty_total: Number(qtyCandidate) || 0,
+          description_en: descCandidate,
+          status: 'مدقق',
+        });
+      }
+      if (!parsedCsvItems.length) {
+        throw new Error('لم يتم العثور على أرقام قطع صالحة (10 أرقام) في الملف');
+      }
+      await this.smartUpsertBatch(parsedCsvItems);
+      return;
+    }
+
+    const data = JSON.parse(trimmed);
     if (data.format !== 'asmo-backup-v1' || !Array.isArray(data.items))
       throw new Error('نسخة غير صالحة');
     const keys = new Set<string>();
