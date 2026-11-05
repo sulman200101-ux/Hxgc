@@ -201,13 +201,12 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
         ? 'ناقص العدد'
         : null;
 
+    // لا يتم تسجيل القطعة كـ "تم النقل" إلا إذا تم نقلها فعلياً من قِبل المستخدم
     const status = isMissing
       ? 'غير موجودة'
-      : markSymbol === 'F'
-      ? 'تم النقل'
       : markSymbol === 'N'
       ? 'ناقص العدد'
-      : markSymbol === '✓'
+      : markSymbol === '✓' || markSymbol === 'F'
       ? 'مدقق'
       : 'غير مدقق';
 

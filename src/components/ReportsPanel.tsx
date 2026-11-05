@@ -315,31 +315,33 @@ export function ReportsPanel() {
     } else {
       setRows([
         [
+          'رقم وتاريخ التقرير',
           'المستند',
           'مقدم الطلب',
           'الحالة',
           'القطعة',
           'الكمية',
           'الموقع القديم',
-          'الموقع المقترح',
+          'الموقع الجديد',
           'السبب',
           'اعتماد المشرف',
-          'التنفيذ',
+          'وقت التنفيذ',
         ],
         ...docs
           .filter((doc) => doc.kind === kind)
-          .flatMap((doc) =>
+          .flatMap((doc, docIdx) =>
             doc.lines.map((line) => [
+              doc.reportTitle || (doc.kind === 'transfer' ? `تقرير ${docIdx + 1}` : doc.id),
               doc.id,
               doc.requester,
-              doc.status,
+              doc.status === 'approved' ? 'تم النقل والاعتماد' : 'بانتظار الاعتماد',
               line.part_number,
               String(line.quantity),
               line.old_location || '',
               line.location,
               doc.reason,
               doc.approvedBy || '',
-              doc.executedAt || '',
+              doc.executedAt || doc.createdAt || '',
             ])
           ),
       ]);

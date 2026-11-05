@@ -82,6 +82,24 @@ export interface StockDocument {
   createdAt: string;
   executedAt?: string;
   approvedBy?: string;
+  reportNumber?: number;
+  reportTitle?: string;
+  transferredItemsSnapshot?: Array<{
+    part_number: string;
+    location_code: string;
+    old_location?: string;
+    description_en: string;
+    description_ar: string;
+    category: string;
+    qty_total: number;
+    qty_out: number;
+    qty_remaining: number;
+    is_moved: number;
+    is_missing: number;
+    status: string;
+    moved_at?: string;
+    remark?: string;
+  }>;
 }
 
 function normalizeDigitsAndMinus(val: string): string {
@@ -138,10 +156,11 @@ export function interpretMark(check: string, remark: string) {
       : null;
 
   return {
+    // لا يتم تسجيل القطعة كـ "تم النقل" من أوراق الجرد؛ النقل يتم حصراً عبر عملية نقل من قِبل المستخدم
     status: isCross
       ? 'غير موجودة'
       : isF
-      ? 'تم النقل'
+      ? 'مدقق'
       : isVerified
       ? 'مدقق'
       : 'غير مدقق',

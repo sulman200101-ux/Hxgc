@@ -788,13 +788,12 @@ function normalizeRawVisionItems(rawItems: any[]): {
         ? 'ناقص العدد'
         : null);
 
+    // لا يُسجل الصنف كـ "تم النقل" أثناء قراءة الورقة؛ النقل يتم حصراً من قِبل المستخدم
     const finalStatus = isMissing
       ? 'غير موجودة'
-      : finalMarkSymbol === 'F' || item.status === 'تم النقل'
-      ? 'تم النقل'
       : finalMarkSymbol === 'N' || item.status === 'ناقص العدد'
       ? 'ناقص العدد'
-      : finalMarkSymbol === '✓' || item.status === 'مدقق'
+      : finalMarkSymbol === '✓' || finalMarkSymbol === 'F' || item.status === 'مدقق' || item.status === 'تم النقل'
       ? 'مدقق'
       : 'غير مدقق';
 

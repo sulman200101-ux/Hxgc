@@ -88,6 +88,11 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
     [documents]
   );
 
+  const approvedTransferReports = useMemo(
+    () => dbService.getTransferReports(),
+    [documents, items.length]
+  );
+
   const pendingPartNumbers = useMemo(
     () =>
       new Set(
@@ -1088,6 +1093,99 @@ export const SimilarItemsPlannerView: React.FC<SimilarItemsPlannerViewProps> = (
           </div>
         </div>
       )}
+
+      {/* سجل تقارير عمليات النقل المحفوظة (تقرير 1 بتاريخ ...، تقرير 2 بتاريخ ...) */}
+      <div className="bg-[#201511] border-2 border-emerald-600/50 rounded-2xl p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-black text-emerald-300 flex items-center gap-2">
+            <Printer className="w-4 h-4 text-emerald-400" />
+            <span>
+              سجل عمليات النقل المحفوظة ({approvedTransferReports.length} تقرير نقل معتمد من قِبلك)
+            </span>
+          </h3>
+          <span className="text-[11px] text-neutral-300 font-bold">
+            لا تُسجل أي قطعة كـ (منقول) إلا إذا تم النقل من قِبلك، وتُحفظ كل عملية برقم وتاريخ مستقل
+          </span>
+        </div>
+
+        {approvedTransferReports.length === 0 ? (
+          <div className="p-3 rounded-xl bg-[#160E0B] border border-[#38241C] text-xs text-neutral-400">
+            لم تقم بأي عملية نقل حتى الآن — عند نقل أي قطعة أو مجموعة ستُحفظ تلقائياً باسم (تقرير 1 بتاريخ ...)، ثم (تقرير 2 بتاريخ ...) وهكذا.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            {approvedTransferReports.map((rep, idx) => {
+              const title = rep.reportTitle || `تقرير ${idx + 1}`;
+              const movedSnapshotItems: InventoryItem[] =
+                rep.transferredItemsSnapshot && rep.transferredItemsSnapshot.length > 0
+                  ? rep.transferredItemsSnapshot.map((s) => ({
+                      part_number: s.part_number,
+                      location_code: s.location_code,
+                      old_location: s.old_location,
+                      description_en: s.description_en,
+                      description_ar: s.description_ar,
+                      category: s.category,
+                      qty_total: s.qty_total,
+                      qty_out: s.qty_out,
+                      qty_remaining: s.qty_remaining,
+                      is_moved: 1,
+                      is_missing: s.is_missing,
+                      status: 'تم النقل',
+                      moved_at: s.moved_at || rep.executedAt || rep.createdAt,
+                      remark: s.remark || rep.reason,
+                    }))
+                  : rep.lines
+                      .map((l) => dbService.getItemByPartNumber(l.part_number))
+                      .filter((i): i is InventoryItem => Boolean(i));
+
+              return (
+                <div
+                  key={rep.id}
+                  className="bg-[#160E0B] border border-emerald-700/40 rounded-xl p-3 flex flex-col justify-between gap-2.5"
+                >
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="px-2.5 py-1 rounded-lg bg-emerald-600/20 text-emerald-300 border border-emerald-500/40 font-black">
+                        📄 {title}
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-bold text-[11px]">
+                        {movedSnapshotItems.length || rep.lines.length} قطعة منقولة
+                      </span>
+                    </div>
+                    {rep.reason && (
+                      <p className="text-neutral-300 text-[11px] font-bold">{rep.reason}</p>
+                    )}
+                    <div className="flex flex-wrap gap-1 pt-0.5">
+                      {rep.lines.slice(0, 6).map((line, lIdx) => (
+                        <span
+                          key={lIdx}
+                          className="px-2 py-0.5 rounded bg-[#231712] border border-[#3D271F] font-mono text-[10px] text-amber-200"
+                        >
+                          {line.part_number}: {line.old_location || '—'} ⬅ {line.location}
+                        </span>
+                      ))}
+                      {rep.lines.length > 6 && (
+                        <span className="text-[10px] text-emerald-300 font-bold">
+                          +{rep.lines.length - 6} قطع أخرى
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => onOpenRelocationReport(movedSnapshotItems)}
+                    className="w-full px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>فتح {title} (PDF / واتساب) 📲</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {filteredSwapPlans.length === 0 ? (
         <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] p-8 text-center space-y-2">

@@ -24,6 +24,8 @@ import {
   Download
 } from 'lucide-react';
 
+import type { StockDocument } from '../services/documents';
+
 interface RelocationReportModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -46,35 +48,110 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
 
   // خيار نطاق التقرير: القطع المنقولة أو كافة قطع الجرد
   const [reportScope, setReportScope] = useState<'moved' | 'all'>('moved');
+  const [savedReports, setSavedReports] = useState<StockDocument[]>([]);
+  const [selectedReportId, setSelectedReportId] = useState<string>('ALL_MOVED');
   const [reportItems, setReportItems] = useState<InventoryItem[]>([]);
 
-  // استعلام مباشر من قاعدة البيانات المحلية عند فتح الواجهة (مع إعطاء الأولوية لخطة النقل المعتمدة للتو إن وجدت)
   useEffect(() => {
     if (isOpen) {
-      const movedFromDb = dbService.getMovedItems();
-      const allFromDb = dbService.getAllItems();
-
-      if (reportScope === 'moved') {
-        if (propMovedItems && propMovedItems.length > 0) {
-          setReportItems(propMovedItems);
-        } else if (movedFromDb.length > 0) {
-          setReportItems(movedFromDb);
-        } else {
-          setReportItems(allFromDb);
-        }
+      const reports = dbService.getTransferReports();
+      setSavedReports(reports);
+      // إذا تم تمرير قطع منقولة للتو، نختار أحدث تقرير نقل محفوظ (مثل تقرير 1 أو تقرير 2)
+      if (propMovedItems && propMovedItems.length > 0 && reports.length > 0) {
+        setSelectedReportId(reports[reports.length - 1].id);
+        setReportScope('moved');
       } else {
-        setReportItems(allFromDb);
+        setSelectedReportId('ALL_MOVED');
       }
     }
-  }, [isOpen, reportScope, propMovedItems]);
+  }, [isOpen, propMovedItems]);
 
-  const currentDate = new Date().toLocaleDateString('ar-SA', {
+  useEffect(() => {
+    if (!isOpen) return;
+    const movedFromDb = dbService.getMovedItems();
+    const allFromDb = dbService.getAllItems();
+
+    if (reportScope === 'all') {
+      setReportItems(allFromDb);
+      return;
+    }
+
+    if (selectedReportId !== 'ALL_MOVED') {
+      const targetDoc = savedReports.find((r) => r.id === selectedReportId);
+      if (targetDoc) {
+        if (targetDoc.transferredItemsSnapshot && targetDoc.transferredItemsSnapshot.length > 0) {
+          setReportItems(
+            targetDoc.transferredItemsSnapshot.map((s) => ({
+              part_number: s.part_number,
+              location_code: s.location_code,
+              old_location: s.old_location,
+              description_en: s.description_en,
+              description_ar: s.description_ar,
+              category: s.category,
+              qty_total: s.qty_total,
+              qty_out: s.qty_out,
+              qty_remaining: s.qty_remaining,
+              is_moved: 1,
+              is_missing: s.is_missing,
+              status: 'تم النقل',
+              moved_at: s.moved_at || targetDoc.executedAt || targetDoc.createdAt,
+              remark: s.remark || targetDoc.reason,
+            }))
+          );
+          return;
+        }
+        const docParts = targetDoc.lines
+          .map((l): InventoryItem | null => {
+            const existing = dbService.getItemByPartNumber(l.part_number);
+            return existing
+              ? {
+                  ...existing,
+                  old_location: l.old_location || existing.old_location,
+                  location_code: l.location || existing.location_code,
+                  is_moved: 1,
+                  status: 'تم النقل',
+                  moved_at: targetDoc.executedAt || targetDoc.createdAt,
+                }
+              : null;
+          })
+          .filter((i): i is InventoryItem => Boolean(i));
+        setReportItems(docParts);
+        return;
+      }
+    }
+
+    // عرض القطع المنقولة فعلياً من قِبل المستخدم فقط (دون عرض كافة قطع المخزون إذا لم ينقل المستخدم شيئاً)
+    if (propMovedItems && propMovedItems.length > 0 && selectedReportId === 'ALL_MOVED') {
+      setReportItems(propMovedItems);
+    } else {
+      setReportItems(movedFromDb);
+    }
+  }, [isOpen, reportScope, selectedReportId, savedReports, propMovedItems]);
+
+  const activeSavedReport = useMemo(
+    () =>
+      reportScope === 'moved' && selectedReportId !== 'ALL_MOVED'
+        ? savedReports.find((r) => r.id === selectedReportId) || null
+        : null,
+    [reportScope, selectedReportId, savedReports]
+  );
+
+  const reportDateObj = useMemo(() => {
+    if (activeSavedReport) {
+      const iso = activeSavedReport.executedAt || activeSavedReport.createdAt;
+      const d = iso ? new Date(iso) : new Date();
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+    return new Date();
+  }, [activeSavedReport]);
+
+  const currentDate = reportDateObj.toLocaleDateString('ar-SA', {
     weekday: 'long',
     year: 'numeric',
     month: 'long',
     day: 'numeric',
   });
-  const currentTime = new Date().toLocaleTimeString('ar-SA', {
+  const currentTime = reportDateObj.toLocaleTimeString('ar-SA', {
     hour: '2-digit',
     minute: '2-digit',
   });
@@ -88,13 +165,29 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
     return reportItems.reduce((acc, i) => acc + (Number(i.qty_remaining) || 0), 0);
   }, [reportItems]);
 
+  const reportTitleLabel = useMemo(() => {
+    if (reportScope === 'all') return 'بيان جرد الأصناف الشامل';
+    if (activeSavedReport?.reportTitle) return activeSavedReport.reportTitle;
+    if (savedReports.length > 0) {
+      return `إجمالي عمليات النقل المحفوظة (${savedReports.length} تقارير)`;
+    }
+    return 'بيان حركة القطع المنقولة من قِبل المستخدم';
+  }, [reportScope, activeSavedReport, savedReports.length]);
+
   const reportId = useMemo(() => {
+    if (activeSavedReport?.reportNumber) {
+      const d = reportDateObj;
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `تقرير-${activeSavedReport.reportNumber}-${year}${month}${day}`;
+    }
     const d = new Date();
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
     return `REL-${year}${month}${day}-${reportItems.length || '0'}`;
-  }, [reportItems.length]);
+  }, [activeSavedReport, reportDateObj, reportItems.length]);
 
   if (!isOpen) return null;
 
@@ -109,12 +202,12 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
     setActionFeedback({ message: 'جاري توليد ملف PDF وتجهيز المشاركة عبر واتساب... 📲' });
     try {
       const intro =
-        `📋 *مرفق تقرير اعتماد خطة نقل وتجميع المتشابهات رقم [${reportId}]*\n\n` +
+        `📋 *مرفق ${reportTitleLabel} [${reportId}]*\n\n` +
         `🏢 *ASMO - إدارة المستودعات (SAP Inventory Controller)*\n` +
         `📅 التاريخ: ${currentDate} • ${currentTime}\n` +
-        `📦 عدد الأصناف المعتمدة في النقل: ${reportItems.length} صنف\n` +
+        `📦 عدد الأصناف المنقولة في التقرير: ${reportItems.length} صنف\n` +
         `🔢 إجمالي الكمية المنقولة: ${totalQty} وحدة\n\n` +
-        `*بيان حركة إخراج غير المتشابهات وتجميع المتشابهات في المواقع الجديدة:*\n`;
+        `*بيان حركة نقل القطع المعتمدة من قِبل المستخدم:*\n`;
 
       const rows = reportItems
         .slice(0, 18)
@@ -349,6 +442,57 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
           </div>
         </div>
 
+        {/* شريط اختيار تقارير عمليات النقل المحفوظة (تقرير 1 بتاريخ ...، تقرير 2 بتاريخ ...) */}
+        {reportScope === 'moved' && (
+          <div className="px-4 py-2.5 bg-[#19110D] border-b border-[#432A1F] flex flex-wrap items-center gap-2 no-print print:hidden">
+            <span className="text-xs font-black text-amber-300 flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-amber-400" />
+              <span>تقارير عمليات النقل المحفوظة ({savedReports.length}):</span>
+            </span>
+
+            <button
+              type="button"
+              onClick={() => setSelectedReportId('ALL_MOVED')}
+              className={`px-3 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                selectedReportId === 'ALL_MOVED'
+                  ? 'bg-emerald-700 text-white border-emerald-400 shadow-sm'
+                  : 'bg-[#251914] text-neutral-300 border-[#3D271F] hover:border-amber-500/50'
+              }`}
+            >
+              كل القطع المنقولة ({dbService.getMovedItems().length})
+            </button>
+
+            {savedReports.length === 0 ? (
+              <span className="text-[11px] text-neutral-400">
+                لا توجد عمليات نقل مسجلة بعد — عند قيامك بأي عملية نقل سيُحفظ هنا (تقرير 1 بتاريخ ...، تقرير 2 بتاريخ ...)
+              </span>
+            ) : (
+              savedReports.map((rep, idx) => {
+                const count = rep.transferredItemsSnapshot?.length || rep.lines.length;
+                const label = rep.reportTitle || `تقرير ${idx + 1}`;
+                const isSelected = selectedReportId === rep.id;
+                return (
+                  <button
+                    key={rep.id}
+                    type="button"
+                    onClick={() => setSelectedReportId(rep.id)}
+                    className={`px-3 py-1 rounded-lg text-xs font-black border transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-amber-600 text-white border-amber-300 shadow-md'
+                        : 'bg-[#251914] text-amber-200 border-amber-800/50 hover:bg-[#32211A]'
+                    }`}
+                  >
+                    <span>{label}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-black/30 text-[10px] font-mono">
+                      {count} قطعة
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        )}
+
         {/* Action feedback banner with direct PDF download link & WhatsApp link */}
         {actionFeedback && (
           <div className="bg-[#1C2826] border-b border-emerald-600/40 px-4 py-2.5 text-xs font-bold text-emerald-200 flex flex-wrap items-center justify-between gap-2 no-print print:hidden animate-in fade-in">
@@ -510,7 +654,7 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
                 lineHeight: 1.6,
                 border: '1px solid #cbd5e1'
               }}>
-                {reportScope === 'moved' ? 'بيان حركة القطع المنقولة' : 'بيان جرد الأصناف الشامل'}
+                {reportTitleLabel}
               </div>
             </div>
           </div>
@@ -545,8 +689,8 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
           {/* 3. Official Clean Table with Zebra Striping and Corporate Header */}
           {reportItems.length === 0 ? (
             <div style={{ padding: '40px', textAlign: 'center', border: '1px dashed #cbd5e1', borderRadius: '8px', color: '#64748b', margin: '20px 0' }}>
-              <p style={{ fontSize: '16px', fontWeight: 'bold', margin: '0 0 6px 0' }}>لا توجد قطع مطابقة حالياً في السجل</p>
-              <p style={{ fontSize: '13px', margin: '0' }}>قم بنقل القطع أو اختر خيار "كافة قطع الجرد" لعرض التقرير.</p>
+              <p style={{ fontSize: '16px', fontWeight: 'bold', margin: '0 0 6px 0' }}>لا توجد قطع منقولة من قِبلك حتى الآن</p>
+              <p style={{ fontSize: '13px', margin: '0' }}>لا يتم تسجيل أي قطعة كمنقولة إلا عندما تقوم بنقلها بنفسك، وسيتم حفظ كل عملية نقل برقم وتاريخ مستقل (تقرير 1 بتاريخ ...، تقرير 2 بتاريخ ...).</p>
             </div>
           ) : (
             <div style={{ width: '100%', overflowX: 'auto', marginBottom: '20px', flex: '1' }}>
