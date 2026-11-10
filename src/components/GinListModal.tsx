@@ -45,7 +45,6 @@ export const GinListModal: React.FC<GinListModalProps> = ({
     return items.filter((item) => Boolean(item.gin_code && item.gin_code.trim()));
   }, [items]);
 
-  // تنظيف التحديد من أي قطع لم تعد في قائمة قين
   useEffect(() => {
     setSelectedParts((prev) => {
       const validSet = new Set(ginItems.map((i) => i.part_number));
@@ -80,7 +79,7 @@ export const GinListModal: React.FC<GinListModalProps> = ({
 
   const showTempStatus = (msg: string) => {
     setStatusMessage(msg);
-    setTimeout(() => setStatusMessage(null), 3500);
+    setTimeout(() => setStatusMessage(null), 4000);
   };
 
   const toggleSelectPart = (partNumber: string) => {
@@ -174,7 +173,7 @@ export const GinListModal: React.FC<GinListModalProps> = ({
     showTempStatus(`✅ جاري فتح الواتساب لإرسال تقرير (${modeLabel})...`);
   };
 
-  const handleExportPdf = async (onlySelected: boolean) => {
+  const handleExportPdf = async (onlySelected: boolean, sendViaWhatsApp = true) => {
     const targetList = onlySelected ? selectedGinItems : ginItems;
     if (targetList.length === 0) {
       showTempStatus(
@@ -193,8 +192,11 @@ export const GinListModal: React.FC<GinListModalProps> = ({
       await exportInventoryListToPdfFile({
         items: targetList,
         title,
+        sendViaWhatsApp,
       });
-      showTempStatus(`✅ تم تصدير ومشاركة تقرير PDF لـ (${targetList.length}) مادة من قين`);
+      showTempStatus(
+        `✅ تم تصدير تقرير PDF لـ (${targetList.length}) مادة من قين وتجهيز الإرسال عبر واتساب 📲`
+      );
     } catch {
       showTempStatus('⚠️ تعذر تصدير ملف PDF');
     } finally {
@@ -238,7 +240,6 @@ export const GinListModal: React.FC<GinListModalProps> = ({
       dir="rtl"
     >
       <div className="bg-[#2C1E18] border-2 border-purple-500/70 w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
-        {/* Header */}
         <div className="p-4 bg-gradient-to-l from-purple-950 via-[#231713] to-[#231713] border-b border-purple-700/50 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-xl bg-purple-600/25 border border-purple-400/60 flex items-center justify-center text-purple-200">
@@ -247,7 +248,7 @@ export const GinListModal: React.FC<GinListModalProps> = ({
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-black text-base sm:text-lg text-white">
-                  قائمة وتقارير (قين 🔖) — إرسال الكل أو المختار عبر الواتساب
+                  قائمة وتقارير (قين 🔖) — إرسال الكل أو المختار عبر الواتساب (نص + PDF)
                 </h3>
                 <span className="px-2.5 py-0.5 rounded-full bg-purple-600 text-white text-xs font-black">
                   إجمالي القين: {ginItems.length}
@@ -259,7 +260,7 @@ export const GinListModal: React.FC<GinListModalProps> = ({
                 )}
               </div>
               <p className="text-[11px] text-purple-200/80">
-                تُحفظ كل مادة مع القطع في نفس موقعها الفعلي مع وضع إشارة (🔖 قين) في بطاقة القطعة، ويمكنك إرسال تقرير بكل القين أو بالمختار منها
+                تُحفظ كل مادة مع القطع في نفس موقعها الفعلي مع وضع إشارة (🔖 قين) في بطاقة القطعة، ويمكنك إرسال PDF وتقرير واتساب بكل القين أو بالمختار منها
               </p>
             </div>
           </div>
@@ -273,10 +274,8 @@ export const GinListModal: React.FC<GinListModalProps> = ({
           </button>
         </div>
 
-        {/* Action Bar: Send All vs Send Selected */}
         <div className="p-3.5 bg-[#1F1511] border-b border-[#3D271F] space-y-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            {/* أزرار إرسال الواتساب (الكل أو المختار) */}
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -298,13 +297,12 @@ export const GinListModal: React.FC<GinListModalProps> = ({
               </button>
             </div>
 
-            {/* أزرار PDF والنسخ والإضافة */}
             <div className="flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
                 disabled={isExportingPdf || ginItems.length === 0}
-                onClick={() => handleExportPdf(selectedParts.size > 0)}
-                className="px-3 py-2 rounded-xl bg-amber-700 hover:bg-amber-600 disabled:opacity-45 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                onClick={() => handleExportPdf(selectedParts.size > 0, true)}
+                className="px-3.5 py-2 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] disabled:opacity-45 text-white font-black text-xs flex items-center gap-1.5 cursor-pointer shadow-md"
               >
                 {isExportingPdf ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -313,8 +311,8 @@ export const GinListModal: React.FC<GinListModalProps> = ({
                 )}
                 <span>
                   {selectedParts.size > 0
-                    ? `PDF للمختار (${selectedParts.size})`
-                    : `PDF لكل القين (${ginItems.length})`}
+                    ? `PDF للمختار وإرسال واتساب 📲 (${selectedParts.size})`
+                    : `PDF لكل القين وإرسال واتساب 📲 (${ginItems.length})`}
                 </span>
               </button>
 
@@ -347,7 +345,6 @@ export const GinListModal: React.FC<GinListModalProps> = ({
             </div>
           </div>
 
-          {/* شريط التحديد السريع */}
           {ginItems.length > 0 && (
             <div className="flex items-center justify-between pt-2 border-t border-[#32211A] text-xs">
               <div className="flex items-center gap-2">
@@ -388,7 +385,6 @@ export const GinListModal: React.FC<GinListModalProps> = ({
           </div>
         )}
 
-        {/* Quick Add from existing inventory */}
         <div className="p-3.5 border-b border-[#3D271F] bg-[#251914] space-y-2 text-xs">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <div className="sm:col-span-2 relative">
@@ -441,7 +437,6 @@ export const GinListModal: React.FC<GinListModalProps> = ({
           )}
         </div>
 
-        {/* List Body */}
         <div className="p-4 overflow-y-auto flex-1 space-y-2.5">
           {ginItems.length === 0 ? (
             <div className="text-center py-12 space-y-3">
@@ -536,7 +531,6 @@ export const GinListModal: React.FC<GinListModalProps> = ({
           )}
         </div>
 
-        {/* Footer */}
         <div className="p-3.5 bg-[#231713] border-t border-[#3D271F] flex items-center justify-between">
           <span className="text-[11px] text-neutral-400">
             جميع مواد (قين) محفوظة مع القطع في نفس مواقعها الفعلية وتظهر عليها شارة (🔖 قين).
