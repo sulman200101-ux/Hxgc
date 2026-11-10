@@ -31,6 +31,8 @@ export interface InventoryItem {
   mark_symbol?: '✓' | 'X' | 'F' | 'N' | null;
   audit_meaning?: string | null;
   unit_price?: number; // السعر التقديري أو الفعلي للقطعة بالريال
+  gin_code?: string; // حقل قين (اختياري عند الإضافة اليدوية)
+  user_verified?: number; // 1 فقط إذا وضع المستخدم شخصياً علامة مدقق
   status: ItemStatus;
   updated_at?: string;
 }

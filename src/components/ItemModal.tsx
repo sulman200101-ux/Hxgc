@@ -28,6 +28,7 @@ interface ItemModalProps {
     qty_total: number;
     qty_out: number;
     status: InventoryItem['status'];
+    gin_code?: string;
   }) => Promise<void>;
   onOpenRelocate?: (item: InventoryItem) => void;
 }
@@ -47,6 +48,8 @@ export const ItemModal: React.FC<ItemModalProps> = ({
   const [qtyTotal, setQtyTotal] = useState(1);
   const [qtyOut, setQtyOut] = useState(0);
   const [status, setStatus] = useState<InventoryItem['status']>('غير مدقق');
+  const [useGin, setUseGin] = useState<boolean>(false);
+  const [ginCode, setGinCode] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
@@ -61,15 +64,20 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       setQtyTotal(item.qty_total);
       setQtyOut(item.qty_out);
       setStatus(item.is_missing === 1 ? 'غير موجودة' : item.status);
+      const hasGin = Boolean(item.gin_code && item.gin_code.trim());
+      setUseGin(hasGin);
+      setGinCode(item.gin_code && item.gin_code !== 'قين' ? item.gin_code : '');
     } else {
       setPartNumber('');
       setLocationCode('');
       setDescEn('');
       setDescAr('');
       setCategory('قطع ميكانيكية متنوعة');
-      setQtyTotal(0);
+      setQtyTotal(1);
       setQtyOut(0);
       setStatus('غير مدقق');
+      setUseGin(false);
+      setGinCode('');
     }
   }, [item, isOpen]);
 
@@ -105,7 +113,9 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       return;
     }
 
-    const cleanLoc = sanitizeLocationCode(locationCode);
+    const fallbackLoc = liveAnalysis?.recommended_bin || 'N01A1';
+    const rawLoc = locationCode.trim() ? locationCode : fallbackLoc;
+    const cleanLoc = sanitizeLocationCode(rawLoc) || fallbackLoc;
     if (!isValidSpecificLocation(cleanLoc)) {
       setValidationError('يجب إدخال اسم موقع محدد وفعلي (مثل N11C2 أو N06C1) — يمنع إدخال موقع "عام"');
       return;
@@ -115,6 +125,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     const { cleaned: cleanDescEn } = sanitizeDescription(descEn);
     const cleanQtyTotal = sanitizeQuantity(qtyTotal, 1);
     const cleanQtyOut = sanitizeQuantity(qtyOut, 0);
+    const finalGinValue = useGin ? (ginCode.trim() || 'قين') : '';
 
     try {
       await onSave({
@@ -126,6 +137,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
         qty_total: cleanQtyTotal,
         qty_out: cleanQtyOut,
         status,
+        gin_code: finalGinValue,
       });
       onClose();
     } catch (err) {
@@ -162,6 +174,54 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               <span>{validationError}</span>
             </div>
           )}
+
+          {/* خيار (قين) عند الإضافة اليدوية */}
+          <div className="p-3 rounded-xl bg-[#1F1511] border border-emerald-700/60 space-y-2">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <span className="font-black text-emerald-300 text-xs">
+                خيار (قين) عند الإضافة اليدوية:
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setUseGin(true)}
+                  className={`px-3 py-1.5 rounded-lg font-black text-[11px] transition-all cursor-pointer border ${
+                    useGin
+                      ? 'bg-emerald-600 text-white border-emerald-300 shadow-md'
+                      : 'bg-[#2C1E18] text-emerald-300 border-emerald-800 hover:bg-emerald-950'
+                  }`}
+                >
+                  ✓ وضع (قين) — تضاف لقائمة قين
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUseGin(false);
+                    setGinCode('');
+                  }}
+                  className={`px-3 py-1.5 rounded-lg font-black text-[11px] transition-all cursor-pointer border ${
+                    !useGin
+                      ? 'bg-amber-600 text-white border-amber-300 shadow-md'
+                      : 'bg-[#2C1E18] text-neutral-300 border-[#4A342B] hover:bg-[#3A271F]'
+                  }`}
+                >
+                  تجاهل (قين) — تضاف كما في السابق
+                </button>
+              </div>
+            </div>
+
+            {useGin && (
+              <div className="pt-1">
+                <input
+                  type="text"
+                  value={ginCode}
+                  onChange={(e) => setGinCode(e.target.value)}
+                  placeholder="اكتب رقم أو بيان قين (اختياري — إن تركته فارغاً تُسجل باسم قين في القائمة)"
+                  className="w-full px-3 py-2 rounded-xl bg-[#140D0A] border border-emerald-500/60 text-emerald-200 font-bold focus:outline-none focus:border-emerald-400"
+                />
+              </div>
+            )}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Part Number */}
@@ -202,8 +262,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 type="text"
                 value={locationCode}
                 onChange={(e) => setLocationCode(e.target.value)}
-                required
-                placeholder="N11C2 أو N06C1"
+                placeholder="N11C2 أو N06C1 (تلقائي عند الترك)"
                 className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 font-mono font-bold focus:outline-none focus:border-amber-500"
               />
             </div>

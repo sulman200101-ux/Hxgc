@@ -1,5 +1,5 @@
 import React from 'react';
-import { Search, Plus, X, Trash2, FileText, XCircle, Database } from 'lucide-react';
+import { Search, Plus, X, Trash2, FileText, XCircle, Database, MessageCircle } from 'lucide-react';
 
 interface HeaderProps {
   locationCount: number;
@@ -7,6 +7,7 @@ interface HeaderProps {
   remainingTotal: number;
   movedCount?: number;
   missingCount?: number;
+  ginCount?: number;
   searchQuery: string;
   onSearchChange: (q: string) => void;
   searchField?: 'all' | 'part' | 'name' | 'location';
@@ -18,6 +19,8 @@ interface HeaderProps {
   onOpenAddItem: () => void;
   onOpenWipeModal: () => void;
   onOpenRelocationReport?: () => void;
+  onOpenGinList?: () => void;
+  onOpenBackup?: () => void;
   onGenerateBulk100k?: () => void;
   isBulkLoading?: boolean;
 }
@@ -28,6 +31,7 @@ export const Header: React.FC<HeaderProps> = ({
   remainingTotal,
   movedCount = 0,
   missingCount = 0,
+  ginCount = 0,
   searchQuery,
   onSearchChange,
   searchField = 'all',
@@ -39,6 +43,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAddItem,
   onOpenWipeModal,
   onOpenRelocationReport,
+  onOpenGinList,
+  onOpenBackup,
   onGenerateBulk100k,
   isBulkLoading = false,
 }) => {
@@ -149,6 +155,33 @@ export const Header: React.FC<HeaderProps> = ({
               <Trash2 className="w-3.5 h-3.5 text-red-400" />
               <span>مسح شامل</span>
             </button>
+
+            {onOpenBackup && (
+              <button
+                type="button"
+                onClick={onOpenBackup}
+                title="حفظ واستعادة النسخة الاحتياطية الكاملة"
+                className="px-3 py-1.5 rounded-xl bg-[#3A271F] hover:bg-[#4D342A] text-amber-200 text-xs font-bold flex items-center gap-1.5 border border-amber-600/50 transition-all cursor-pointer shadow-sm"
+              >
+                <Database className="w-3.5 h-3.5 text-amber-400" />
+                <span>النسخ الاحتياطي</span>
+              </button>
+            )}
+
+            {onOpenGinList && (
+              <button
+                type="button"
+                onClick={onOpenGinList}
+                title="فتح قائمة (قين) وإرسالها عبر الواتساب"
+                className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-green-700 to-emerald-800 hover:from-green-600 hover:to-emerald-700 text-white text-xs font-black flex items-center gap-1.5 shadow-md shadow-emerald-950/60 transition-all cursor-pointer border border-emerald-400/60"
+              >
+                <MessageCircle className="w-3.5 h-3.5 text-emerald-200" />
+                <span>قائمة قين 💬</span>
+                <span className="px-1.5 py-0.2 rounded-full bg-white text-emerald-950 text-[10px] font-black">
+                  {ginCount}
+                </span>
+              </button>
+            )}
 
             {onOpenRelocationReport && (
               <button

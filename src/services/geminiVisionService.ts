@@ -788,14 +788,8 @@ function normalizeRawVisionItems(rawItems: any[]): {
         ? 'ناقص العدد'
         : null);
 
-    // لا يُسجل الصنف كـ "تم النقل" أثناء قراءة الورقة؛ النقل يتم حصراً من قِبل المستخدم
-    const finalStatus = isMissing
-      ? 'غير موجودة'
-      : finalMarkSymbol === 'N' || item.status === 'ناقص العدد'
-      ? 'ناقص العدد'
-      : finalMarkSymbol === '✓' || finalMarkSymbol === 'F' || item.status === 'مدقق' || item.status === 'تم النقل'
-      ? 'مدقق'
-      : 'غير مدقق';
+    // لا يُسجل الصنف كـ "مدقق" أو "تم النقل" أثناء قراءة الورقة؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم
+    const finalStatus = isMissing ? 'غير موجودة' : 'غير مدقق';
 
     const { category, descAr: dictDescAr } = cleanDescEn
       ? categorizeAndTranslate(cleanDescEn)

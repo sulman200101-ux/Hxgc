@@ -828,9 +828,8 @@ async function startServer() {
 
   app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
-    setTimeout(() => {
-      getNodeOcrWorker().catch(() => {});
-    }, 2500);
+    // Prepare OCR static files in the background without blocking server startup
+    import('./scripts/prepare-ocr.mjs').catch(() => {});
   });
 }
 

@@ -19,6 +19,7 @@ import { RenameLocationModal } from './components/RenameLocationModal';
 import { WipeDatabaseModal } from './components/WipeDatabaseModal';
 import { RelocateModal } from './components/RelocateModal';
 import { RelocationReportModal } from './components/RelocationReportModal';
+import { GinListModal } from './components/GinListModal';
 import { ExtractedSparePart } from './services/localOcr';
 import { Camera, Plus, CheckCircle, RefreshCw, MapPin, Edit3, XCircle, CheckCircle2, Layers } from 'lucide-react';
 
@@ -46,6 +47,7 @@ export default function App() {
   const [isRelocateOpen, setIsRelocateOpen] = useState(false);
   const [relocatingItem, setRelocatingItem] = useState<InventoryItem | null>(null);
   const [isRelocationReportOpen, setIsRelocationReportOpen] = useState(false);
+  const [isGinListOpen, setIsGinListOpen] = useState(false);
   const [reportMovedOverride, setReportMovedOverride] = useState<InventoryItem[] | undefined>(undefined);
   const [selectedLocationCode, setSelectedLocationCode] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
@@ -80,6 +82,10 @@ export default function App() {
 
   const movedItems = useMemo(() => {
     return dbService.getMovedItems();
+  }, [allItems]);
+
+  const ginItems = useMemo(() => {
+    return dbService.getGinItems();
   }, [allItems]);
 
   const handleOpenRelocationReportWithItems = (customItems?: InventoryItem[]) => {
@@ -190,6 +196,7 @@ export default function App() {
     qty_total: number;
     qty_out: number;
     status: InventoryItem['status'];
+    gin_code?: string;
   }) => {
     const existing = dbService.getItemByPartNumber(data.part_number);
     const targetLocation = data.location_code.trim().toUpperCase();
@@ -203,7 +210,9 @@ export default function App() {
       data.qty_out,
       data.status,
       data.description_ar,
-      data.status === 'غير موجودة' || data.status === 'مفقود' ? 1 : 0
+      data.status === 'غير موجودة' || data.status === 'مفقود' ? 1 : 0,
+      undefined,
+      data.gin_code
     );
 
     if (existing && existing.location_code !== targetLocation) {
@@ -214,7 +223,11 @@ export default function App() {
     }
 
     refreshData();
-    showNotification(`تم حفظ القطعة ${data.part_number} في موقع ${targetLocation} بنجاح`, 'success');
+    if (data.gin_code && data.gin_code.trim()) {
+      showNotification(`تم حفظ القطعة ${data.part_number} وإضافتها إلى قائمة (قين) للإرسال عبر الواتساب 💬`, 'success');
+    } else {
+      showNotification(`تم حفظ القطعة ${data.part_number} في موقع ${targetLocation} بنجاح`, 'success');
+    }
   };
 
   const handleDeleteItem = async (partNumber: string) => {
@@ -327,6 +340,7 @@ export default function App() {
         <div className="flex flex-wrap gap-2 px-4">
           <button className="p-3 rounded-xl bg-amber-800 hover:bg-amber-700 text-white font-bold cursor-pointer" onClick={() => setShowSuggestions(true)}>اقتراح تجميع القطع في مواقع متجاورة</button>
           <button className="p-3 rounded-xl bg-emerald-800 hover:bg-emerald-700 text-white font-bold cursor-pointer" onClick={() => changeScreen('similar')}>فتح واجهة المتشابهات وخطة الإحلال الكاملة</button>
+          <button className="p-3 rounded-xl bg-green-700 hover:bg-green-600 text-white font-black cursor-pointer" onClick={() => setIsGinListOpen(true)}>فتح قائمة (قين) للإرسال عبر الواتساب 💬 ({ginItems.length})</button>
         </div>
         <DataSafetyPanel onRefresh={refreshData} />
         {isDbReady && <ReportsPanel />}
@@ -361,7 +375,10 @@ export default function App() {
         remainingTotal={overallTotals.totalRemaining}
         movedCount={movedItems.length}
         missingCount={overallTotals.totalMissing}
+        ginCount={ginItems.length}
         onOpenRelocationReport={() => handleOpenRelocationReportWithItems()}
+        onOpenGinList={() => setIsGinListOpen(true)}
+        onOpenBackup={() => changeScreen('operations')}
         searchQuery={searchQuery}
         onSearchChange={(q) => {
           setSearchQuery(q);
@@ -695,12 +712,12 @@ export default function App() {
             description_en: '',
             description_ar: '',
             category: '',
-            qty_total: 10,
+            qty_total: 1,
             qty_out: 0,
-            qty_remaining: 10,
+            qty_remaining: 1,
             is_moved: 0,
             is_missing: 0,
-            status: 'موجود',
+            status: 'غير مدقق',
           });
           setIsItemModalOpen(true);
         }}
@@ -726,6 +743,18 @@ export default function App() {
         }}
         onSave={handleSaveItem}
         onOpenRelocate={handleOpenRelocate}
+      />
+
+      {/* Gin (قين) List Modal for WhatsApp */}
+      <GinListModal
+        isOpen={isGinListOpen}
+        onClose={() => setIsGinListOpen(false)}
+        items={allItems}
+        onRefresh={refreshData}
+        onOpenAddModal={() => {
+          setEditingItem(null);
+          setIsItemModalOpen(true);
+        }}
       />
 
       {/* Rename Location Modal */}

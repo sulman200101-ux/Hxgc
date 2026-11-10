@@ -156,14 +156,8 @@ export function interpretMark(check: string, remark: string) {
       : null;
 
   return {
-    // لا يتم تسجيل القطعة كـ "تم النقل" من أوراق الجرد؛ النقل يتم حصراً عبر عملية نقل من قِبل المستخدم
-    status: isCross
-      ? 'غير موجودة'
-      : isF
-      ? 'مدقق'
-      : isVerified
-      ? 'مدقق'
-      : 'غير مدقق',
+    // لا يتم تسجيل أي قطعة كـ "مدقق" أو "تم النقل" تلقائياً من أوراق الجرد؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم
+    status: isCross ? 'غير موجودة' : 'غير مدقق',
     mark_symbol,
     audit_meaning,
     shortage: excludedIncrease ? 0 : shortage,
