@@ -9,6 +9,7 @@ export interface DocumentLine {
   remark: string;
   mark_symbol?: '✓' | 'X' | 'F' | 'N' | null;
   audit_meaning?: string | null;
+  is_consumable?: number;
   reviewed: boolean;
 }
 
@@ -95,7 +96,10 @@ export interface StockDocument {
     qty_out: number;
     qty_remaining: number;
     is_moved: number;
+    user_moved?: number;
     is_missing: number;
+    is_consumable?: number;
+    target_shelf_type?: string;
     status: string;
     moved_at?: string;
     remark?: string;
@@ -156,8 +160,8 @@ export function interpretMark(check: string, remark: string) {
       : null;
 
   return {
-    // لا يتم تسجيل أي قطعة كـ "مدقق" أو "تم النقل" تلقائياً من أوراق الجرد؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم
-    status: isCross ? 'غير موجودة' : 'غير مدقق',
+    // ملاحظة: في قاعدة البيانات (db.ts) لا يتم اعتماد حالة "مدقق" من الورقة إلا إذا وضع المستخدم بنفسه علامة مدقق (user_verified === 1)
+    status: isCross ? 'غير موجودة' : isVerified ? 'مدقق' : 'غير مدقق',
     mark_symbol,
     audit_meaning,
     shortage: excludedIncrease ? 0 : shortage,
@@ -414,4 +418,3 @@ export function approvalLines(doc: StockDocument): DocumentLine[] {
   }
   return Array.from(groups.values()).map((g) => g.line);
 }
-
