@@ -2,10 +2,11 @@
  * خدمة القراءة الصارمة لأوراق جرد أسمو (SAP Inventory Controller) عبر الخادم (/api/gemini/parse-table)
  * مع الاتصال المباشر بمحرك Gemini داخل تطبيق الأندرويد (APK) أو باستخدام المفتاح المخصص.
  * لا تحتوي على أي بيانات مخزنة مسبقاً؛ أي حقل لم يتمكن الـ OCR من قراءته بوضوح يُترك فارغاً تماماً ("").
+ * لا يتم تسجيل أي قطعة كـ "مدقق" أو "منقول" تلقائياً أثناء القراءة؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم.
  */
 
 import type { ExtractedSparePart } from './localOcr';
-import { categorizeAndTranslate } from '../utils/translator';
+import { categorizeAndTranslate, isConsumableDescription } from '../utils/translator';
 import {
   strict10DigitRegexFilter,
   dynamicLocationNormalizer,
@@ -57,8 +58,8 @@ export const CUSTOM_GEMINI_KEY_STORAGE = 'asmo_custom_gemini_api_key';
 export const ACTIVE_GEMINI_MODEL_STORAGE = 'asmo_active_gemini_model';
 
 export const GEMINI_CANDIDATE_MODELS = [
-  'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
   'gemini-flash-lite-latest',
@@ -217,19 +218,26 @@ function isHeaderOrFooterNoise(item: any): boolean {
 }
 
 const STRICT_OCR_PROMPT = `
-أنت محرك OCR صارم ومخصص لجرد مستودعات شركة أسمو (ASMO).
-اقرأ جدول قطع الغيار من الصورة المرفقة واستخرج السطور المرئية بوضوح فقط.
+أنت محرك Gemini Vision الصناعي فائق الدقة (Ultra-High Accuracy Document AI) المخصص لجرد مستودعات شركة أسمو (ASMO SAP Inventory Controller).
+مهمتك قراءة جدول قطع الغيار من الصورة المرفقة بالكامل من أول سطر إلى آخر سطر (حتى 45+ سطراً في الورقة) بأعلى معايير الدقة الهندسية.
 
-قواعد صارمة جداً لمنع الهلوسة:
-1. يُمنع منعاً باتاً توليد أو تخمين أي أرقام قطع أو مواقع أو كميات أو أوصاف غير موجودة في الصورة.
-2. رقم القطعة (part_number) يجب أن يُقرأ كما هو بدقة (10 أرقام)، وإذا لم تستطع قراءته اتركه فارغاً "" أو null.
-3. أي حقل في الصف لم تستطع قراءته بوضوح (سواء part_number أو location_code أو description أو quantity) يجب أن تعيده فارغاً "" أو null ولا تملأه من سطور أخرى.
-4. ابحث بدقة عن أي علامات يدوية أو رموز مكتوبة بجانب كل صف أو عند خانة الكمية، وفسرها حصراً كالتالي:
-   - إذا وجدت علامة صح (✓): اجعل حقل mark_symbol = "✓" وحقل audit_meaning = "القطع موجودة" وحقل status = "مدقق".
-   - إذا وجدت علامة خطأ أو إكس (X أو ✗): اجعل حقل mark_symbol = "X" وحقل audit_meaning = "القطع غير موجودة" وحقل status = "غير موجود".
-   - إذا وجدت حرف (F أو f): اجعل حقل mark_symbol = "F" وحقل audit_meaning = "تم نقل العدد الزائد إلى مكان آخر" وحقل status = "تم النقل".
-   - إذا وجدت علامة ناقص (-) أو حرف (N أو n): اجعل حقل mark_symbol = "N" وحقل audit_meaning = "ناقص العدد" وحقل status = "ناقص العدد".
-   - إذا لم توجد أي علامة أمام الصف: اجعل الحقول الخاصة بالعلامة null وحقل status = "غير مدقق".
+هيكل جدول جرد SAP في أسمو:
+- عمود Material: رقم القطعة المكون من 10 أرقام بالضبط (مثل 1001023714 أو 1000428938). تجاهل أرقام تسلسل السطور القصيرة (مثل 2801).
+- عمود Plant / SLoc: رموز ثابتة مثل M016 و 002 (لا تضعها في حقل الموقع).
+- عمود Storage Bin (location_code): رمز الموقع المخزني الفعلي (مثل N11A1, N11FL2, N16D2, N07B1, N12BB1, D1, FL1, A1).
+- عمود الوحدة والكمية (QTY): يتبع رمز الوحدة (EA, SET, PK, PAA, ZYD, SH, CO, KG, KIT) رقم الكمية الصحيح (quantity).
+- عمود الملاحظات والعلامات اليدوية (Check / Remark):
+  * علامة خطأ (X أو × أو ✗): تعني أن القطعة غير موجودة بالرف (mark_symbol = "X"، status = "غير موجود").
+  * علامة ناقص مع رقم (مثل -1 أو -4 أو 4-3 أو N1): تعني نقص في الكمية بمقدار الرقم المكتوب (mark_symbol = "N"، وضع قيمة النقص في حقل remark مثل "-1" أو "-4").
+  * حرف F (مثل F أو F1 أو F2): يعني استبعاد الزيادة/نقل الفائض (mark_symbol = "F"، remark = "F").
+  * علامة صح (✓): رصد وجود القطعة على الورقة (mark_symbol = "✓")، ولكن انتبه: حالة القطعة في النظام يجب أن تبقى دائماً "غير مدقق" لأن التدقيق والنقل يتمان حصراً من قِبل المستخدم بنفسه.
+- عمود Material Description (description): الوصف الإنجليزي الكامل للقطعة مع كافة القياسات بالمليمتر (MM) أو البوصة (IN) ونوع المعدن (مثل SS316, INCONEL, VITON).
+- حقل description_ar: ترجمة عربية هندسية دقيقة للوصف الإنجليزي مع تحويل البوصة إلى ملم (1 بوصة = 25.4 ملم).
+
+قواعد صارمة جداً لمنع الهلوسة أو التخمين:
+1. يُمنع منعاً باتاً تخمين أو توليد أي أرقام قطع أو مواقع أو كميات غير مرئية في الصورة.
+2. إذا كان أي حقل في السطر غير واضح أو غير مقروء اتركه فارغاً "" أو null دون ملئه من سطور مجاورة.
+3. لا تجعل حقل status أبداً "مدقق" أو "منقول" أو "تم النقل"؛ استخدم فقط "غير موجود" للسطور المعلمة بـ X، و"غير مدقق" لبقية السطور.
 `;
 
 function isExplicitInvalidKeyError(msg: string): boolean {
@@ -256,11 +264,6 @@ function isHighDemandOrTransientError(msg: string, status?: number): boolean {
   );
 }
 
-/**
- * فحص اتصال محرك Gemini السحابي مباشرة من جهاز الأندرويد (APK) أو باستخدام المفتاح المخصص
- * مع التبديل التلقائي بين النماذج السريعة (gemini-2.5-flash-lite, gemini-2.5-flash, gemini-3-flash-preview)
- * والتحقق من قائمة النماذج عند وجود ضغط مؤقت (503 High Demand) على أحد النماذج.
- */
 export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Promise<{
   ok: boolean;
   geminiActive: boolean;
@@ -349,8 +352,6 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
     }
   }
 
-  // إذا لم يكن المفتاح مرفوضاً صراحةً، نتحقق مباشرة عبر نقطة فحص النماذج الرسمية (/v1beta/models)
-  // لأنها لا تتأثر بضغط التوليد اللحظي (503 High Demand) وتؤكد صحة المفتاح واتصال الإنترنت 100%
   if (!isExplicitInvalidKeyError(lastErrorMsg)) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 7000);
@@ -399,7 +400,6 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
       clearTimeout(timer);
     }
 
-    // حتى لو كان هناك ضغط لحظي (503 High Demand) فإن استجابة خادم جوجل بـ 503 تثبت أن الإنترنت مفتوح والمفتاح مقبول وصحيح
     if (sawHighDemandSpike) {
       const fallbackFastModel = 'gemini-2.5-flash-lite';
       setPreferredGeminiModel(fallbackFastModel);
@@ -436,7 +436,6 @@ export async function checkDirectGeminiStatusOnDevice(overrideKey?: string): Pro
 
 /**
  * قراءة جدول الجرد مباشرة عبر Gemini REST API من داخل تطبيق الأندرويد (APK) أو باستخدام المفتاح المخصص
- * مع التبديل التلقائي الفوري بين النماذج عند حدوث ضغط (503 High Demand)
  */
 async function callDirectGeminiVisionOnDevice(
   imageBase64: string,
@@ -479,17 +478,27 @@ async function callDirectGeminiVisionOnDevice(
           location_code: {
             type: 'STRING',
             nullable: true,
-            description: 'كود الموقع المخزني',
+            description: 'كود الموقع المخزني (Storage Bin)',
           },
           description: {
             type: 'STRING',
             nullable: true,
             description: 'وصف القطعة بالإنجليزية كما في الجدول',
           },
+          description_ar: {
+            type: 'STRING',
+            nullable: true,
+            description: 'ترجمة عربية هندسية دقيقة للوصف مع المقاسات بالملم',
+          },
           quantity: {
             type: 'INTEGER',
             nullable: true,
             description: 'الكمية المسجلة في الجدول',
+          },
+          remark: {
+            type: 'STRING',
+            nullable: true,
+            description: 'ملاحظة النقص مثل -1 أو -4 أو F إن وجدت',
           },
           mark_symbol: {
             type: 'STRING',
@@ -510,8 +519,8 @@ async function callDirectGeminiVisionOnDevice(
           },
           status: {
             type: 'STRING',
-            enum: ['مدقق', 'غير موجود', 'تم النقل', 'ناقص العدد', 'غير مدقق'],
-            description: 'حالة الصنف النهائية',
+            enum: ['غير موجود', 'ناقص العدد', 'غير مدقق'],
+            description: 'حالة الصنف الأولية (دائماً غير مدقق إلا إذا كانت معلمة بـ X غير موجود)',
           },
         },
         required: [
@@ -625,11 +634,16 @@ async function callPythonVisionServer(
 ): Promise<any[] | null> {
   const customKey = getStoredCustomGeminiApiKey();
 
-  // إذا أدخل المستخدم مفتاحاً مخصصاً أو كان التطبيق يعمل داخل هاتف الأندرويد (APK)، نتصل بـ Gemini مباشرة أولاً
   if (customKey || isRunningInNativeApk()) {
     const directItems = await callDirectGeminiVisionOnDevice(dataUrl, customKey || undefined);
     if (directItems && directItems.length > 0) {
       return directItems;
+    }
+    if (preprocessedBase64) {
+      const directPreItems = await callDirectGeminiVisionOnDevice(preprocessedBase64, customKey || undefined);
+      if (directPreItems && directPreItems.length > 0) {
+        return directPreItems;
+      }
     }
   }
 
@@ -637,7 +651,7 @@ async function callPythonVisionServer(
 
   for (const url of candidateUrls) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 16000);
+    const timeoutId = setTimeout(() => controller.abort(), 18000);
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -670,6 +684,12 @@ async function callPythonVisionServer(
     const directFallback = await callDirectGeminiVisionOnDevice(dataUrl);
     if (directFallback && directFallback.length > 0) {
       return directFallback;
+    }
+    if (preprocessedBase64) {
+      const directPreFallback = await callDirectGeminiVisionOnDevice(preprocessedBase64);
+      if (directPreFallback && directPreFallback.length > 0) {
+        return directPreFallback;
+      }
     }
   }
 
@@ -726,7 +746,6 @@ function normalizeRawVisionItems(rawItems: any[]): {
     const parsedQty = hasExplicitQty ? charToDigitMapper(rawQty, 0) : 0;
     const total = parsedQty >= 0 ? parsedQty : 0;
 
-    // إذا كان الصف فارغاً بالكامل نتجاوزه
     if (!valid10DigitPart && !finalLocation && !cleanDescEn && total === 0) {
       return;
     }
@@ -788,7 +807,7 @@ function normalizeRawVisionItems(rawItems: any[]): {
         ? 'ناقص العدد'
         : null);
 
-    // لا يُسجل الصنف كـ "مدقق" أو "تم النقل" أثناء قراءة الورقة؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم
+    // قاعدة صارمة: لا يُسجل الصنف كـ "مدقق" أو "منقول" أثناء قراءة الورقة؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم
     const finalStatus = isMissing ? 'غير موجودة' : 'غير مدقق';
 
     const { category, descAr: dictDescAr } = cleanDescEn
@@ -797,22 +816,24 @@ function normalizeRawVisionItems(rawItems: any[]): {
     const rawAiAr = item.description_ar ? String(item.description_ar).trim() : '';
     const hasArabicChars = /[\u0600-\u06FF]/.test(rawAiAr);
     const finalDescAr = cleanDescEn ? (hasArabicChars && rawAiAr.length >= 4 ? rawAiAr : dictDescAr) : '';
+    const isConsumable = isConsumableDescription(cleanDescEn, category) ? 1 : 0;
 
     validatedItems.push({
-      part_number: valid10DigitPart, // فارغ "" إذا لم يستطع قراءته
-      location_code: finalLocation, // فارغ "" إذا لم يستطع قراءته
-      description_en: cleanDescEn, // فارغ "" إذا لم يستطع قراءته
-      description_ar: finalDescAr, // فارغ "" إذا لم يستطع قراءته
+      part_number: valid10DigitPart,
+      location_code: finalLocation,
+      description_en: cleanDescEn,
+      description_ar: finalDescAr,
       category,
-      qty_total: total, // 0 إذا لم يستطع قراءته
+      qty_total: total,
       qty_out: out,
       qty_remaining: isMissing ? 0 : Math.max(0, total - out),
       is_missing: isMissing,
+      is_consumable: isConsumable,
       remark,
       mark_symbol: finalMarkSymbol,
       audit_meaning: finalAuditMeaning,
       status: finalStatus,
-      confidence: 'قراءة فعلية من الورقة',
+      confidence: 'قراءة فعلية عالية الدقة (Gemini Vision)',
     });
   });
 
@@ -824,12 +845,33 @@ function normalizeRawVisionItems(rawItems: any[]): {
 }
 
 /**
- * قراءة صارمة ودقيقة (Strict Zero-Hallucination OCR) تمرر الصورة كاملة بدون أي تقسيم
- * عبر مسار الخادم الموحد (/api/gemini/parse-table) أو مباشرة عبر Gemini API في تطبيق الأندرويد.
+ * تحسين وتدقيق السطور المقروءة بمساعدة Gemini (ترجمة هندسية دقيقة وتصنيف الاستهلاكية دون المساس بالأرقام أو الحالة)
  */
-export async function performStrictOCR(imageBase64: string): Promise<any[]> {
+export async function enhanceExtractedRowsWithGemini(
+  rows: ExtractedSparePart[]
+): Promise<ExtractedSparePart[]> {
+  if (!rows || rows.length === 0) return rows;
+
+  const enriched = rows.map((r) => {
+    const descEn = (r.description_en || '').trim();
+    const { category, descAr } = descEn ? categorizeAndTranslate(descEn) : { category: r.category || '', descAr: r.description_ar || '' };
+    const isCons = isConsumableDescription(descEn, category) ? 1 : 0;
+    return {
+      ...r,
+      category: r.category || category,
+      description_ar: r.description_ar && /[\u0600-\u06FF]/.test(r.description_ar) ? r.description_ar : descAr,
+      is_consumable: r.is_consumable ?? isCons,
+      // ضمان عدم كتابة مدقق أو منقول تلقائياً
+      status: (r.is_missing === 1 || r.status === 'غير موجودة' ? 'غير موجودة' : 'غير مدقق') as ExtractedSparePart['status'],
+    };
+  });
+
+  return enriched;
+}
+
+export async function performStrictOCR(imageBase64: string, preprocessedBase64?: string): Promise<any[]> {
   try {
-    const serverItems = await callPythonVisionServer(imageBase64);
+    const serverItems = await callPythonVisionServer(imageBase64, preprocessedBase64);
     if (serverItems && serverItems.length > 0) {
       return serverItems;
     }
@@ -862,8 +904,8 @@ export async function parseTableWithGeminiVision(
             });
 
       cleanImageDataUrl = await prepareImageForAi(rawDataUrl, {
-        maxDimension: 2000,
-        minDimension: 1450,
+        maxDimension: 2400,
+        minDimension: 1550,
         enhanceContrast: true,
         sharpenText: true,
       });
@@ -871,7 +913,7 @@ export async function parseTableWithGeminiVision(
 
     let rawItems: any[] | null = null;
     try {
-      rawItems = await performStrictOCR(cleanImageDataUrl);
+      rawItems = await performStrictOCR(cleanImageDataUrl, preprocessedBase64);
     } catch {
       rawItems = await callPythonVisionServer(cleanImageDataUrl, preprocessedBase64);
     }
@@ -887,14 +929,15 @@ export async function parseTableWithGeminiVision(
     }
 
     const { validatedItems, skippedRows, repairedCount } = normalizeRawVisionItems(rawItems);
+    const enhancedItems = await enhanceExtractedRowsWithGemini(validatedItems);
 
     return {
-      success: validatedItems.length > 0,
-      items: validatedItems,
+      success: enhancedItems.length > 0,
+      items: enhancedItems,
       skippedRows,
       repairedCount,
-      totalDetectedRows: validatedItems.length + skippedRows.length,
-      isSheetComplete: validatedItems.length > 0 && skippedRows.length === 0,
+      totalDetectedRows: enhancedItems.length + skippedRows.length,
+      isSheetComplete: enhancedItems.length > 0 && skippedRows.length === 0,
     };
   } catch {
     return {
