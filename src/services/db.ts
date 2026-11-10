@@ -4,7 +4,6 @@ import type { InventoryItem, LocationSummary } from '../types';
 import { categorizeAndTranslate } from '../utils/translator';
 import {
   sanitizeLocationCode,
-  strict10DigitRegexFilter,
   dynamicLocationNormalizer,
   isValidSpecificLocation,
 } from '../utils/regexSanitizer';
@@ -12,10 +11,16 @@ import {
   isHeavyPart,
   isDLocation,
   isCLocation,
+  isALocation,
+  isFLLocation,
+  isConsumableAOrFLLocation,
   isHeavyDutyDOrCLocation,
+  isConsumablePart,
   resolveTargetDLocation,
+  resolveTargetConsumableLocation,
   estimatePartSizeProfile,
   suggestHeavyItemsToLocationD,
+  suggestConsumableItemsToAOrFL,
   buildHighValueConsolidationPlans,
   MAX_ITEMS_PER_SHELF,
 } from './transferSuggestions';
@@ -40,7 +45,7 @@ export function getLocalDayKey(isoDate?: string): string {
 
 export function formatTransferReportTitle(reportNumber: number, isoDateOrDayKey?: string): string {
   const dayKey = getLocalDayKey(isoDateOrDayKey);
-  return `تقرير ${reportNumber} — نقل يوم ${dayKey}`;
+  return `قائمة نقل يوم ${dayKey} (تقرير #${reportNumber})`;
 }
 
 const AUTO_BACKUP_STORAGE_KEY = 'asmo_auto_emergency_backup_v1';
@@ -51,8 +56,18 @@ class InventoryDatabase {
   private cache: InventoryItem[] = [];
   private transferReportsCache: StockDocument[] = [];
   private locationsSummaryCache: LocationSummary[] | null = null;
+  private categoryGroupsCache: Array<{
+    category: string;
+    count: number;
+    total_qty: number;
+    remaining_qty: number;
+    missing_count: number;
+    locations_count: number;
+    locations: string[];
+  }> | null = null;
   private isCacheDirty = true;
   private isInitialized = false;
+  private backupTimer: ReturnType<typeof setTimeout> | null = null;
 
   public async init(): Promise<void> {
     if (this.isInitialized && this.db) return;
@@ -176,13 +191,18 @@ class InventoryDatabase {
       const updated: InventoryItem = { ...item };
       let changed = false;
 
-      // 1) إلغاء أي حالة "منقول / تم النقل" لم تنتج عن عملية نقل فعلية من قِبل المستخدم
-      const isTrulyMovedByUser = userTransferredParts.has(updated.part_number);
+      // 1) لا تُسجل أي قطعة كـ "منقول / تم النقل" إلا إذا نقلها المستخدم فعلياً (عبر أمر نقل معتمد أو نقل صريح)
+      const isTrulyMovedByUser =
+        userTransferredParts.has(updated.part_number) ||
+        updated.user_moved === 1 ||
+        Boolean(updated.is_moved === 1 && updated.old_location);
+
       if (
         (updated.is_moved === 1 || updated.status === 'تم النقل' || updated.status === 'منقول') &&
         !isTrulyMovedByUser
       ) {
         updated.is_moved = 0;
+        updated.user_moved = 0;
         updated.old_location = undefined;
         updated.moved_at = undefined;
         updated.status =
@@ -194,7 +214,7 @@ class InventoryDatabase {
         changed = true;
       }
 
-      // 2) عدم تسجيل أي مادة "مدقق" إلا إذا وضع المستخدم شخصياً العلامة (user_verified === 1)
+      // 2) لا تُسجل أي مادة "مدقق" إلا إذا دققها المستخدم بنفسه (user_verified === 1)
       if (updated.is_missing === 1 || updated.status === 'غير موجودة' || updated.status === 'مفقود') {
         if (updated.status !== 'غير موجودة' || updated.is_missing !== 1) {
           updated.is_missing = 1;
@@ -202,8 +222,8 @@ class InventoryDatabase {
           changed = true;
         }
       } else if (isTrulyMovedByUser && updated.is_moved === 1) {
-        if (updated.status !== 'تم النقل') {
-          updated.status = 'تم النقل';
+        if (updated.status !== 'تم النقل' && updated.status !== 'منقول') {
+          updated.status = 'منقول';
           changed = true;
         }
       } else if (updated.user_verified === 1) {
@@ -227,9 +247,11 @@ class InventoryDatabase {
           const suggestion = categorizeAndTranslate(updated.description_en);
           if (needsDescEnrich && suggestion.descAr && suggestion.descAr !== updated.description_en) {
             updated.description_ar = suggestion.descAr;
+            changed = true;
           }
-          if (needsCatEnrich && suggestion.category) {
+          if (needsCatEnrich && suggestion.category && updated.category !== suggestion.category) {
             updated.category = suggestion.category;
+            changed = true;
           }
         }
       }
@@ -255,7 +277,7 @@ class InventoryDatabase {
 
     this.itemMap = new Map(enrichedItems.map((item) => [item.part_number, item]));
 
-    // 3) تجميع عمليات النقل حسب تاريخ كل يوم على حدة (تقرير 1 — نقل يوم YYYY/MM/DD، تقرير 2 — نقل يوم YYYY/MM/DD...)
+    // 3) تجميع عمليات النقل حسب تاريخ كل يوم على حدة في قائمة نقل يومية محفوظة
     const dayGroups = new Map<string, StockDocument[]>();
     for (const doc of approvedTransferDocs) {
       const dateIso = doc.executedAt || doc.createdAt || new Date().toISOString();
@@ -294,10 +316,18 @@ class InventoryDatabase {
           const p = String(line.part_number || '').trim();
           if (!p) continue;
           const existingLine = lineByPart.get(p);
+          const currentItem = this.itemMap.get(p);
+          const isCons =
+            line.is_consumable !== undefined
+              ? line.is_consumable
+              : currentItem && isConsumablePart(currentItem)
+              ? 1
+              : 0;
           lineByPart.set(p, {
             ...line,
             old_location: existingLine?.old_location || line.old_location,
             location: line.location || existingLine?.location || '',
+            is_consumable: isCons,
           });
         }
 
@@ -306,9 +336,25 @@ class InventoryDatabase {
             ? d.transferredItemsSnapshot
             : (d.lines || []).map((line) => {
                 const currentItem = this.itemMap.get(String(line.part_number || '').trim());
+                const locCode = line.location || currentItem?.location_code || '';
+                const isCons =
+                  line.is_consumable !== undefined
+                    ? line.is_consumable
+                    : currentItem && isConsumablePart(currentItem)
+                    ? 1
+                    : 0;
+                const shelfType = isFLLocation(locCode)
+                  ? 'FL'
+                  : isALocation(locCode)
+                  ? 'A'
+                  : isDLocation(locCode)
+                  ? 'D'
+                  : isCLocation(locCode)
+                  ? 'C'
+                  : 'B';
                 return {
                   part_number: line.part_number,
-                  location_code: line.location || currentItem?.location_code || '',
+                  location_code: locCode,
                   old_location: line.old_location || currentItem?.old_location || '',
                   description_en: line.description_en || currentItem?.description_en || '',
                   description_ar: line.description_ar || currentItem?.description_ar || '',
@@ -317,8 +363,11 @@ class InventoryDatabase {
                   qty_out: currentItem?.qty_out ?? 0,
                   qty_remaining: currentItem?.qty_remaining ?? line.quantity ?? 0,
                   is_moved: 1,
+                  user_moved: 1,
                   is_missing: 0,
-                  status: 'تم النقل',
+                  is_consumable: isCons,
+                  target_shelf_type: shelfType,
+                  status: 'منقول',
                   moved_at: dDateIso,
                   remark: line.remark || d.reason || '',
                 };
@@ -328,10 +377,29 @@ class InventoryDatabase {
           const p = String(snap.part_number || '').trim();
           if (!p) continue;
           const prevSnap = snapByPart.get(p);
+          const currentItem = this.itemMap.get(p);
+          const locCode = snap.location_code || prevSnap?.location_code || '';
+          const isCons =
+            snap.is_consumable !== undefined
+              ? snap.is_consumable
+              : currentItem && isConsumablePart(currentItem)
+              ? 1
+              : 0;
+          const shelfType = isFLLocation(locCode)
+            ? 'FL'
+            : isALocation(locCode)
+            ? 'A'
+            : isDLocation(locCode)
+            ? 'D'
+            : isCLocation(locCode)
+            ? 'C'
+            : 'B';
           snapByPart.set(p, {
             ...snap,
             old_location: prevSnap?.old_location || snap.old_location,
-            location_code: snap.location_code || prevSnap?.location_code || '',
+            location_code: locCode,
+            is_consumable: isCons,
+            target_shelf_type: shelfType,
             moved_at: snap.moved_at || dDateIso,
           });
         }
@@ -339,9 +407,10 @@ class InventoryDatabase {
 
       const mergedLines = Array.from(lineByPart.values());
       const mergedSnapshot = Array.from(snapByPart.values());
+      const consumableMovedCount = mergedSnapshot.filter((s) => s.is_consumable === 1).length;
       const mergedReason =
         Array.from(reasonsSet).slice(0, 3).join(' | ') ||
-        `تجميع عمليات نقل يوم ${dayKey} (${mergedSnapshot.length} قطعة)`;
+        `قائمة نقل يوم ${dayKey} (${mergedSnapshot.length} قطعة — منها ${consumableMovedCount} قطعة استهلاكية إلى A / FL)`;
 
       const consolidatedDoc: StockDocument = {
         ...primaryDoc,
@@ -391,17 +460,33 @@ class InventoryDatabase {
     }
 
     this.rebuildCacheArray();
-    this.saveAutoMirrorBackup();
+    this.scheduleAutoMirrorBackup();
   }
 
-  private saveAutoMirrorBackup(): void {
+  /**
+   * جدولة الحفظ الاحتياطي التلقائي بشكل غير متزامن لمنع تجميد أو تعليق واجهة المستخدم أثناء العمليات السريعة
+   */
+  private scheduleAutoMirrorBackup(): void {
+    if (this.backupTimer) {
+      clearTimeout(this.backupTimer);
+    }
+    this.backupTimer = setTimeout(() => {
+      this.backupTimer = null;
+      this.saveAutoMirrorBackupNow();
+    }, 900);
+  }
+
+  private saveAutoMirrorBackupNow(): void {
     try {
-      if (this.cache.length === 0 && this.transferReportsCache.length === 0) return;
+      const items = this.ensureInternalCache();
+      if (items.length === 0 && this.transferReportsCache.length === 0) return;
+      // حماية المتصفح من تجاوز سعة localStorage (5MB) عند وجود 100 ألف قطعة
+      if (items.length > 12000) return;
       const payload = JSON.stringify({
         format: 'asmo-backup-v1',
-        version: '2.9.0',
+        version: '3.0.0',
         createdAt: new Date().toISOString(),
-        items: this.cache,
+        items,
         documents: this.transferReportsCache.map(({ original: _orig, ...rest }) => rest),
       });
       localStorage.setItem(AUTO_BACKUP_STORAGE_KEY, payload);
@@ -440,6 +525,7 @@ class InventoryDatabase {
   private rebuildCacheArray(): void {
     this.cache = Array.from(this.itemMap.values());
     this.locationsSummaryCache = null;
+    this.categoryGroupsCache = null;
     this.isCacheDirty = false;
   }
 
@@ -484,6 +570,7 @@ class InventoryDatabase {
           added_count: 0,
           moved_count: 0,
           missing_count: 0,
+          consumable_count: 0,
         };
         summaryMap.set(loc, entry);
       }
@@ -495,13 +582,16 @@ class InventoryDatabase {
 
       if (item.is_missing === 1 || item.status === 'غير موجودة') {
         entry.missing_count += 1;
-      } else if (item.status === 'مدقق') {
+      } else if (item.user_verified === 1 && item.status === 'مدقق') {
         entry.added_count += 1;
       } else {
         entry.unverified_count += 1;
       }
-      if (item.status === 'منقول' || item.status === 'تم النقل' || item.is_moved === 1) {
+      if (item.is_moved === 1 && (item.status === 'منقول' || item.status === 'تم النقل')) {
         entry.moved_count += 1;
+      }
+      if (isConsumablePart(item)) {
+        entry.consumable_count = (entry.consumable_count || 0) + 1;
       }
     }
 
@@ -554,6 +644,10 @@ class InventoryDatabase {
     locations_count: number;
     locations: string[];
   }> {
+    if (!this.isCacheDirty && this.categoryGroupsCache) {
+      return this.categoryGroupsCache.map((g) => ({ ...g, locations: [...g.locations] }));
+    }
+
     const map = new Map<
       string,
       {
@@ -591,7 +685,7 @@ class InventoryDatabase {
       }
     }
 
-    return Array.from(map.entries())
+    const built = Array.from(map.entries())
       .map(([cat, data]) => ({
         category: cat,
         count: data.count,
@@ -602,6 +696,9 @@ class InventoryDatabase {
         locations: Array.from(data.locations),
       }))
       .sort((a, b) => b.count - a.count);
+
+    this.categoryGroupsCache = built;
+    return built.map((g) => ({ ...g, locations: [...g.locations] }));
   }
 
   public searchItems(
@@ -647,12 +744,16 @@ class InventoryDatabase {
         } else if (statusFilter === 'مضاف' || statusFilter === 'موجود') {
           if (item.status === 'غير موجودة' || item.status === 'مفقود' || item.is_missing === 1)
             continue;
-        } else if (statusFilter === 'تم النقل') {
-          if (item.status !== 'تم النقل' && item.status !== 'منقول' && item.is_moved !== 1)
+        } else if (statusFilter === 'تم النقل' || statusFilter === 'منقول') {
+          if (item.is_moved !== 1 || (item.status !== 'تم النقل' && item.status !== 'منقول'))
             continue;
         } else if (statusFilter === 'لم تنتقل') {
-          if (item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول')
+          if (item.is_moved === 1 && (item.status === 'تم النقل' || item.status === 'منقول'))
             continue;
+        } else if (statusFilter === 'مدقق') {
+          if (item.user_verified !== 1 || item.status !== 'مدقق') continue;
+        } else if (statusFilter === 'استهلاكية') {
+          if (!isConsumablePart(item)) continue;
         } else if (item.status !== statusFilter) {
           continue;
         }
@@ -702,17 +803,23 @@ class InventoryDatabase {
     isMissingFlag?: number,
     remark?: string,
     ginCode?: string,
-    unitPrice?: number
+    unitPrice?: number,
+    isConsumableFlag?: number
   ): Promise<InventoryItem> {
     const cleanPart = partNum.trim();
     if (!/^\d{10}$/.test(cleanPart)) throw new Error('رقم القطعة يجب أن يكون عشرة أرقام');
-    const safeQty = Number.isFinite(qty) && qty >= 0 ? Math.round(qty) : 0;
-    const safeOut = Number.isFinite(qtyOut) && qtyOut >= 0 ? Math.min(safeQty, Math.round(qtyOut)) : 0;
+    if (!Number.isFinite(qty) || qty < 0) throw new Error('الكمية الإجمالية غير صالحة');
+    if (!Number.isFinite(qtyOut) || qtyOut < 0 || qtyOut > qty) {
+      throw new Error('الكمية المصروفة لا يمكن أن تتجاوز الكمية الإجمالية');
+    }
+    const safeQty = Math.round(qty);
+    const safeOut = Math.round(qtyOut);
     const cleanLocation = sanitizeLocationCode(locCode) || locCode.trim().toUpperCase();
 
     const existing = this.itemMap.get(cleanPart);
     // لا تُسجل القطعة كـ "منقول" إلا إذا تم نقلها فعلياً عبر أمر نقل من المستخدم
     const isMoved = existing?.is_moved === 1 ? 1 : 0;
+    const userMoved = existing?.user_moved === 1 ? 1 : isMoved;
     const isMissing =
       isMissingFlag !== undefined ? isMissingFlag : forcedStatus === 'غير موجودة' ? 1 : 0;
     const remaining = isMissing ? 0 : Math.max(0, safeQty - safeOut);
@@ -734,8 +841,10 @@ class InventoryDatabase {
     let status: InventoryItem['status'] = 'غير مدقق';
     if (isMissing) {
       status = 'غير موجودة';
+    } else if (userVerified === 1 && forcedStatus === 'مدقق') {
+      status = 'مدقق';
     } else if (isMoved) {
-      status = 'تم النقل';
+      status = 'منقول';
     } else if (userVerified === 1) {
       status = 'مدقق';
     } else {
@@ -748,6 +857,8 @@ class InventoryDatabase {
       unitPrice !== undefined && Number.isFinite(unitPrice) && unitPrice > 0
         ? unitPrice
         : existing?.unit_price;
+    const finalConsumable =
+      isConsumableFlag !== undefined ? isConsumableFlag : existing?.is_consumable;
 
     const item: InventoryItem = {
       part_number: cleanPart,
@@ -761,7 +872,9 @@ class InventoryDatabase {
       qty_out: safeOut,
       qty_remaining: remaining,
       is_moved: isMoved,
+      user_moved: userMoved,
       is_missing: isMissing,
+      is_consumable: finalConsumable,
       remark: remark ?? existing?.remark,
       gin_code: finalGinCode,
       unit_price: finalUnitPrice,
@@ -783,6 +896,12 @@ class InventoryDatabase {
       .map(cloneItem);
   }
 
+  public getConsumableItems(): InventoryItem[] {
+    return this.ensureInternalCache()
+      .filter((item) => isConsumablePart(item))
+      .map(cloneItem);
+  }
+
   public async setItemGinCode(
     partNumber: string,
     ginCode: string | null
@@ -795,9 +914,22 @@ class InventoryDatabase {
       gin_code: cleanGin,
       updated_at: new Date().toISOString(),
     };
-    await this.putInStore(updated);
-    this.itemMap.set(updated.part_number, updated);
-    this.isCacheDirty = true;
+    await this.putSingleItemFast(updated);
+    return cloneItem(updated);
+  }
+
+  public async setItemConsumableFlag(
+    partNumber: string,
+    isConsumable: boolean | null
+  ): Promise<InventoryItem | null> {
+    const item = this.itemMap.get(partNumber.trim());
+    if (!item) return null;
+    const updated: InventoryItem = {
+      ...item,
+      is_consumable: isConsumable === null ? undefined : isConsumable ? 1 : 0,
+      updated_at: new Date().toISOString(),
+    };
+    await this.putSingleItemFast(updated);
     return cloneItem(updated);
   }
 
@@ -823,12 +955,17 @@ class InventoryDatabase {
       if (!raw) continue;
       const cleanPart = String(raw.part_number || '').trim();
       if (!/^\d{10}$/.test(cleanPart)) continue;
+      const rawLocStr = String(raw.location_code ?? raw.location ?? '').trim();
+      const rawDescStr = String(raw.description_en ?? raw.description ?? '').trim();
+      if (!rawLocStr && !rawDescStr && raw.qty_total === undefined) {
+        throw new Error('بيانات السطر غير مكتملة ولا يمكن تغيير المخزون بتخمين غير مؤكد');
+      }
       const cleanLoc =
-        sanitizeLocationCode(String(raw.location_code || raw.location || '')) ||
-        String(raw.location_code || raw.location || '').trim().toUpperCase();
+        sanitizeLocationCode(rawLocStr) || rawLocStr.toUpperCase();
       const existing = this.itemMap.get(cleanPart);
       // قراءة أوراق الجرد أو الاستيراد لا تسجل القطع كمنقولة أو مدققة تلقائياً
       const isMoved = existing?.is_moved === 1 ? 1 : 0;
+      const userMoved = existing?.user_moved === 1 ? 1 : isMoved;
       const userVerified = existing?.user_verified === 1 ? 1 : 0;
       const isMissing = raw.is_missing === 1 || raw.status === 'غير موجودة' ? 1 : 0;
       const total = Number.isFinite(raw.qty_total) && raw.qty_total >= 0 ? Math.round(raw.qty_total) : 0;
@@ -851,7 +988,7 @@ class InventoryDatabase {
       const safeStatus: InventoryItem['status'] = isMissing
         ? 'غير موجودة'
         : isMoved
-        ? 'تم النقل'
+        ? 'منقول'
         : userVerified === 1
         ? 'مدقق'
         : 'غير مدقق';
@@ -878,7 +1015,9 @@ class InventoryDatabase {
           qty_out: out,
           qty_remaining: remaining,
           is_moved: isMoved,
+          user_moved: userMoved,
           is_missing: isMissing,
+          is_consumable: raw.is_consumable ?? existing?.is_consumable,
           remark: raw.remark ?? existing?.remark,
           gin_code: raw.gin_code ?? existing?.gin_code,
           unit_price: raw.unit_price ?? existing?.unit_price,
@@ -935,6 +1074,7 @@ class InventoryDatabase {
         location: newCode,
         description_en: item.description_en,
         description_ar: item.description_ar,
+        is_consumable: isConsumablePart(item) ? 1 : 0,
         check: '',
         remark: '',
         reviewed: true,
@@ -950,17 +1090,21 @@ class InventoryDatabase {
     if (!item) return null;
     const cleanNewLoc = sanitizeLocationCode(newLocation) || newLocation.trim().toUpperCase();
     if (!isValidSpecificLocation(cleanNewLoc)) {
-      throw new Error('يرجى إدخال اسم موقع جديد صالح ومحدد');
+      throw new Error('يرجى إدخال اسم موقع جديد صالح ومحدد (مثل A1 أو FL1 أو N11A1 أو N11FL1)');
     }
     if (cleanNewLoc === item.location_code) {
       return item;
     }
+    const isCons = isConsumablePart(item);
+    const isTargetAFL = isConsumableAOrFLLocation(cleanNewLoc);
     const id = 'MOVE-' + crypto.randomUUID();
     await this.submitDocument({
       id,
       kind: 'transfer',
       requester: 'المستخدم المحلي',
-      reason: `نقل القطعة (${partNumber}) من ${item.location_code || 'السابق'} إلى ${cleanNewLoc}`,
+      reason: isCons
+        ? `🔄 نقل قطعة استهلاكية (${partNumber}) من ${item.location_code || 'السابق'} إلى ${cleanNewLoc}${isTargetAFL ? ` (حرف ${isFLLocation(cleanNewLoc) ? 'FL' : 'A'})` : ''}`
+        : `نقل القطعة (${partNumber}) من ${item.location_code || 'السابق'} إلى ${cleanNewLoc}`,
       lines: [
         {
           old_location: item.location_code,
@@ -969,8 +1113,11 @@ class InventoryDatabase {
           location: cleanNewLoc,
           description_en: item.description_en,
           description_ar: item.description_ar,
+          is_consumable: isCons ? 1 : 0,
           check: '',
-          remark: `نقل من ${item.location_code || 'السابق'} إلى ${cleanNewLoc}`,
+          remark: isCons
+            ? `🔄 قطعة استهلاكية — نقل من ${item.location_code || 'السابق'} إلى ${cleanNewLoc}`
+            : `نقل من ${item.location_code || 'السابق'} إلى ${cleanNewLoc}`,
           reviewed: true,
         },
       ],
@@ -979,6 +1126,78 @@ class InventoryDatabase {
     });
     await this.approveDocument(id);
     return this.getItemByPartNumber(partNumber) || null;
+  }
+
+  /**
+   * نقل وتجميع كافة القطع الاستهلاكية إلى حرف (A) أو (FL) مع حفظ العملية في قائمة النقل اليومية
+   */
+  public async relocateAllConsumableItemsToAOrFL(
+    preferredTarget: 'AUTO' | 'A' | 'FL' = 'AUTO',
+    customBinOverride?: string
+  ): Promise<InventoryItem[]> {
+    const allItems = this.ensureInternalCache();
+    const suggestions = suggestConsumableItemsToAOrFL(allItems, new Set(), preferredTarget);
+    const sugMap = new Map<string, string>();
+    for (const sug of suggestions) {
+      sugMap.set(sug.partNumber, sug.to);
+    }
+
+    const cleanOverride =
+      customBinOverride && isValidSpecificLocation(customBinOverride)
+        ? sanitizeLocationCode(customBinOverride) || customBinOverride.trim().toUpperCase()
+        : '';
+
+    const consumablesToMove = allItems.filter((item) => {
+      if (item.qty_remaining <= 0 || item.is_missing === 1) return false;
+      if (!isConsumablePart(item)) return false;
+      const loc = (item.location_code || '').trim().toUpperCase();
+      if (cleanOverride) return loc !== cleanOverride;
+      if (preferredTarget === 'A') return !isALocation(loc);
+      if (preferredTarget === 'FL') return !isFLLocation(loc);
+      return !isConsumableAOrFLLocation(loc);
+    });
+
+    if (consumablesToMove.length === 0) {
+      return [];
+    }
+
+    const docId = `CONSUMABLE-AFL-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+    const lines = consumablesToMove.map((item) => {
+      const destBin =
+        cleanOverride ||
+        sugMap.get(item.part_number) ||
+        resolveTargetConsumableLocation(item.location_code, [], undefined, preferredTarget);
+      const sizeProf = estimatePartSizeProfile(item);
+      const labelAFL = isFLLocation(destBin) ? 'حرف FL' : 'حرف A';
+      return {
+        old_location: item.location_code,
+        part_number: item.part_number,
+        quantity: item.qty_remaining,
+        location: destBin,
+        description_en: item.description_en,
+        description_ar: item.description_ar,
+        is_consumable: 1,
+        check: '',
+        remark: `🔄 نقل قطعة استهلاكية (${sizeProf.dimensionsLabel}) إلى ${labelAFL} في (${destBin})`,
+        reviewed: true,
+      };
+    });
+
+    await this.submitDocument({
+      id: docId,
+      kind: 'transfer',
+      requester: 'نظام توجيه القطع الاستهلاكية إلى حرف (A) و (FL)',
+      reason: `🔄 نقل القطع الاستهلاكية (${consumablesToMove.length} قطعة) إلى مواقع الحرف (${preferredTarget === 'AUTO' ? 'A و FL' : preferredTarget}) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف`,
+      lines,
+      status: 'pending',
+      createdAt: '',
+    });
+
+    await this.approveDocument(docId);
+
+    return consumablesToMove
+      .map((item) => this.getItemByPartNumber(item.part_number))
+      .filter((i): i is InventoryItem => Boolean(i));
   }
 
   public async relocateAllHeavyItemsToLocationD(targetDBinOverride?: string): Promise<InventoryItem[]> {
@@ -1016,6 +1235,7 @@ class InventoryDatabase {
         location: destBin,
         description_en: item.description_en,
         description_ar: item.description_ar,
+        is_consumable: 0,
         check: '',
         remark: `نقل قطعة ثقيلة جداً (${sizeProf.dimensionsLabel}) إلى ${labelDC} (بحد ${MAX_ITEMS_PER_SHELF} صنف للرف)`,
         reviewed: true,
@@ -1060,6 +1280,7 @@ class InventoryDatabase {
           location: ev.evictToBin,
           description_en: ev.descriptionEn,
           description_ar: ev.descriptionAr,
+          is_consumable: ev.sizeProfile.isConsumable ? 1 : 0,
           check: '',
           remark: ev.reason,
           reviewed: true,
@@ -1074,6 +1295,7 @@ class InventoryDatabase {
           location: targetBin,
           description_en: entry.item.description_en,
           description_ar: entry.item.description_ar,
+          is_consumable: entry.sizeProfile.isConsumable ? 1 : 0,
           check: '',
           remark: `تجميع القطع الأغلى سعراً (${entry.sizeProfile.priceLabelAr}) في الرف (${targetBin}) — بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف فقط`,
           reviewed: true,
@@ -1108,7 +1330,7 @@ class InventoryDatabase {
 
   public getMovedItems(): InventoryItem[] {
     return this.ensureInternalCache()
-      .filter((i) => i.is_moved === 1 || i.status === 'تم النقل' || i.status === 'منقول')
+      .filter((i) => i.is_moved === 1 && (i.status === 'تم النقل' || i.status === 'منقول'))
       .map(cloneItem);
   }
 
@@ -1124,6 +1346,7 @@ class InventoryDatabase {
     const willBeMissing = newStatus === 'غير موجودة';
     const isMissing = willBeMissing ? 1 : 0;
     const isMoved = item.is_moved === 1 && !willBeMissing ? 1 : 0;
+    // لا تُسجل القطعة "مدقق" إلا إذا ضغط المستخدم صراحةً على زر التدقيق ('مدقق')
     const userVerified =
       newStatus === 'مدقق'
         ? 1
@@ -1134,10 +1357,10 @@ class InventoryDatabase {
         : 0;
     const finalStatus: InventoryItem['status'] = willBeMissing
       ? 'غير موجودة'
-      : newStatus === 'مدقق'
+      : userVerified === 1
       ? 'مدقق'
       : isMoved
-      ? 'تم النقل'
+      ? 'منقول'
       : 'غير مدقق';
 
     const updated: InventoryItem = {
@@ -1145,13 +1368,40 @@ class InventoryDatabase {
       status: finalStatus,
       user_verified: userVerified,
       is_moved: isMoved,
+      user_moved: isMoved ? 1 : 0,
       is_missing: isMissing,
       qty_remaining: isMissing ? 0 : Math.max(0, item.qty_total - item.qty_out),
       updated_at: new Date().toISOString(),
     };
-    await this.putInStore(updated);
-    this.itemMap.set(partNumber, updated);
+    await this.putSingleItemFast(updated);
+  }
+
+  /**
+   * حفظ سريع لقطعة واحدة في IndexedDB والذاكرة دون إعادة قراءة كافة السجلات لمنع أي تعليق
+   */
+  private async putSingleItemFast(updated: InventoryItem): Promise<void> {
+    if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
+    const before = this.itemMap.get(updated.part_number);
+    const at = new Date().toISOString();
+    await new Promise<void>((resolve, reject) => {
+      const tx = this.db!.transaction([STORE_NAME, 'audit'], 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const audit = tx.objectStore('audit');
+      store.put(updated);
+      audit.add({
+        at,
+        actor: 'local-supervisor',
+        action: 'save',
+        before,
+        after: updated,
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('أُلغيت المعاملة'));
+    });
+    this.itemMap.set(updated.part_number, updated);
     this.isCacheDirty = true;
+    this.scheduleAutoMirrorBackup();
   }
 
   public async batchImport(items: InventoryItem[]): Promise<number> {
@@ -1244,13 +1494,36 @@ class InventoryDatabase {
   public async submitDocuments(input: StockDocument[]): Promise<void> {
     if (!input.length) throw new Error('لا توجد أوراق للحفظ');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
-    const ids = new Set<string>();
-    const documents = input.map((doc, docIdx) => {
-      let baseId = canonicalDocumentId(doc.id || `SHEET-${Date.now()}-${docIdx + 1}`);
-      if (ids.has(baseId)) {
-        baseId = `${baseId}-${docIdx + 1}`;
+    const existingDocs = await this.getDocuments();
+    const existingIds = new Set(existingDocs.map((d) => canonicalDocumentId(d.id)));
+    const batchIds = new Set<string>();
+
+    const documents = input.map((doc) => {
+      const rawId = (doc.id || '').trim();
+      if (!rawId) throw new Error('رقم المستند إلزامي');
+      const baseId = canonicalDocumentId(rawId);
+      if (existingIds.has(baseId) || batchIds.has(baseId)) {
+        throw new Error('هذه الورقة تم حفظها مسبقًا؛ لا يمكن تكرار رقم المستند');
       }
-      ids.add(baseId);
+      batchIds.add(baseId);
+
+      // التحقق من عدم وجود تكرار للقطعة في نفس المستند إلا إذا تم تفعيل جمع المكرر وبنفس الموقع
+      const seenParts = new Map<string, string>();
+      for (const line of doc.lines) {
+        const p = String(line.part_number || '').trim();
+        const loc = sanitizeLocationCode(line.location) || String(line.location || '').trim().toUpperCase();
+        if (!p) continue;
+        if (seenParts.has(p)) {
+          if (doc.duplicateResolution !== 'sum') {
+            throw new Error(`رقم القطعة (${p}) مكرر في نفس المستند؛ فعّل خيار جمع السطور المكررة`);
+          }
+          if (seenParts.get(p) !== loc) {
+            throw new Error(`لا يمكن جمع السطور المكررة للقطعة (${p}) لاختلاف المواقع في الورقة`);
+          }
+        }
+        seenParts.set(p, loc);
+      }
+
       const normalized: StockDocument = {
         ...doc,
         id: baseId,
@@ -1264,6 +1537,7 @@ class InventoryDatabase {
             Number.isFinite(line.quantity) && line.quantity >= 0
               ? Math.round(line.quantity)
               : 0;
+          const existingItem = cleanPart ? this.itemMap.get(cleanPart) : undefined;
           return {
             ...line,
             part_number: cleanPart,
@@ -1271,7 +1545,13 @@ class InventoryDatabase {
             quantity: safeQty,
             description_en: (line.description_en || '').trim(),
             reviewed: true,
-            old_location: cleanPart ? this.itemMap.get(cleanPart)?.location_code : undefined,
+            old_location: line.old_location || existingItem?.location_code,
+            is_consumable:
+              line.is_consumable !== undefined
+                ? line.is_consumable
+                : existingItem && isConsumablePart(existingItem)
+                ? 1
+                : 0,
           };
         }),
       };
@@ -1302,12 +1582,21 @@ class InventoryDatabase {
     if (!cleanIds.length) throw new Error('قائمة المستندات فارغة');
     if (!this.db) throw new Error('قاعدة البيانات غير جاهزة');
 
-    // البحث عن تقرير النقل المعتمد لليوم الحالي إن وجد لدمج عمليات نقل نفس اليوم في تقرير واحد
+    // перевірка اذا كان هناك مستند يتطلب اعتماد المشرف لجمع المكررات
+    const currentDocs = await this.getDocuments();
+    const targetDocs = cleanIds
+      .map((cid) => currentDocs.find((d) => canonicalDocumentId(d.id) === cid))
+      .filter((d): d is StockDocument => Boolean(d));
+    if (targetDocs.some((d) => d.duplicateResolution === 'sum')) {
+      await authorizeMutation('اعتماد جمع السطور المكررة للقطعة');
+    }
+
+    // البحث عن قائمة النقل المعتمدة لليوم الحالي إن وجدت لدمج عمليات نقل نفس اليوم في قائمة يومية واحدة
     const todayKey = getLocalDayKey();
     const existingTodayTransferReport = this.transferReportsCache.find(
       (r) => getLocalDayKey(r.executedAt || r.createdAt) === todayKey
     );
-    let nextTransferReportNumber = existingTodayTransferReport
+    const nextTransferReportNumber = existingTodayTransferReport
       ? existingTodayTransferReport.reportNumber || this.transferReportsCache.length
       : this.transferReportsCache.length + 1;
 
@@ -1329,11 +1618,11 @@ class InventoryDatabase {
           try {
             const doc: StockDocument | undefined = req.result;
             if (!doc) {
-              processDocument(documentIndex + 1);
+              fail(new Error('المستند غير موجود'));
               return;
             }
             if (doc.status === 'approved') {
-              processDocument(documentIndex + 1);
+              fail(new Error('تم اعتماد هذا المستند مسبقًا ولا يمكن تطبيقه مرتين'));
               return;
             }
             validateDocument(doc);
@@ -1381,6 +1670,16 @@ class InventoryDatabase {
                   if (after) {
                     store.put(after);
                     if (doc.kind === 'transfer') {
+                      const isCons = isConsumablePart(after) ? 1 : 0;
+                      const shelfType = isFLLocation(after.location_code)
+                        ? 'FL'
+                        : isALocation(after.location_code)
+                        ? 'A'
+                        : isDLocation(after.location_code)
+                        ? 'D'
+                        : isCLocation(after.location_code)
+                        ? 'C'
+                        : 'B';
                       movedSnapshotsForReport.push({
                         part_number: after.part_number,
                         location_code: after.location_code,
@@ -1392,8 +1691,11 @@ class InventoryDatabase {
                         qty_out: after.qty_out,
                         qty_remaining: after.qty_remaining,
                         is_moved: 1,
+                        user_moved: 1,
                         is_missing: after.is_missing || 0,
-                        status: 'تم النقل',
+                        is_consumable: isCons,
+                        target_shelf_type: shelfType,
+                        status: 'منقول',
                         moved_at: after.moved_at || executedTimeFallback(),
                         remark: line.remark || doc.reason || '',
                       });
@@ -1458,6 +1760,7 @@ class InventoryDatabase {
       qty_out: 0,
       qty_remaining: safeLineQty,
       is_moved: 0,
+      user_moved: 0,
       is_missing: 0,
       user_verified: 0,
       status: 'غير مدقق',
@@ -1476,22 +1779,28 @@ class InventoryDatabase {
           }
         : fresh();
     } else if (doc.kind === 'issue') {
-      if (!before) return undefined;
-      const issueQty = Math.min(before.qty_remaining, safeLineQty);
+      if (!before) throw new Error(`القطعة (${line.part_number}) غير موجودة للصرف`);
+      if (safeLineQty > before.qty_remaining) {
+        throw new Error(`الكمية المطلوبة للصرف (${safeLineQty}) أكبر من المتاح (${before.qty_remaining})`);
+      }
       after = {
         ...before,
-        qty_out: before.qty_out + issueQty,
-        qty_remaining: Math.max(0, before.qty_remaining - issueQty),
+        qty_out: before.qty_out + safeLineQty,
+        qty_remaining: Math.max(0, before.qty_remaining - safeLineQty),
       };
     } else if (doc.kind === 'transfer') {
-      // حصراً عند تنفيذ عملية نقل من قِبل المستخدم تُسجل القطعة كمنقولة
-      if (!before) return undefined;
+      // حصراً عند تنفيذ عملية نقل من قِبل المستخدم تُسجل القطعة كـ "منقول"
+      if (!before) throw new Error(`القطعة (${line.part_number}) غير موجودة للنقل`);
+      if (line.old_location && before.location_code !== line.old_location) {
+        throw new Error(`تغير موقع القطعة (${line.part_number}) مسبقاً من ${line.old_location} إلى ${before.location_code}`);
+      }
       after = {
         ...before,
         old_location: before.location_code,
         location_code: safeLoc,
         is_moved: 1,
-        status: 'تم النقل',
+        user_moved: 1,
+        status: 'منقول',
         moved_at: now,
       };
     } else {
@@ -1507,14 +1816,13 @@ class InventoryDatabase {
       ) {
         base = {
           ...before,
-          qty_total: Math.max(before.qty_total, safeLineQty),
-          qty_remaining: Math.max(before.qty_remaining, safeLineQty),
+          qty_total: before.qty_total + safeLineQty,
+          qty_remaining: before.qty_remaining + safeLineQty,
         };
-      } else if (before && safeLineQty > 0) {
-        base = {
-          ...before,
-          qty_total: safeLineQty,
-        };
+      }
+
+      if (marks.shortage > base.qty_remaining) {
+        throw new Error(`النقص المسجل (${marks.shortage}) أكبر من الرصيد المتاح (${base.qty_remaining})`);
       }
 
       const isMissing = marks.status === 'غير موجودة' ? 1 : 0;
@@ -1522,7 +1830,7 @@ class InventoryDatabase {
       const nextOut = isMissing
         ? 0
         : marks.shortage > 0
-        ? Math.min(safeTotal, marks.shortage)
+        ? Math.min(safeTotal, base.qty_out + marks.shortage)
         : Math.min(safeTotal, base.qty_out);
       const nextRemaining = isMissing ? 0 : Math.max(0, safeTotal - nextOut);
       const cleanRemark =
@@ -1537,11 +1845,12 @@ class InventoryDatabase {
         old_location: previouslyMovedByUser ? base.old_location : undefined,
         location_code: safeLoc,
         is_moved: previouslyMovedByUser,
+        user_moved: previouslyMovedByUser,
         user_verified: isMissing ? 0 : previouslyVerifiedByUser,
         status: isMissing
           ? 'غير موجودة'
           : previouslyMovedByUser
-          ? 'تم النقل'
+          ? 'منقول'
           : previouslyVerifiedByUser
           ? 'مدقق'
           : 'غير مدقق',
@@ -1587,14 +1896,22 @@ class InventoryDatabase {
       tx.onabort = () => reject(tx.error);
       tx.onerror = () => reject(tx.error);
     });
-    // إزالة الصور الخام الثقيلة (Blob) من ملف النسخة الاحتياطية لمنع نفاد الذاكرة وضمان عمل النسخ الاحتياطي فوراً على جميع الهواتف
-    const documents = (snapshot.documents || []).map((doc) => {
-      const { original: _orig, ...cleanDoc } = doc as StockDocument & { original?: unknown };
-      return cleanDoc;
-    });
+    const documents = await Promise.all(
+      (snapshot.documents || []).map(async (doc) => {
+        const copy: any = { ...doc };
+        if (doc.original instanceof Blob) {
+          const buf = new Uint8Array(await doc.original.arrayBuffer());
+          copy.original = {
+            type: doc.original.type || 'application/octet-stream',
+            bytes: Array.from(buf),
+          };
+        }
+        return copy;
+      })
+    );
     return JSON.stringify({
       format: 'asmo-backup-v1',
-      version: '2.9.0',
+      version: '3.0.0',
       createdAt: new Date().toISOString(),
       items: snapshot.items,
       documents,
@@ -1610,7 +1927,7 @@ class InventoryDatabase {
     const trimmed = (text || '').replace(/^\ufeff/, '').trim();
     if (!trimmed) throw new Error('الملف فارغ');
 
-    // دعم استيراد ملفات CSV المصدرة من زر (تصدير إكسل / مشاركة Excel 📊) أو الجداول المنسوخة من النسخة السابقة
+    // دعم استيراد ملفات CSV المصدرة من زر (تصدير إكسل / مشاركة Excel 📊) أو الجداول المنسوخة
     if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
       const csvLines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       const parsedCsvItems: any[] = [];
@@ -1716,11 +2033,11 @@ class InventoryDatabase {
       const cleanPart = /^\d{10}$/.test(rawPart) ? rawPart : digitsMatch ? digitsMatch[0] : rawPart;
       if (!cleanPart || cleanPart.length > 128) continue;
 
-      const safeTotal = Math.max(0, Math.round(Number(raw.qty_total ?? raw.quantity ?? 0) || 0));
-      const safeOut = Math.min(
-        safeTotal,
-        Math.max(0, Math.round(Number(raw.qty_out ?? 0) || 0))
-      );
+      const safeTotal = Math.round(Number(raw.qty_total ?? raw.quantity ?? 0) || 0);
+      const safeOut = Math.round(Number(raw.qty_out ?? 0) || 0);
+      if (safeTotal < 0 || safeOut < 0 || safeOut > safeTotal) {
+        throw new Error(`بيانات كميات غير صالحة للقطعة (${cleanPart}) في النسخة الاحتياطية`);
+      }
       const isMissing =
         raw.is_missing === 1 || raw.status === 'غير موجودة' || raw.status === 'مفقود' ? 1 : 0;
       const safeRemaining = isMissing ? 0 : Math.max(0, safeTotal - safeOut);
@@ -1748,7 +2065,9 @@ class InventoryDatabase {
         qty_out: safeOut,
         qty_remaining: safeRemaining,
         is_moved: isMoved,
+        user_moved: raw.user_moved === 1 ? 1 : isMoved,
         is_missing: isMissing,
+        is_consumable: raw.is_consumable,
         remark: raw.remark ? String(raw.remark) : undefined,
         mark_symbol: raw.mark_symbol ?? null,
         audit_meaning: raw.audit_meaning ?? null,
@@ -1758,7 +2077,7 @@ class InventoryDatabase {
         status: isMissing
           ? 'غير موجودة'
           : isMoved
-          ? 'تم النقل'
+          ? 'منقول'
           : userVerified === 1
           ? 'مدقق'
           : 'غير مدقق',
@@ -1770,6 +2089,14 @@ class InventoryDatabase {
     for (const rawDoc of rawDocs) {
       if (!rawDoc || typeof rawDoc !== 'object') continue;
       try {
+        let restoredOriginal: Blob | undefined;
+        if (rawDoc.original instanceof Blob) {
+          restoredOriginal = rawDoc.original;
+        } else if (rawDoc.original && Array.isArray(rawDoc.original.bytes)) {
+          restoredOriginal = new Blob([new Uint8Array(rawDoc.original.bytes)], {
+            type: rawDoc.original.type || 'application/octet-stream',
+          });
+        }
         const docCopy: StockDocument = {
           id: String(rawDoc.id || `DOC-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`),
           batchId: rawDoc.batchId,
@@ -1780,6 +2107,7 @@ class InventoryDatabase {
           requester: String(rawDoc.requester || 'المستخدم المحلي'),
           reason: String(rawDoc.reason || ''),
           lines: Array.isArray(rawDoc.lines) ? rawDoc.lines : [],
+          original: restoredOriginal,
           status: rawDoc.status === 'approved' ? 'approved' : 'pending',
           createdAt: rawDoc.createdAt || new Date().toISOString(),
           executedAt: rawDoc.executedAt,
@@ -1863,6 +2191,7 @@ class InventoryDatabase {
     this.cache = [];
     this.transferReportsCache = [];
     this.locationsSummaryCache = null;
+    this.categoryGroupsCache = null;
     this.isCacheDirty = false;
   }
 
