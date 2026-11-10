@@ -85,7 +85,21 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
   const trimmed = String(loc).trim().toUpperCase();
   if (!trimmed) return false;
 
-  if (trimmed === 'D' || /^D\d{1,3}$/.test(trimmed) || trimmed === 'FL' || /^FL\d{1,2}$/.test(trimmed)) {
+  if (
+    trimmed === 'A' ||
+    /^A\d{1,3}$/.test(trimmed) ||
+    trimmed === 'FL' ||
+    /^FL\d{1,3}$/.test(trimmed) ||
+    trimmed === 'D' ||
+    /^D\d{1,3}$/.test(trimmed) ||
+    trimmed === 'C' ||
+    /^C\d{1,3}$/.test(trimmed) ||
+    trimmed === 'B' ||
+    /^B\d{1,3}$/.test(trimmed) ||
+    trimmed === 'BB' ||
+    /^BB\d{1,3}$/.test(trimmed)
+  ) {
+    if (trimmed === 'C006') return false;
     return true;
   }
 
@@ -97,7 +111,8 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
     return false;
   }
 
-  if (/^[A-Z]\d{2}(?:FL|BB|[A-D])\d{1,2}$/.test(trimmed)) {
+  if (/^[A-Z]\d{2}(?:FL|BB|[A-D])\d{0,2}$/.test(trimmed)) {
+    if (trimmed === 'D04D') return false;
     return true;
   }
 
@@ -135,11 +150,21 @@ export function dynamicLocationNormalizer(raw: string | null | undefined): strin
 
   if (!cleaned) return '';
 
-  if (cleaned === 'D' || /^D\d{1,3}$/.test(cleaned) || cleaned === 'FL' || /^FL\d{1,2}$/.test(cleaned)) {
+  if (
+    cleaned === 'A' ||
+    /^A\d{1,3}$/.test(cleaned) ||
+    cleaned === 'FL' ||
+    /^FL\d{1,3}$/.test(cleaned) ||
+    cleaned === 'D' ||
+    /^D\d{1,3}$/.test(cleaned) ||
+    cleaned === 'C' ||
+    /^C\d{1,3}$/.test(cleaned)
+  ) {
+    if (cleaned === 'C006') return '';
     return cleaned;
   }
 
-  const stdSapBinMatch = cleaned.match(/\b(N\d{2}(?:FL|BB|[A-D])\d{1,2})\b/);
+  const stdSapBinMatch = cleaned.match(/\b(N\d{2}(?:FL|BB|[A-D])\d{0,2})\b/);
   if (stdSapBinMatch) {
     return stdSapBinMatch[1].toUpperCase();
   }
