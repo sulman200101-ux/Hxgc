@@ -1,11 +1,6 @@
 /**
  * وحدة الخوارزميات البصرية المسبقة لمساعدة Gemini Vision ومحرك القراءة (AI-Assisted Table Image Preprocessor)
- * تضم 6 خوارزميات متكاملة لتسريع القراءة ورفع دقتها إلى 100%:
- * 1. التدوير الذكي التلقائي للصور الطولية (90° عكس عقارب الساعة)
- * 2. خوارزمية القص المخصص لأعمدة البيانات اليسرى (Left Data Columns Crop x=0..58%) لمنع انحراف الأسطر عبر عمود New BIN الفارغ
- * 3. خوارزمية توحيد الإضاءة الموضعي وإبراز الحروف الدقيقة (Integral Retinex + Unsharp Masking)
- * 4. التحجيم المتوافق مع نوافذ Gemini Vision ومحرك Tesseract (2000px-2200px)
- * 5. التقسيم المتوازي المتداخل (Dual-Half & Tri-Band Overlapping Split) لمنع سقوط أي سطر في الجداول الكثيفة (37+ سطراً)
+ * مع تحرير فوري لذاكرة Canvas لمنع تعليق الهاتف عند قراءة أوراق متعددة.
  */
 
 export interface PreProcessingOptions {
@@ -18,9 +13,16 @@ export interface PreProcessingOptions {
   sharpenText?: boolean;
 }
 
-/**
- * تطبيق فلتر زيادة حدة الحروف والأرقام (3x3 Unsharp Mask) لإبراز الأرقام الدقيقة في الزوايا
- */
+function releaseCanvas(canvas: HTMLCanvasElement | null): void {
+  if (!canvas) return;
+  try {
+    canvas.width = 0;
+    canvas.height = 0;
+  } catch {
+    // ignore
+  }
+}
+
 function applyFastUnsharpMask(imageData: ImageData, amount = 0.45): void {
   const { data, width, height } = imageData;
   const lum = new Uint8Array(width * height);
@@ -52,10 +54,6 @@ function applyFastUnsharpMask(imageData: ImageData, amount = 0.45): void {
   }
 }
 
-/**
- * معايرة تلقائية فائقة السرعة لاتجاه الورقة (<15ms) قبل بدء القراءة
- * تقارن طاقة تدرج السطور الأفقية مقابل العمودية لتحديد ما إذا كانت النصوص نفسها مصورة بشكل عمودي فعلياً
- */
 function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
   const origW = img.naturalWidth || img.width;
   const origH = img.naturalHeight || img.height;
@@ -63,9 +61,10 @@ function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
     return false;
   }
 
+  let c: HTMLCanvasElement | null = null;
   try {
     const sampleSize = 180;
-    const c = document.createElement('canvas');
+    c = document.createElement('canvas');
     c.width = sampleSize;
     c.height = sampleSize;
     const ctx = c.getContext('2d', { willReadFrequently: true });
@@ -103,12 +102,11 @@ function detectSidewaysTableOrientation(img: HTMLImageElement): boolean {
     return vertColEnergy > horizRowEnergy * 1.35;
   } catch {
     return false;
+  } finally {
+    releaseCanvas(c);
   }
 }
 
-/**
- * معايرة وتجهيز الصورة لـ Gemini Vision ومحرك القراءة بدقة وسرعة فائقة
- */
 export async function prepareImageForAi(
   imageSource: string,
   options: PreProcessingOptions = {}
@@ -118,6 +116,7 @@ export async function prepareImageForAi(
     img.crossOrigin = 'anonymous';
 
     img.onload = () => {
+      let canvas: HTMLCanvasElement | null = null;
       try {
         const origW = img.naturalWidth || img.width;
         const origH = img.naturalHeight || img.height;
@@ -127,8 +126,8 @@ export async function prepareImageForAi(
             ? options.forceRotateCcw === true
             : options.autoRotate !== false && detectSidewaysTableOrientation(img);
 
-        const maxDim = options.maxDimension || 2000;
-        const minDim = options.minDimension || 1500;
+        const maxDim = options.maxDimension || 2400;
+        const minDim = options.minDimension || 1550;
 
         let targetW = shouldRotateCcw ? origH : origW;
         let targetH = shouldRotateCcw ? origW : origH;
@@ -144,7 +143,7 @@ export async function prepareImageForAi(
           targetH = Math.round(targetH * scale);
         }
 
-        const canvas = document.createElement('canvas');
+        canvas = document.createElement('canvas');
         canvas.width = targetW;
         canvas.height = targetH;
         const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
@@ -157,7 +156,7 @@ export async function prepareImageForAi(
         ctx.imageSmoothingQuality = 'high';
 
         if (options.enhanceContrast !== false) {
-          ctx.filter = 'contrast(1.08) brightness(1.02)';
+          ctx.filter = 'contrast(1.12) brightness(1.03)';
         }
 
         if (shouldRotateCcw) {
@@ -171,7 +170,7 @@ export async function prepareImageForAi(
         if (options.sharpenText !== false && targetW >= 600 && targetH >= 300) {
           try {
             const imgData = ctx.getImageData(0, 0, targetW, targetH);
-            applyFastUnsharpMask(imgData, 0.28);
+            applyFastUnsharpMask(imgData, 0.32);
             ctx.putImageData(imgData, 0, 0);
           } catch {
             // الاحتفاظ بالصورة المرسومة في حال تعذر الوصول للبكسلات
@@ -183,6 +182,8 @@ export async function prepareImageForAi(
       } catch (err) {
         console.warn('Image calibration failed, using original:', err);
         resolve(imageSource);
+      } finally {
+        releaseCanvas(canvas);
       }
     };
 
@@ -194,9 +195,6 @@ export async function prepareImageForAi(
   });
 }
 
-/**
- * تدوير يدوي أو تلقائي بزاوية محددة (90 / 180 / 270 درجة) بسرعة فائقة
- */
 export async function rotateImageDegrees(
   imageSource: string,
   degrees: 90 | 180 | 270
@@ -206,12 +204,13 @@ export async function rotateImageDegrees(
     img.crossOrigin = 'anonymous';
 
     img.onload = () => {
+      let canvas: HTMLCanvasElement | null = null;
       try {
         const origW = img.naturalWidth || img.width;
         const origH = img.naturalHeight || img.height;
         const isSwap = degrees === 90 || degrees === 270;
 
-        const canvas = document.createElement('canvas');
+        canvas = document.createElement('canvas');
         canvas.width = isSwap ? origH : origW;
         canvas.height = isSwap ? origW : origH;
 
@@ -225,6 +224,8 @@ export async function rotateImageDegrees(
         resolve(canvas.toDataURL('image/jpeg', 0.92));
       } catch {
         resolve(imageSource);
+      } finally {
+        releaseCanvas(canvas);
       }
     };
 
