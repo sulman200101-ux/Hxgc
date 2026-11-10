@@ -83,21 +83,17 @@ async function runGeminiVisionTableOcr(
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
     if (!cleanBase64) return null;
 
-    const candidateModels = ['gemini-3-flash-preview', 'gemini-flash-latest'];
+    const candidateModels = ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-flash-latest'];
     const strictPrompt = `
-    أنت محرك OCR صارم ومخصص لجرد مستودعات شركة أسمو (ASMO).
-    اقرأ جدول قطع الغيار من الصورة المرفقة واستخرج السطور المرئية بوضوح فقط.
+    أنت محرك Gemini Vision الصناعي فائق الدقة المخصص لجرد مستودعات شركة أسمو (ASMO SAP Inventory Controller).
+    اقرأ جدول قطع الغيار من الصورة المرفقة بالكامل واستخرج جميع السطور المرئية بوضوح من أول سطر حتى آخر سطر.
 
     قواعد صارمة جداً لمنع الهلوسة:
     1. يُمنع منعاً باتاً توليد أو تخمين أي أرقام قطع أو مواقع أو كميات أو أوصاف غير موجودة في الصورة.
     2. رقم القطعة (part_number) يجب أن يُقرأ كما هو بدقة (10 أرقام)، وإذا لم تستطع قراءته اتركه فارغاً "" أو null.
-    3. أي حقل في الصف لم تستطع قراءته بوضوح (سواء part_number أو location_code أو description أو quantity) يجب أن تعيده فارغاً "" أو null ولا تملأه من سطور أخرى.
-    4. ابحث بدقة عن أي علامات يدوية أو رموز مكتوبة بجانب كل صف أو عند خانة الكمية، وفسرها حصراً كالتالي:
-       - إذا وجدت علامة صح (✓): اجعل حقل mark_symbol = "✓" وحقل audit_meaning = "القطع موجودة" وحقل status = "مدقق".
-       - إذا وجدت علامة خطأ أو إكس (X أو ✗): اجعل حقل mark_symbol = "X" وحقل audit_meaning = "القطع غير موجودة" وحقل status = "غير موجود".
-       - إذا وجدت حرف (F أو f): اجعل حقل mark_symbol = "F" وحقل audit_meaning = "تم نقل العدد الزائد إلى مكان آخر" وحقل status = "تم النقل".
-       - إذا وجدت علامة ناقص (-) أو حرف (N أو n): اجعل حقل mark_symbol = "N" وحقل audit_meaning = "ناقص العدد" وحقل status = "ناقص العدد".
-       - إذا لم توجد أي علامة أمام الصف: اجعل الحقول الخاصة بالعلامة null وحقل status = "غير مدقق".
+    3. رمز الموقع (location_code) هو عمود Storage Bin (مثل N11A1, N11FL2, N16D2, N07B1)؛ تجاهل رموز M016 و 002.
+    4. استخرج الوصف الإنجليزي الكامل (description) مع ترجمة عربية هندسية دقيقة (description_ar) شاملة المقاسات بالملم.
+    5. لا تجعل حقل status أبداً "مدقق" أو "تم النقل" أو "منقول" لأن التدقيق والنقل يتمان حصراً من قِبل المستخدم بنفسه؛ استخدم فقط "غير موجود" عند وجود علامة X، و"غير مدقق" لكافة السطور الأخرى.
   `;
 
     for (const modelName of candidateModels) {
@@ -111,14 +107,14 @@ async function runGeminiVisionTableOcr(
                 {
                   inlineData: {
                     mimeType,
-                    data: cleanBase64, // إرسال الورقة كاملة دفعة واحدة لمنع التعليق عند 50%
+                    data: cleanBase64,
                   },
                 },
               ],
             },
           ],
           config: {
-            temperature: 0.0, // منع الإبداع أو التخمين نهائياً
+            temperature: 0.0,
             topK: 1,
             topP: 0.1,
             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
@@ -144,10 +140,20 @@ async function runGeminiVisionTableOcr(
                     nullable: true,
                     description: 'وصف القطعة بالإنجليزية كما في الجدول',
                   },
+                  description_ar: {
+                    type: Type.STRING,
+                    nullable: true,
+                    description: 'ترجمة عربية هندسية دقيقة للوصف مع المقاسات بالملم',
+                  },
                   quantity: {
                     type: Type.INTEGER,
                     nullable: true,
                     description: 'الكمية المسجلة في الجدول',
+                  },
+                  remark: {
+                    type: Type.STRING,
+                    nullable: true,
+                    description: 'ملاحظات النقص مثل -1 أو -4 أو F',
                   },
                   mark_symbol: {
                     type: Type.STRING,
@@ -168,8 +174,8 @@ async function runGeminiVisionTableOcr(
                   },
                   status: {
                     type: Type.STRING,
-                    enum: ['مدقق', 'غير موجود', 'تم النقل', 'ناقص العدد', 'غير مدقق'],
-                    description: 'حالة الصنف النهائية',
+                    enum: ['غير موجود', 'ناقص العدد', 'غير مدقق'],
+                    description: 'حالة الصنف الأولية (دائماً غير مدقق إلا إذا كانت معلمة بـ X غير موجود)',
                   },
                 },
                 required: [
@@ -225,6 +231,10 @@ async function runGeminiVisionTableOcr(
                 : row?.description_en && row.description_en !== 'null'
                 ? String(row.description_en).trim()
                 : '';
+            const cleanDescAr =
+              row?.description_ar && row.description_ar !== 'null'
+                ? String(row.description_ar).trim()
+                : '';
             const hasQty =
               row?.quantity !== null &&
               row?.quantity !== undefined &&
@@ -237,11 +247,13 @@ async function runGeminiVisionTableOcr(
               location_code: cleanLoc,
               description_en: cleanDesc,
               description: cleanDesc,
+              description_ar: cleanDescAr,
               qty_total: cleanQty !== null && cleanQty > 0 ? cleanQty : 0,
               quantity: cleanQty,
               mark_symbol: sym,
               audit_meaning: row?.audit_meaning ?? null,
-              status: row?.status ?? (isMissing ? 'غير موجود' : 'غير مدقق'),
+              // قاعدة صارمة: عدم كتابة مدقق أو منقول تلقائياً من القراءة الضوئية
+              status: isMissing ? 'غير موجودة' : 'غير مدقق',
               is_missing: isMissing,
               remark,
             };
@@ -468,6 +480,13 @@ async function runBestServerTableOcr(
     return geminiResult;
   }
 
+  if (preprocessedBase64) {
+    const geminiPreResult = await runGeminiVisionTableOcr(preprocessedBase64, customPrompt, customApiKey);
+    if (geminiPreResult?.success && Array.isArray(geminiPreResult.items) && geminiPreResult.items.length > 0) {
+      return geminiPreResult;
+    }
+  }
+
   const pyResult = await runPythonTableOcr(imageBase64);
   if (pyResult?.success && Array.isArray(pyResult.items) && pyResult.items.length > 0) {
     return pyResult;
@@ -679,7 +698,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
         success: false,
         fallbackToLocal: true,
         analyses: [],
-        message: 'يتم استخدام المساعد الهندسي المحلي الذكي للترجمة وحسبة المقاسات بالملم وتوجيه الثقيل لموقع D.',
+        message: 'يتم استخدام المساعد الهندسي المحلي الذكي للترجمة وحسبة المقاسات بالملم وتوجيه القطع الاستهلاكية إلى A و FL والثقيلة إلى D و C.',
       });
     }
 
@@ -692,7 +711,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
     }));
 
     const prompt = `أنت مساعد هندسي ذكي (Gemini Industrial Assistant) متخصص في مستودعات قطع الغيار الصناعية (SAP Inventory Controller - ASMO).
-المطلوب لكل قطعة في القائمة المرفقة (مع التركيز التام على المتشابهات بالصنف والحجم والمليمتر MM وبدون أي ارتفاع مواقع):
+المطلوب لكل قطعة في القائمة المرفقة:
 1. "description_ar": ترجمة عربية هندسية دقيقة وواضحة لوصف القطعة الإنجليزي مع ذكر الصنف والمقاس بالملم.
 2. "dimensions_calculation_ar": حسبة تفصيلية للمقاسات والأبعاد المذكورة في الوصف مع تحويل أي مقاس بالبوصة (IN أو ") إلى المليمتر (MM) بدقة (1 بوصة = 25.4 ملم).
 3. "material_ar": نوع المعدن أو المادة بالعربية.
@@ -700,10 +719,11 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
 5. "weight_label_ar": نص يوضح الوزن التقريبي للقطعة وإجمالي الوزن للكمية.
 6. "size_category": تصنيف الحجم والوزن ويجب أن يكون أحد القيم الثلاث فقط: "كبير / ثقيل" أو "متوسط الحجم" أو "صغير / خفيف".
 7. "recommended_shelf_code": رمز الموقع الأنسب للقطعة حسب القاعدة المعتمدة:
-   - "D" و "C": مخصصان للقطع الثقيلة جداً والكبيرة ("كبير / ثقيل") بحد أقصى 15 صنفاً لكل رف، وتجمع القطع الأغلى سعراً في رف واحد بحد أقصى 15 صنفاً فقط لكل رف.
-   - "A" أو "B" أو "BB" أو "C": لتجميع القطع المتشابهة من نفس الصنف والحجم والمقاس بالملم (MM).
-8. "recommended_bin": رمز الموقع المقترح كاملاً (مثال: إذا كانت القطعة ثقيلة في الممر N11 اقترح "N11D1" أو "D1").
-9. "placement_reason_ar": سبب اختيار هذا الموقع بناءً على الصنف والحجم والمقاس بالملم (أو نقل الثقيل إلى الموقع D).
+   - "A" و "FL": مخصصان لنقل وتجميع القطع الاستهلاكية (المسامير، الصواميل، الوردات، الجازكيت، الأورينج، الفلاتر، الفيوزات، اللمبات، القفازات، أطقم الإصلاح) مع الإشارة إليها.
+   - "D" و "C": مخصصان للقطع الثقيلة جداً والكبيرة ("كبير / ثقيل") بحد أقصى 15 صنفاً لكل رف.
+   - "B" أو "BB": لتجميع بقية القطع المتشابهة من نفس الصنف والحجم والمقاس بالملم (MM).
+8. "recommended_bin": رمز الموقع المقترح كاملاً (مثال: للقطعة الاستهلاكية اقترح "N11A1" أو "N11FL1"، وللثقيلة "N11D1").
+9. "placement_reason_ar": سبب اختيار هذا الموقع مع الإشارة بوضوح إذا كانت قطعة استهلاكية تنقل إلى حرف A أو FL.
 
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
@@ -771,7 +791,7 @@ ${JSON.stringify(inputSummary)}`;
       success: false,
       fallbackToLocal: true,
       analyses: [],
-      message: error?.message || 'تم تفعيل المحلل الهندسي المحلي لحسبة المقاسات بالملم وتوجيه الثقيل لموقع D.',
+      message: error?.message || 'تم تفعيل المحلل الهندسي المحلي لحسبة المقاسات بالملم وتوجيه القطع الاستهلاكية إلى A و FL.',
     });
   }
 });
@@ -828,7 +848,6 @@ async function startServer() {
 
   app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
-    // Prepare OCR static files in the background without blocking server startup
     import('./scripts/prepare-ocr.mjs').catch(() => {});
   });
 }
