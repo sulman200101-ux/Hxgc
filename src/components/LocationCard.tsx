@@ -4,6 +4,9 @@ import {
   estimatePartSizeProfile,
   isDLocation,
   isCLocation,
+  isALocation,
+  isFLLocation,
+  isConsumablePart,
   MAX_ITEMS_PER_SHELF,
 } from '../services/transferSuggestions';
 import {
@@ -17,6 +20,7 @@ import {
   Layers,
   ArrowRightLeft,
   XCircle,
+  RefreshCw,
 } from 'lucide-react';
 
 interface LocationCardProps {
@@ -48,7 +52,11 @@ export const LocationCard: React.FC<LocationCardProps> = ({
   const previewItems = items.slice(0, 25);
   const isHeavyD = isDLocation(summary.location_code);
   const isHeavyC = isCLocation(summary.location_code);
+  const isConsumableA = isALocation(summary.location_code);
+  const isConsumableFL = isFLLocation(summary.location_code);
   const ginCountInLocation = items.filter((i) => Boolean(i.gin_code && i.gin_code.trim())).length;
+  const consumableCountInLocation =
+    summary.consumable_count ?? items.filter((i) => isConsumablePart(i)).length;
 
   return (
     <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] shadow-lg hover:border-amber-700/50 transition-all overflow-hidden mb-4">
@@ -68,6 +76,11 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                     موقع القطع الثقيلة ({isHeavyC ? 'C' : 'D'})
                   </span>
                 )}
+                {(isConsumableA || isConsumableFL) && (
+                  <span className="text-xs px-2.5 py-0.5 rounded-md border font-bold bg-cyan-950/90 text-cyan-300 border-cyan-500/60">
+                    🔄 موقع القطع الاستهلاكية ({isConsumableFL ? 'FL' : 'A'})
+                  </span>
+                )}
                 <span className="text-xs px-2 py-0.5 rounded-md bg-[#3B2820] text-amber-200/80 border border-[#4F362B] font-bold">
                   {summary.item_count} / {MAX_ITEMS_PER_SHELF} أصناف
                 </span>
@@ -75,12 +88,21 @@ export const LocationCard: React.FC<LocationCardProps> = ({
               <p className="text-[11px] text-neutral-400 mt-0.5">
                 {isHeavyD || isHeavyC
                   ? `رف مخصص للقطع الثقيلة جداً (${isHeavyC ? 'C' : 'D'}) — السعة القصوى ${MAX_ITEMS_PER_SHELF} صنفاً للرف`
+                  : isConsumableA || isConsumableFL
+                  ? `رف مخصص لنقل وتجميع القطع الاستهلاكية (حرف ${isConsumableFL ? 'FL' : 'A'}) — السعة القصوى ${MAX_ITEMS_PER_SHELF} صنفاً للرف`
                   : `تجميع المتشابهات في الصنف والحجم والملم (MM) — السعة القصوى ${MAX_ITEMS_PER_SHELF} صنفاً للرف`}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {consumableCountInLocation > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-cyan-950/90 text-cyan-200 border border-cyan-500/60 text-xs font-black flex items-center gap-1 shadow-sm">
+                <RefreshCw className="w-3 h-3 text-cyan-400" />
+                <span>🔄 استهلاكية ({consumableCountInLocation})</span>
+              </span>
+            )}
+
             {summary.missing_count > 0 && (
               <span className="px-2.5 py-1 rounded-lg bg-red-950 text-red-200 border border-red-500 text-xs font-black flex items-center gap-1 shadow-sm">
                 <XCircle className="w-3.5 h-3.5 text-red-400" />
@@ -111,7 +133,7 @@ export const LocationCard: React.FC<LocationCardProps> = ({
             {summary.moved_count > 0 && (
               <span className="px-2.5 py-1 rounded-lg bg-emerald-950/70 text-emerald-300 border border-emerald-700/60 text-xs font-bold flex items-center gap-1 shadow-sm">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                <span>🟢 نقلت ({summary.moved_count})</span>
+                <span>🟢 منقول ({summary.moved_count})</span>
               </span>
             )}
 
@@ -198,10 +220,16 @@ export const LocationCard: React.FC<LocationCardProps> = ({
             <>
               {previewItems.map((item, idx) => {
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
-                const isVerified = !isMissing && item.status === 'مدقق';
-                const isMoved = item.is_moved === 1 || item.status === 'منقول' || item.status === 'تم النقل';
+                // لا تظهر "مدقق" إلا إذا دققها المستخدم بنفسه (user_verified === 1)
+                const isVerified = !isMissing && item.user_verified === 1 && item.status === 'مدقق';
+                // لا تظهر "منقول" إلا إذا نقلها المستخدم بنفسه (is_moved === 1)
+                const isMoved =
+                  !isMissing &&
+                  item.is_moved === 1 &&
+                  (item.status === 'منقول' || item.status === 'تم النقل');
                 const isGin = Boolean(item.gin_code && item.gin_code.trim());
                 const sizeProf = estimatePartSizeProfile(item);
+                const isConsumable = sizeProf.isConsumable;
 
                 return (
                   <div
@@ -221,6 +249,11 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                         <span className="px-2 py-0.5 rounded-md bg-[#1F1511] text-amber-300 font-mono font-bold text-xs border border-[#4A342B]">
                           رقم: {item.part_number}
                         </span>
+                        {isConsumable && (
+                          <span className="px-2.5 py-0.5 rounded-md bg-cyan-950 text-cyan-200 border border-cyan-500/70 text-[11px] font-black shadow-sm inline-flex items-center gap-1">
+                            <span>🔄 قطعة استهلاكية (تنقل إلى {sizeProf.consumableTargetType})</span>
+                          </span>
+                        )}
                         {isGin && (
                           <span className="px-2.5 py-0.5 rounded-md bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 text-xs font-black shadow-sm inline-flex items-center gap-1">
                             <span>🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}</span>
@@ -252,9 +285,9 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                             <span>غير مدقق</span>
                           </span>
                         )}
-                        {isMoved && !isMissing && (
+                        {isMoved && (
                           <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-600/60">
-                            تم النقل 🟢
+                            منقول 🟢{item.old_location ? ` (من ${item.old_location})` : ''}
                           </span>
                         )}
                       </div>
@@ -300,7 +333,7 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                               isVerified ? 'غير مدقق' : 'مدقق'
                             )
                           }
-                          title="اضغط لتحويل القطعة إلى اللون الأخضر مدقق ✓"
+                          title="اضغط لتدقيق القطعة بنفسك وتحويلها إلى مدقق ✓"
                           className={`px-3 py-1 rounded-lg text-xs font-black border flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 ${
                             isVerified
                               ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-md shadow-emerald-950/60'
@@ -315,7 +348,8 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                         onClick={() =>
                           onMarkItemStatus(
                             item.part_number,
-                            isMissing ? 'مدقق' : 'غير موجودة'
+                            // عند إلغاء علامة غير موجودة تعود إلى غير مدقق حتى يدققها المستخدم بنفسه
+                            isMissing ? 'غير مدقق' : 'غير موجودة'
                           )
                         }
                         className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
@@ -323,9 +357,9 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                             ? 'bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border-emerald-600/60'
                             : 'bg-red-950/60 hover:bg-red-900/80 text-red-200 border-red-700/60'
                         }`}
-                        title="تغيير حالة التوفر (موجودة ✓ / غير موجودة ×)"
+                        title="تغيير حالة التوفر (إلغاء علامة × أو وضع علامة × غير موجودة)"
                       >
-                        {isMissing ? 'تغيير المشرف لموجودة ✓' : 'علامة × غير موجودة'}
+                        {isMissing ? 'إلغاء علامة × (إرجاع للمخزون)' : 'علامة × غير موجودة'}
                       </button>
 
                       {onToggleGin && (
@@ -350,7 +384,7 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                           className="px-2.5 py-1 rounded-lg bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-500/50 text-xs font-bold flex items-center gap-1 transition-all cursor-pointer shadow-sm active:scale-95"
                         >
                           <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>نقل 🟢</span>
+                          <span>{isConsumable ? `نقل إلى ${sizeProf.consumableTargetType} 🟢` : 'نقل 🟢'}</span>
                         </button>
                       )}
 
