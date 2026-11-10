@@ -2,10 +2,11 @@
  * محلل جدول أسمو الصارم (Strict Zero-Guessing SAP Table Parser)
  * يقرأ فقط ما هو مرئي بوضوح تام في السطر دون أي بيانات مخزنة أو استنتاج من السطور الأخرى.
  * أي حقل لم يتمكن من قراءته يُترك فارغاً تماماً ("").
+ * لا يتم تسجيل أي قطعة كـ "مدقق" أو "منقول" تلقائياً؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم.
  */
 
 import { ExtractedSparePart } from '../services/localOcr';
-import { categorizeAndTranslate } from './translator';
+import { categorizeAndTranslate, isConsumableDescription } from './translator';
 import {
   sanitizeLocationCode,
   isValidSpecificLocation,
@@ -55,17 +56,35 @@ const UNIT_PATTERN =
 export function extractStrictQuantity(
   line: string,
   partNumber: string,
-  _storageBin: string
+  storageBin: string
 ): { total: number; out: number } {
   const partIdx = partNumber ? line.indexOf(partNumber) : -1;
   const afterPart = partIdx >= 0 ? line.slice(partIdx + partNumber.length) : line;
 
+  // 1. النمط القياسي بوجود رمز الوحدة (EA, PK, PAA, ZYD, SET...)
   const unitQtyMatch = afterPart.match(
     new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(\\d{1,5})\\b`, 'i')
   );
   if (unitQtyMatch) {
     const val = Number(unitQtyMatch[1]);
     return { total: val > 0 ? val : 0, out: 0 };
+  }
+
+  // 2. النمط المباشر بعد رمز الموقع (Storage Bin) عندما لا يظهر رمز الوحدة في السطر
+  if (storageBin) {
+    const binIdx = afterPart.toUpperCase().indexOf(storageBin.toUpperCase());
+    if (binIdx >= 0) {
+      const afterBin = afterPart.slice(binIdx + storageBin.length);
+      const directQtyMatch = afterBin.match(/^\s*(?:[|\[\]()—\-~:°.]+\s*)*(\d{1,5})(?=\s|\||$)/);
+      if (directQtyMatch) {
+        const val = Number(directQtyMatch[1]);
+        if (val > 0 && val !== 2 && val !== 16) {
+          return { total: val, out: 0 };
+        } else if (val > 0) {
+          return { total: val, out: 0 };
+        }
+      }
+    }
   }
 
   return { total: 0, out: 0 };
@@ -131,9 +150,11 @@ export function extractStrictDescription(
   let rawDesc = mUnit && mUnit[1] ? mUnit[1] : '';
 
   if (!rawDesc && storageBin) {
-    const binIdx = withoutPart.indexOf(storageBin);
+    const binIdx = withoutPart.toUpperCase().indexOf(storageBin.toUpperCase());
     if (binIdx >= 0) {
-      rawDesc = withoutPart.slice(binIdx + storageBin.length);
+      rawDesc = withoutPart
+        .slice(binIdx + storageBin.length)
+        .replace(/^\s*\d{1,5}\b\s*/, '');
     }
   }
 
@@ -184,7 +205,6 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
     const { isMissing, remark, shortage, markSymbol } = extractCheckAndRemark(line, storageBin);
     const { descEn, descAr, category } = extractStrictDescription(line, partNumber, storageBin);
 
-    // إذا كان السطر لا يحتوي على أي حقل مقروء على الإطلاق نتجاوزه
     if (!partNumber && !storageBin && !descEn) {
       continue;
     }
@@ -203,17 +223,19 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
 
     // لا يتم تسجيل أي قطعة كـ "مدقق" أو "تم النقل" تلقائياً؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم
     const status = isMissing ? 'غير موجودة' : 'غير مدقق';
+    const isConsumable = isConsumableDescription(descEn, category) ? 1 : 0;
 
     finalResults.push({
-      part_number: partNumber, // يُترك فارغاً "" إذا لم يستطع قراءته
-      location_code: storageBin, // يُترك فارغاً "" إذا لم يستطع قراءته
-      description_en: descEn, // يُترك فارغاً "" إذا لم يستطع قراءته
-      description_ar: descAr, // يُترك فارغاً "" إذا لم يستطع قراءته
+      part_number: partNumber,
+      location_code: storageBin,
+      description_en: descEn,
+      description_ar: descAr,
       category,
-      qty_total: total, // 0 إذا لم يستطع قراءته
+      qty_total: total,
       qty_out: out,
       qty_remaining: isMissing ? 0 : Math.max(0, total - out),
       is_missing: isMissing,
+      is_consumable: isConsumable,
       remark: remark || undefined,
       mark_symbol: markSymbol,
       audit_meaning: auditMeaning,
@@ -225,6 +247,9 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   return finalResults;
 }
 
+/**
+ * دمج نتائج تمريرتي قراءة ضوئية بحيث تُستكمل الحقول الناقصة للسطر نفسه دون أي تخمين
+ */
 export function unionOrderedRowSequences(
   passA: ExtractedSparePart[],
   passB: ExtractedSparePart[]
@@ -233,5 +258,42 @@ export function unionOrderedRowSequences(
   const cleanB = (passB || []).filter(Boolean);
   if (!cleanA.length) return [...cleanB];
   if (!cleanB.length) return [...cleanA];
-  return cleanA.length >= cleanB.length ? [...cleanA] : [...cleanB];
+
+  const primary = cleanA.length >= cleanB.length ? cleanA : cleanB;
+  const secondary = cleanA.length >= cleanB.length ? cleanB : cleanA;
+
+  const secByPart = new Map<string, ExtractedSparePart>();
+  for (const row of secondary) {
+    if (row.part_number && /^\d{10}$/.test(row.part_number) && !secByPart.has(row.part_number)) {
+      secByPart.set(row.part_number, row);
+    }
+  }
+
+  return primary.map((row) => {
+    if (!row.part_number) return { ...row };
+    const comp = secByPart.get(row.part_number);
+    if (!comp) return { ...row };
+    const mergedDescEn =
+      row.description_en && row.description_en.length >= (comp.description_en?.length || 0)
+        ? row.description_en
+        : comp.description_en || row.description_en;
+    const { category, descAr } = mergedDescEn
+      ? categorizeAndTranslate(mergedDescEn)
+      : { category: row.category || comp.category, descAr: row.description_ar || comp.description_ar };
+    const total = row.qty_total > 0 ? row.qty_total : comp.qty_total;
+    const isMissing = row.is_missing === 1 || comp.is_missing === 1 ? 1 : 0;
+    const out = isMissing ? 0 : Math.max(row.qty_out || 0, comp.qty_out || 0);
+    return {
+      ...row,
+      location_code: row.location_code || comp.location_code || '',
+      description_en: mergedDescEn,
+      description_ar: row.description_ar || descAr,
+      category: row.category || category,
+      qty_total: total,
+      qty_out: out,
+      qty_remaining: isMissing ? 0 : Math.max(0, total - out),
+      is_missing: isMissing,
+      status: isMissing ? 'غير موجودة' : 'غير مدقق',
+    };
+  });
 }
