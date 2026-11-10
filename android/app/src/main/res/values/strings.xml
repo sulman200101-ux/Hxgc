@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">ASMO Spare Parts Inventory</string>
     <string name="title_activity_main">ASMO Spare Parts Inventory</string>
-    <string name="package_name">com.asmo.inventory</string>
-    <string name="custom_url_scheme">com.asmo.inventory</string>
+    <string name="package_name">com.asmo.inventory.v2</string>
+    <string name="custom_url_scheme">com.asmo.inventory.v2</string>
 </resources>

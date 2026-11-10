@@ -1610,13 +1610,50 @@ class InventoryDatabase {
     const trimmed = (text || '').replace(/^\ufeff/, '').trim();
     if (!trimmed) throw new Error('الملف فارغ');
 
-    // دعم استيراد ملفات CSV المصدرة من زر (مشاركة Excel 📊) أو من جدول التقارير
+    // دعم استيراد ملفات CSV المصدرة من زر (تصدير إكسل / مشاركة Excel 📊) أو الجداول المنسوخة من النسخة السابقة
     if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
       const csvLines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       const parsedCsvItems: any[] = [];
+      let headerCols: string[] = [];
+
       for (const line of csvLines) {
         const cols = line.split(/[,\t;]/).map((c) => c.replace(/^"|"$/g, '').trim());
-        const partCandidate = cols.find((c) => /^\d{10}$/.test(c));
+        if (!cols.length) continue;
+
+        if (cols[0].includes('رقم القطعة') || cols[0].toLowerCase().includes('part')) {
+          headerCols = cols;
+          continue;
+        }
+        if (cols[0].includes('المستند') || cols[0].includes('التاريخ') || cols[0].startsWith('ASMO')) {
+          continue;
+        }
+
+        if (headerCols.length >= 3) {
+          const partIdx = headerCols.findIndex((h) => h.includes('رقم القطعة') || h.toLowerCase().includes('part'));
+          const locIdx = headerCols.findIndex((h) => h.includes('الموقع') && !h.includes('القديم'));
+          const totalIdx = headerCols.findIndex((h) => h.includes('الإجمالي') || h.includes('الكمية'));
+          const outIdx = headerCols.findIndex((h) => h.includes('المصروف'));
+          const descIdx = headerCols.findIndex((h) => h.includes('الوصف'));
+          const remarkIdx = headerCols.findIndex((h) => h.includes('الملاحظات'));
+
+          const partVal = (cols[partIdx >= 0 ? partIdx : 0] || '').trim();
+          if (!partVal || partVal.length < 2) continue;
+
+          parsedCsvItems.push({
+            part_number: partVal,
+            location_code: (locIdx >= 0 ? cols[locIdx] || '' : cols[1] || '').trim().toUpperCase(),
+            qty_total: Math.max(0, Number(totalIdx >= 0 ? cols[totalIdx] : cols[2]) || 0),
+            qty_out: outIdx >= 0 ? Math.max(0, Number(cols[outIdx]) || 0) : 0,
+            description_en: (descIdx >= 0 ? cols[descIdx] || '' : cols[3] || '').trim(),
+            remark: remarkIdx >= 0 ? (cols[remarkIdx] || '').trim() : '',
+            status: 'غير مدقق',
+          });
+          continue;
+        }
+
+        const partCandidate =
+          cols.find((c) => /^\d{6,14}$/.test(c)) ||
+          (cols[0] && cols[0].length >= 3 && !cols[0].includes(' ') ? cols[0] : '');
         if (!partCandidate) continue;
         const partIdx = cols.indexOf(partCandidate);
         const locCandidate =
@@ -1644,7 +1681,7 @@ class InventoryDatabase {
         });
       }
       if (!parsedCsvItems.length) {
-        throw new Error('لم يتم العثور على أرقام قطع صالحة (10 أرقام) في الملف');
+        throw new Error('لم يتم العثور على أرقام قطع صالحة في الملف أو النص المنسوخ');
       }
       await this.smartUpsertBatch(parsedCsvItems);
       return;

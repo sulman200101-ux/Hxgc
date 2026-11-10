@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.asmo.inventory',
+  appId: 'com.asmo.inventory.v2',
   appName: 'ASMO Spare Parts Inventory',
   webDir: 'dist',
   server: {

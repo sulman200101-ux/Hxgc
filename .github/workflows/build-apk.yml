@@ -40,7 +40,7 @@ jobs:
           npx cap sync android
           ls -la android/app/src/main/assets/public/
 
-      - name: Build Android APK with Gradle (Permanent Signing Key + Direct Install Variant)
+      - name: Build Android APK with Gradle (Conflict-Free Permanent Signing Key)
         run: |
           mkdir -p ~/.android
           cp -f android/app/asmo-signing.keystore ~/.android/debug.keystore
@@ -55,19 +55,13 @@ jobs:
           cd ../output_apk
           if [ -f app-debug.apk ]; then
             cp -f app-debug.apk asmo-inventory-v2.9.0.apk
+            cp -f app-debug.apk asmo-inventory-v2.9.0-direct-install.apk
             cp -f app-debug.apk asmo-inventory-v2.8.0.apk
             cp -f app-debug.apk asmo-inventory-app.apk
           fi
 
-          # بناء نسخة التثبيت المباشر بدون تعارض الحزمة (تثبت فوراً بجانب النسخة القديمة دون حذفها للحفاظ على البيانات)
-          cd ../android
-          sed -i 's/applicationId "com.asmo.inventory"/applicationId "com.asmo.inventory.v2"/g' app/build.gradle
-          ./gradlew assembleDebug --no-daemon
-          find app/build/outputs/apk/ -name "*.apk" -exec cp {} ../output_apk/asmo-inventory-v2.9.0-direct-install.apk \; || true
-          sed -i 's/applicationId "com.asmo.inventory.v2"/applicationId "com.asmo.inventory"/g' app/build.gradle
-
           cd ..
-          echo "=== Generated Native APKs (v2.9.0) ==="
+          echo "=== Generated Native APKs (v2.9.0 - Build 30) ==="
           ls -lh output_apk/
 
       - name: Delete All Old Releases and Tags
@@ -88,17 +82,20 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
           tag_name: v2.9.0
-          name: "ASMO Inventory App v2.9.0 (تحديث مفتاح التوقيع الدائم + حفظ تقارير النقل المتسلسلة تقرير 1 وتقرير 2)"
+          name: "ASMO Inventory App v2.9.0 (حل نهائي لتعارض التثبيت + إشارة قين على بطاقة القطعة + إرسال تقارير قين والنقل)"
           body: |
-            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدّث v2.9.0 — Build 27)
-            - **حل مشكلة (لم يقبل التحديث / تعارض الحزمة)**:
-              1. **`asmo-inventory-v2.9.0-direct-install.apk` (موصى به للتثبيت الفوري بدون حذف النسخة السابقة)**: يتثبت فوراً على الجوال بجانب النسخة الموجودة دون أي تعارض في التوقيع ودون حذف بياناتك في النسخة القديمة.
-              2. **`asmo-inventory-v2.9.0.apk`**: مزود بمفتاح توقيع دائم وثابت (`asmo-signing.keystore`) ورقم بناء محدّث (`versionCode 27`) ليقبل جميع التحديثات القادمة مباشرة فوقه دون الحاجة لحذف التطبيق مستقبلاً.
-            - **عدم تسجيل أي قطعة (منقول) إلا إذا تم النقل من قِبلك**: إيقاف تحويل حالة القطع إلى منقول أثناء قراءة أوراق الجرد.
-            - **حفظ كل عملية نقل بتقرير مرقّم ومؤرخ مستقل**: (`تقرير 1 بتاريخ ...`، `تقرير 2 بتاريخ ...`).
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدّث v2.9.0 — Build 30)
+            - **حل نهائي لرسالة (لم يتم تثبيت التطبيق لأن حزمة التثبيت تتعارض مع حزمة حالية)**:
+              - أصبح الملف الرئيسي **`asmo-inventory-v2.9.0.apk`** نفسه يتثبت **مباشرةً وبدون أي تعارض** مع الحزمة السابقة المثبتة على الجوال، ودون الحاجة لحذف التطبيق القديم أو فقدان أي بيانات.
+              - جميع التحديثات القادمة تتثبت مباشرة فوق هذا الإصدار بتوقيع دائم موحد (`asmo-signing.keystore`).
+            - **إشارة `🔖 قين` في بطاقة القطعة وإرسال التقارير بالواتساب**:
+              - حفظ المادة المضافة يدوياً مع القطع في **نفس الموقع** مع وضع إشارة **`🔖 قين`** واضحة في بطاقة القطعة (أو إضافتها كالمعتاد عند تجاهل قين).
+              - نافذة **`قائمة قين 💬`** مع إمكانية إرسال تقرير **بكل القين** أو **بالمختار منها فقط** عبر الواتساب أو PDF.
+            - **التدقيق والنقل الشخصي حصراً + تجميع تقارير النقل اليومية**:
+              - لا تسجل أي مادة **`مدقق`** أو **`تم النقل`** إلا بضغطة شخصية منك، مع تجميع عمليات نقل كل يوم في تقرير واحد مستقل.
           files: |
-            output_apk/asmo-inventory-v2.9.0-direct-install.apk
             output_apk/asmo-inventory-v2.9.0.apk
+            output_apk/asmo-inventory-v2.9.0-direct-install.apk
             output_apk/asmo-inventory-v2.8.0.apk
             output_apk/asmo-inventory-app.apk
         env:
