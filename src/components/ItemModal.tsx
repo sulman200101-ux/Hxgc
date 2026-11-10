@@ -155,7 +155,11 @@ export const ItemModal: React.FC<ItemModalProps> = ({
           <div className="flex items-center gap-2">
             <Package className="w-5 h-5 text-amber-400" />
             <h3 className="font-bold text-base text-white">
-              {item ? 'تعديل تفاصيل القطعة' : 'إضافة قطعة غيار جديدة (10 أرقام)'}
+              {item && item.part_number
+                ? 'تعديل تفاصيل القطعة'
+                : item && item.location_code
+                ? `إضافة مادة جديدة مع القطع في الموقع (${item.location_code})`
+                : 'إضافة قطعة غيار جديدة (10 أرقام)'}
             </h3>
           </div>
           <button
@@ -176,22 +180,27 @@ export const ItemModal: React.FC<ItemModalProps> = ({
           )}
 
           {/* خيار (قين) عند الإضافة اليدوية */}
-          <div className="p-3 rounded-xl bg-[#1F1511] border border-emerald-700/60 space-y-2">
+          <div className="p-3 rounded-xl bg-[#1F1511] border border-purple-600/60 space-y-2">
             <div className="flex items-center justify-between flex-wrap gap-2">
-              <span className="font-black text-emerald-300 text-xs">
-                خيار (قين) عند الإضافة اليدوية:
-              </span>
+              <div>
+                <span className="font-black text-purple-200 text-xs block">
+                  إشارة (🔖 قين) في بطاقة القطعة داخل نفس الموقع:
+                </span>
+                <span className="text-[10px] text-neutral-400">
+                  تُحفظ المادة مع القطع في نفس الموقع دائماً، وعند اختيار (قين) توضع إشارة قين على بطاقتها
+                </span>
+              </div>
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => setUseGin(true)}
                   className={`px-3 py-1.5 rounded-lg font-black text-[11px] transition-all cursor-pointer border ${
                     useGin
-                      ? 'bg-emerald-600 text-white border-emerald-300 shadow-md'
-                      : 'bg-[#2C1E18] text-emerald-300 border-emerald-800 hover:bg-emerald-950'
+                      ? 'bg-purple-600 text-white border-purple-300 shadow-md'
+                      : 'bg-[#2C1E18] text-purple-200 border-purple-800 hover:bg-purple-950'
                   }`}
                 >
-                  ✓ وضع (قين) — تضاف لقائمة قين
+                  🔖 وضع إشارة (قين)
                 </button>
                 <button
                   type="button"
@@ -216,8 +225,8 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                   type="text"
                   value={ginCode}
                   onChange={(e) => setGinCode(e.target.value)}
-                  placeholder="اكتب رقم أو بيان قين (اختياري — إن تركته فارغاً تُسجل باسم قين في القائمة)"
-                  className="w-full px-3 py-2 rounded-xl bg-[#140D0A] border border-emerald-500/60 text-emerald-200 font-bold focus:outline-none focus:border-emerald-400"
+                  placeholder="بيان أو رقم قين (اختياري — اتركه فارغاً لتظهر إشارة 🔖 قين على بطاقة القطعة)"
+                  className="w-full px-3 py-2 rounded-xl bg-[#140D0A] border border-purple-500/60 text-purple-200 font-bold focus:outline-none focus:border-purple-400"
                 />
               </div>
             )}

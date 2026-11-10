@@ -269,6 +269,7 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
               {visibleCategoryItems.map((item, idx) => {
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
                 const isMoved = item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول';
+                const isGin = Boolean(item.gin_code && item.gin_code.trim());
 
                 return (
                   <div
@@ -276,6 +277,8 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
                     className={`rounded-xl p-3.5 border transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs ${
                       isMissing
                         ? 'bg-red-950/25 border-red-700/60 hover:border-red-500'
+                        : isGin
+                        ? 'bg-purple-950/25 border-purple-500/70 hover:border-purple-400'
                         : 'bg-[#231713] border-[#432d24] hover:border-amber-500/50'
                     }`}
                   >
@@ -285,6 +288,11 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
                         <h4 className="font-bold text-white text-sm">
                           {item.description_ar}
                         </h4>
+                        {isGin && (
+                          <span className="px-2.5 py-0.5 rounded-md bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 font-black text-xs inline-flex items-center gap-1">
+                            🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}
+                          </span>
+                        )}
                         {isMissing && (
                           <span className="px-2 py-0.5 rounded-md bg-red-950 text-red-200 border border-red-500 font-black text-[11px] inline-flex items-center gap-1">
                             <XCircle className="w-3.5 h-3.5 text-red-400" />

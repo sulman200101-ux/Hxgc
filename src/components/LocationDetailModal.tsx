@@ -26,6 +26,7 @@ interface LocationDetailModalProps {
   onAddNewItemForLocation: (locationCode: string) => void;
   onMarkItemStatus: (partNumber: string, status: InventoryItem['status']) => void;
   onOpenRelocate: (item: InventoryItem) => void;
+  onToggleGin?: (partNumber: string, currentGin?: string) => void;
   onExportPdf?: (locationCode: string) => void;
 }
 
@@ -40,6 +41,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
   onAddNewItemForLocation,
   onMarkItemStatus,
   onOpenRelocate,
+  onToggleGin,
   onExportPdf,
 }) => {
   const [filterQuery, setFilterQuery] = useState('');
@@ -208,6 +210,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
                 const isVerified = !isMissing && item.status === 'مدقق';
                 const isMoved = item.is_moved === 1 || item.status === 'منقول' || item.status === 'تم النقل';
+                const isGin = Boolean(item.gin_code && item.gin_code.trim());
 
                 return (
                   <div
@@ -215,6 +218,8 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                     className={`rounded-xl p-3.5 border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
                       isMissing
                         ? 'bg-red-950/25 border-red-700/60 hover:border-red-500'
+                        : isGin
+                        ? 'bg-purple-950/25 border-purple-500/70 hover:border-purple-400'
                         : isVerified
                         ? 'bg-emerald-950/25 border-emerald-600/60 hover:border-emerald-400'
                         : 'bg-[#231713] border-[#432d24] hover:border-amber-500/40'
@@ -226,6 +231,11 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                         <h4 className="font-bold text-neutral-100 text-sm">
                           {item.description_ar}
                         </h4>
+                        {isGin && (
+                          <span className="px-2.5 py-0.5 rounded-md text-xs font-black bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 shadow-sm inline-flex items-center gap-1">
+                            <span>🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}</span>
+                          </span>
+                        )}
                         {isMissing && (
                           <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-red-950 text-red-200 border border-red-500 inline-flex items-center gap-1">
                             <XCircle className="w-3.5 h-3.5 text-red-400" />
@@ -319,6 +329,21 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                       >
                         {isMissing ? 'تغيير المشرف لموجودة ✓' : '× غير موجودة'}
                       </button>
+
+                      {onToggleGin && (
+                        <button
+                          type="button"
+                          onClick={() => onToggleGin(item.part_number, item.gin_code)}
+                          title="وضع أو إزالة إشارة (قين) على بطاقة القطعة"
+                          className={`px-2.5 py-1 rounded-lg text-xs font-black border transition-all cursor-pointer ${
+                            isGin
+                              ? 'bg-purple-700 hover:bg-purple-600 text-white border-purple-300 shadow-sm'
+                              : 'bg-purple-950/60 hover:bg-purple-800 text-purple-200 border-purple-700/60'
+                          }`}
+                        >
+                          {isGin ? '🔖 قين ✓' : '+ إشارة قين'}
+                        </button>
+                      )}
 
                       <button
                         onClick={() => onOpenRelocate(item)}

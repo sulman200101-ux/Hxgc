@@ -23,6 +23,7 @@ interface ItemsTableViewProps {
   onDeleteItem: (partNumber: string) => void;
   onMarkItemStatus: (partNumber: string, status: InventoryItem['status']) => void;
   onOpenRelocate: (item: InventoryItem) => void;
+  onToggleGin?: (partNumber: string, currentGin?: string) => void;
 }
 
 const PAGE_SIZE = 50;
@@ -33,6 +34,7 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
   onDeleteItem,
   onMarkItemStatus,
   onOpenRelocate,
+  onToggleGin,
 }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
@@ -146,6 +148,7 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
               const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
               const isVerified = !isMissing && item.status === 'مدقق';
               const isMoved = item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول';
+              const isGin = Boolean(item.gin_code && item.gin_code.trim());
 
               return (
                 <tr
@@ -153,13 +156,20 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                   className={`transition-colors ${
                     isMissing
                       ? 'bg-red-950/25 hover:bg-red-950/40'
+                      : isGin
+                      ? 'bg-purple-950/25 hover:bg-purple-950/40'
                       : isVerified
                       ? 'bg-emerald-950/20 hover:bg-emerald-950/35'
                       : 'hover:bg-[#34241D]'
                   }`}
                 >
                   <td className="py-3 px-4 font-mono font-bold text-amber-300">
-                    {item.part_number}
+                    <div>{item.part_number}</div>
+                    {isGin && (
+                      <span className="mt-1 px-2 py-0.5 rounded-md text-[10px] font-black bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 inline-block">
+                        🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}
+                      </span>
+                    )}
                   </td>
                   <td className="py-3 px-4 font-mono font-bold text-neutral-200">
                     <span className="flex items-center gap-1">
@@ -258,6 +268,20 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                       >
                         {isMissing ? 'تغيير المشرف ✓' : '× غير موجودة'}
                       </button>
+                      {onToggleGin && (
+                        <button
+                          type="button"
+                          onClick={() => onToggleGin(item.part_number, item.gin_code)}
+                          className={`px-2 py-1 rounded text-[11px] font-black border cursor-pointer transition-all ${
+                            isGin
+                              ? 'bg-purple-700 hover:bg-purple-600 text-white border-purple-300'
+                              : 'bg-purple-950/60 hover:bg-purple-800 text-purple-200 border-purple-700/60'
+                          }`}
+                          title="وضع أو إزالة إشارة (قين)"
+                        >
+                          {isGin ? '🔖 قين ✓' : '+ قين'}
+                        </button>
+                      )}
                       <button
                         onClick={() => onOpenRelocate(item)}
                         className="px-2 py-1 rounded bg-emerald-900/60 hover:bg-emerald-800 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all"

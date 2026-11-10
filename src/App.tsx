@@ -198,13 +198,11 @@ export default function App() {
     status: InventoryItem['status'];
     gin_code?: string;
   }) => {
-    const existing = dbService.getItemByPartNumber(data.part_number);
     const targetLocation = data.location_code.trim().toUpperCase();
-    const initialLocation = existing ? existing.location_code : targetLocation;
 
     await dbService.insertOrUpdateItem(
       data.part_number,
-      initialLocation,
+      targetLocation,
       data.description_en,
       data.qty_total,
       data.qty_out,
@@ -215,18 +213,23 @@ export default function App() {
       data.gin_code
     );
 
-    if (existing && existing.location_code !== targetLocation) {
-      await dbService.relocateItem(data.part_number, targetLocation);
-      refreshData();
-      showNotification(`تم نقل القطعة ${data.part_number} إلى موقعها الجديد ${targetLocation} بنجاح 🟢`, 'success');
-      return;
-    }
-
     refreshData();
     if (data.gin_code && data.gin_code.trim()) {
-      showNotification(`تم حفظ القطعة ${data.part_number} وإضافتها إلى قائمة (قين) للإرسال عبر الواتساب 💬`, 'success');
+      showNotification(`تم حفظ القطعة ${data.part_number} مع القطع في الموقع ${targetLocation} مع وضع إشارة (🔖 قين) في بطاقتها`, 'success');
     } else {
-      showNotification(`تم حفظ القطعة ${data.part_number} في موقع ${targetLocation} بنجاح`, 'success');
+      showNotification(`تم حفظ القطعة ${data.part_number} مع القطع في موقع ${targetLocation} بنجاح`, 'success');
+    }
+  };
+
+  const handleToggleGin = async (partNumber: string, currentGin?: string) => {
+    const isCurrentlyGin = Boolean(currentGin && currentGin.trim());
+    const nextGin = isCurrentlyGin ? null : 'قين';
+    await dbService.setItemGinCode(partNumber, nextGin);
+    refreshData();
+    if (nextGin) {
+      showNotification(`تم وضع إشارة (🔖 قين) في بطاقة القطعة (${partNumber}) مع بقائها في موقعها`, 'success');
+    } else {
+      showNotification(`تمت إزالة إشارة (قين) عن بطاقة القطعة (${partNumber})`, 'info');
     }
   };
 
@@ -464,12 +467,15 @@ export default function App() {
                         item.status === 'مفقود';
                       const isVerified =
                         !isMissing && (item.status === 'مدقق' || item.status === 'موجود');
+                      const isGin = Boolean(item.gin_code && item.gin_code.trim());
                       return (
                         <div
                           key={`${item.part_number}-${idx}`}
                           className={`p-3 rounded-xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
                             isMissing
                               ? 'bg-red-950/25 border-red-700/60 hover:border-red-500'
+                              : isGin
+                              ? 'bg-purple-950/25 border-purple-500/70 hover:border-purple-400'
                               : isVerified
                               ? 'bg-emerald-950/20 border-emerald-700/60 hover:border-emerald-500'
                               : 'bg-[#231713] border-[#432d24] hover:border-amber-500/50'
@@ -480,6 +486,11 @@ export default function App() {
                               <span className="font-mono font-bold text-amber-300 bg-[#19110D] px-2 py-0.5 rounded border border-[#3D271F]">
                                 رقم: {item.part_number}
                               </span>
+                              {isGin && (
+                                <span className="px-2.5 py-0.5 rounded-md bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 font-black text-[11px] shadow-sm inline-flex items-center gap-1">
+                                  <span>🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}</span>
+                                </span>
+                              )}
                               <span className="font-bold text-neutral-100 text-sm">
                                 {item.description_ar}
                               </span>
@@ -518,6 +529,17 @@ export default function App() {
                           </div>
 
                           <div className="flex items-center gap-2 justify-end shrink-0 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleGin(item.part_number, item.gin_code)}
+                              className={`px-2.5 py-1.5 rounded-lg font-black border cursor-pointer transition-all ${
+                                isGin
+                                  ? 'bg-purple-700 hover:bg-purple-600 text-white border-purple-300'
+                                  : 'bg-purple-950/60 hover:bg-purple-800 text-purple-200 border-purple-700/60'
+                              }`}
+                            >
+                              {isGin ? '🔖 قين ✓' : '+ إشارة قين'}
+                            </button>
                             <button
                               type="button"
                               onClick={() =>
@@ -614,6 +636,7 @@ export default function App() {
                           onRenameLocation={(code) => setRenameLocationCode(code)}
                           onMarkItemStatus={handleMarkItemStatus}
                           onOpenRelocate={handleOpenRelocate}
+                          onToggleGin={handleToggleGin}
                         />
                       );
                     })}
@@ -658,6 +681,7 @@ export default function App() {
                 onDeleteItem={handleDeleteItem}
                 onMarkItemStatus={handleMarkItemStatus}
                 onOpenRelocate={handleOpenRelocate}
+                onToggleGin={handleToggleGin}
               />
             )}
 
@@ -705,13 +729,12 @@ export default function App() {
         }}
         onDeleteItem={handleDeleteItem}
         onAddNewItemForLocation={(code) => {
-          const random7 = Math.floor(1000000 + Math.random() * 8999999);
           setEditingItem({
-            part_number: `100${random7}`,
+            part_number: '',
             location_code: code,
             description_en: '',
             description_ar: '',
-            category: '',
+            category: 'قطع ميكانيكية متنوعة',
             qty_total: 1,
             qty_out: 0,
             qty_remaining: 1,
@@ -723,6 +746,7 @@ export default function App() {
         }}
         onMarkItemStatus={handleMarkItemStatus}
         onOpenRelocate={handleOpenRelocate}
+        onToggleGin={handleToggleGin}
       />
 
       {/* OCR Modal (Gemini Vision Camera & Album) */}

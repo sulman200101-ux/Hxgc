@@ -29,6 +29,7 @@ interface LocationCardProps {
   onRenameLocation: (oldCode: string) => void;
   onMarkItemStatus: (partNumber: string, status: InventoryItem['status']) => void;
   onOpenRelocate?: (item: InventoryItem) => void;
+  onToggleGin?: (partNumber: string, currentGin?: string) => void;
 }
 
 export const LocationCard: React.FC<LocationCardProps> = ({
@@ -41,11 +42,13 @@ export const LocationCard: React.FC<LocationCardProps> = ({
   onRenameLocation,
   onMarkItemStatus,
   onOpenRelocate,
+  onToggleGin,
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const previewItems = items.slice(0, 25);
   const isHeavyD = isDLocation(summary.location_code);
   const isHeavyC = isCLocation(summary.location_code);
+  const ginCountInLocation = items.filter((i) => Boolean(i.gin_code && i.gin_code.trim())).length;
 
   return (
     <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] shadow-lg hover:border-amber-700/50 transition-all overflow-hidden mb-4">
@@ -96,6 +99,12 @@ export const LocationCard: React.FC<LocationCardProps> = ({
               <span className="px-2.5 py-1 rounded-lg bg-amber-950/80 text-amber-300 border border-amber-600/80 text-xs font-bold flex items-center gap-1">
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
                 <span>غير مدقق ({summary.unverified_count})</span>
+              </span>
+            )}
+
+            {ginCountInLocation > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-purple-950/90 text-purple-200 border border-purple-400 text-xs font-black flex items-center gap-1 shadow-sm">
+                <span>🔖 قين ({ginCountInLocation})</span>
               </span>
             )}
 
@@ -191,6 +200,7 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
                 const isVerified = !isMissing && item.status === 'مدقق';
                 const isMoved = item.is_moved === 1 || item.status === 'منقول' || item.status === 'تم النقل';
+                const isGin = Boolean(item.gin_code && item.gin_code.trim());
                 const sizeProf = estimatePartSizeProfile(item);
 
                 return (
@@ -199,6 +209,8 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                     className={`rounded-xl p-3 border transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 ${
                       isMissing
                         ? 'bg-red-950/20 border-red-800/60 hover:border-red-500'
+                        : isGin
+                        ? 'bg-purple-950/25 border-purple-500/70 hover:border-purple-400'
                         : isVerified
                         ? 'bg-emerald-950/20 border-emerald-600/60 hover:border-emerald-400'
                         : 'bg-[#2C1E18] border-[#432d24] hover:border-amber-500/40'
@@ -209,6 +221,11 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                         <span className="px-2 py-0.5 rounded-md bg-[#1F1511] text-amber-300 font-mono font-bold text-xs border border-[#4A342B]">
                           رقم: {item.part_number}
                         </span>
+                        {isGin && (
+                          <span className="px-2.5 py-0.5 rounded-md bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 text-xs font-black shadow-sm inline-flex items-center gap-1">
+                            <span>🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}</span>
+                          </span>
+                        )}
                         <span className="px-2 py-0.5 rounded-md bg-[#3A271F] text-neutral-300 text-xs font-medium">
                           {item.category}
                         </span>
@@ -310,6 +327,21 @@ export const LocationCard: React.FC<LocationCardProps> = ({
                       >
                         {isMissing ? 'تغيير المشرف لموجودة ✓' : 'علامة × غير موجودة'}
                       </button>
+
+                      {onToggleGin && (
+                        <button
+                          type="button"
+                          onClick={() => onToggleGin(item.part_number, item.gin_code)}
+                          title="وضع أو إزالة إشارة (قين) على بطاقة القطعة"
+                          className={`px-2.5 py-1 rounded-lg text-xs font-black border transition-all cursor-pointer ${
+                            isGin
+                              ? 'bg-purple-700 hover:bg-purple-600 text-white border-purple-300 shadow-sm'
+                              : 'bg-purple-950/60 hover:bg-purple-800 text-purple-200 border-purple-700/60'
+                          }`}
+                        >
+                          {isGin ? '🔖 قين ✓' : '+ إشارة قين'}
+                        </button>
+                      )}
 
                       {onOpenRelocate && (
                         <button
