@@ -1,27 +1,28 @@
 import React, { useRef, useState, useMemo, useEffect } from 'react';
 import { InventoryItem } from '../types';
 import { dbService } from '../services/db';
-import { generateReportPdfBlob, sharePdfFile } from '../utils/pdfExportUtil';
+import { sharePdfFile } from '../utils/pdfExportUtil';
 import { exportAndShareForEditing } from '../utils/csvExportUtil';
+import {
+  isConsumablePart,
+  isALocation,
+  isFLLocation,
+  estimatePartSizeProfile,
+} from '../services/transferSuggestions';
 import { 
   Printer, 
   X, 
   CheckCircle2, 
-  Building2, 
   Calendar, 
   FileText, 
-  UserCheck, 
-  ShieldCheck, 
   MessageCircle, 
   Mail, 
   Share2, 
   Loader2,
-  Filter,
   ArrowRightLeft,
   Layers,
   FileDown,
-  ExternalLink,
-  Download
+  RefreshCw,
 } from 'lucide-react';
 
 import type { StockDocument } from '../services/documents';
@@ -46,8 +47,8 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
   } | null>(null);
   const [isExporting, setIsExporting] = useState(false);
 
-  // خيار نطاق التقرير: القطع المنقولة أو كافة قطع الجرد
-  const [reportScope, setReportScope] = useState<'moved' | 'all'>('moved');
+  // خيار نطاق التقرير: القطع المنقولة أو القطع الاستهلاكية (A/FL) أو كافة قطع الجرد
+  const [reportScope, setReportScope] = useState<'moved' | 'consumables' | 'all'>('moved');
   const [savedReports, setSavedReports] = useState<StockDocument[]>([]);
   const [selectedReportId, setSelectedReportId] = useState<string>('ALL_MOVED');
   const [reportItems, setReportItems] = useState<InventoryItem[]>([]);
@@ -56,7 +57,6 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
     if (isOpen) {
       const reports = dbService.getTransferReports();
       setSavedReports(reports);
-      // إذا تم تمرير قطع منقولة للتو، نختار أحدث تقرير نقل محفوظ (مثل تقرير 1 أو تقرير 2)
       if (propMovedItems && propMovedItems.length > 0 && reports.length > 0) {
         setSelectedReportId(reports[reports.length - 1].id);
         setReportScope('moved');
@@ -76,64 +76,70 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
       return;
     }
 
+    let baseMoved: InventoryItem[] = [];
+
     if (selectedReportId !== 'ALL_MOVED') {
       const targetDoc = savedReports.find((r) => r.id === selectedReportId);
       if (targetDoc) {
         if (targetDoc.transferredItemsSnapshot && targetDoc.transferredItemsSnapshot.length > 0) {
-          setReportItems(
-            targetDoc.transferredItemsSnapshot.map((s) => ({
-              part_number: s.part_number,
-              location_code: s.location_code,
-              old_location: s.old_location,
-              description_en: s.description_en,
-              description_ar: s.description_ar,
-              category: s.category,
-              qty_total: s.qty_total,
-              qty_out: s.qty_out,
-              qty_remaining: s.qty_remaining,
-              is_moved: 1,
-              is_missing: s.is_missing,
-              status: 'تم النقل',
-              moved_at: s.moved_at || targetDoc.executedAt || targetDoc.createdAt,
-              remark: s.remark || targetDoc.reason,
-            }))
-          );
-          return;
+          baseMoved = targetDoc.transferredItemsSnapshot.map((s) => ({
+            part_number: s.part_number,
+            location_code: s.location_code,
+            old_location: s.old_location,
+            description_en: s.description_en,
+            description_ar: s.description_ar,
+            category: s.category,
+            qty_total: s.qty_total,
+            qty_out: s.qty_out,
+            qty_remaining: s.qty_remaining,
+            is_moved: 1,
+            user_moved: 1,
+            is_missing: s.is_missing,
+            is_consumable: s.is_consumable,
+            status: 'منقول',
+            moved_at: s.moved_at || targetDoc.executedAt || targetDoc.createdAt,
+            remark: s.remark || targetDoc.reason,
+          }));
+        } else {
+          baseMoved = targetDoc.lines
+            .map((l): InventoryItem | null => {
+              const existing = dbService.getItemByPartNumber(l.part_number);
+              return existing
+                ? {
+                    ...existing,
+                    old_location: l.old_location || existing.old_location,
+                    location_code: l.location || existing.location_code,
+                    is_moved: 1,
+                    user_moved: 1,
+                    is_consumable: l.is_consumable ?? existing.is_consumable,
+                    status: 'منقول',
+                    moved_at: targetDoc.executedAt || targetDoc.createdAt,
+                  }
+                : null;
+            })
+            .filter((i): i is InventoryItem => Boolean(i));
         }
-        const docParts = targetDoc.lines
-          .map((l): InventoryItem | null => {
-            const existing = dbService.getItemByPartNumber(l.part_number);
-            return existing
-              ? {
-                  ...existing,
-                  old_location: l.old_location || existing.old_location,
-                  location_code: l.location || existing.location_code,
-                  is_moved: 1,
-                  status: 'تم النقل',
-                  moved_at: targetDoc.executedAt || targetDoc.createdAt,
-                }
-              : null;
-          })
-          .filter((i): i is InventoryItem => Boolean(i));
-        setReportItems(docParts);
-        return;
       }
+    } else if (propMovedItems && propMovedItems.length > 0) {
+      baseMoved = propMovedItems;
+    } else {
+      baseMoved = movedFromDb;
     }
 
-    // عرض القطع المنقولة فعلياً من قِبل المستخدم فقط (دون عرض كافة قطع المخزون إذا لم ينقل المستخدم شيئاً)
-    if (propMovedItems && propMovedItems.length > 0 && selectedReportId === 'ALL_MOVED') {
-      setReportItems(propMovedItems);
+    if (reportScope === 'consumables') {
+      const sourcePool = baseMoved.length > 0 ? baseMoved : allFromDb.filter((i) => isConsumablePart(i));
+      setReportItems(sourcePool.filter((i) => isConsumablePart(i)));
     } else {
-      setReportItems(movedFromDb);
+      setReportItems(baseMoved);
     }
   }, [isOpen, reportScope, selectedReportId, savedReports, propMovedItems]);
 
   const activeSavedReport = useMemo(
     () =>
-      reportScope === 'moved' && selectedReportId !== 'ALL_MOVED'
+      selectedReportId !== 'ALL_MOVED'
         ? savedReports.find((r) => r.id === selectedReportId) || null
         : null,
-    [reportScope, selectedReportId, savedReports]
+    [selectedReportId, savedReports]
   );
 
   const reportDateObj = useMemo(() => {
@@ -156,7 +162,6 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
     minute: '2-digit',
   });
 
-  // حساب الإجماليات بشكل ديناميكي
   const totalQty = useMemo(() => {
     return reportItems.reduce((acc, i) => acc + (Number(i.qty_total) || 0), 0);
   }, [reportItems]);
@@ -165,13 +170,18 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
     return reportItems.reduce((acc, i) => acc + (Number(i.qty_remaining) || 0), 0);
   }, [reportItems]);
 
+  const consumableInReportCount = useMemo(() => {
+    return reportItems.filter((i) => isConsumablePart(i)).length;
+  }, [reportItems]);
+
   const reportTitleLabel = useMemo(() => {
     if (reportScope === 'all') return 'بيان جرد الأصناف الشامل';
+    if (reportScope === 'consumables') return 'قائمة نقل القطع الاستهلاكية إلى حرف (A أو FL)';
     if (activeSavedReport?.reportTitle) return activeSavedReport.reportTitle;
     if (savedReports.length > 0) {
-      return `إجمالي عمليات النقل المحفوظة (${savedReports.length} تقارير)`;
+      return `إجمالي قوائم النقل اليومية المحفوظة (${savedReports.length} أيام)`;
     }
-    return 'بيان حركة القطع المنقولة من قِبل المستخدم';
+    return 'قائمة حركة القطع المنقولة من قِبل المستخدم';
   }, [reportScope, activeSavedReport, savedReports.length]);
 
   const reportId = useMemo(() => {
@@ -180,7 +190,7 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
       const year = d.getFullYear();
       const month = String(d.getMonth() + 1).padStart(2, '0');
       const day = String(d.getDate()).padStart(2, '0');
-      return `تقرير-${activeSavedReport.reportNumber}-${year}${month}${day}`;
+      return `قائمة-${activeSavedReport.reportNumber}-${year}${month}${day}`;
     }
     const d = new Date();
     const year = d.getFullYear();
@@ -191,7 +201,6 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
 
   if (!isOpen) return null;
 
-  // استخدام طباعة المتصفح المباشرة (الحل الأضمن والأعلى دقة لنصوص عربية فكتور نقية 100%)
   const handlePrint = () => {
     window.print();
   };
@@ -199,42 +208,56 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
   // 1. تصدير ومشاركة PDF عبر الواتساب 📲
   const handleShareWhatsApp = async () => {
     setIsExporting(true);
-    setActionFeedback({ message: 'جاري توليد ملف PDF وتجهيز المشاركة عبر واتساب... 📲' });
+    setActionFeedback({ message: 'جاري توليد ملف PDF وتجهيز الإرسال عبر واتساب... 📲' });
     try {
       const intro =
         `📋 *مرفق ${reportTitleLabel} [${reportId}]*\n\n` +
         `🏢 *ASMO - إدارة المستودعات (SAP Inventory Controller)*\n` +
         `📅 التاريخ: ${currentDate} • ${currentTime}\n` +
-        `📦 عدد الأصناف المنقولة في التقرير: ${reportItems.length} صنف\n` +
-        `🔢 إجمالي الكمية المنقولة: ${totalQty} وحدة\n\n` +
-        `*بيان حركة نقل القطع المعتمدة من قِبل المستخدم:*\n`;
+        `📦 عدد الأصناف في القائمة: ${reportItems.length} صنف\n` +
+        `🔄 القطع الاستهلاكية (إلى حرف A أو FL): ${consumableInReportCount} صنف\n` +
+        `🔢 إجمالي الكمية: ${totalQty} وحدة\n\n` +
+        `*قائمة النقل اليومية المعتمدة من قِبل المستخدم:*\n`;
 
       const rows = reportItems
-        .slice(0, 18)
+        .slice(0, 22)
         .map((item, idx) => {
+          const isCons = isConsumablePart(item);
+          const sz = estimatePartSizeProfile(item);
+          const shelfTag = isFLLocation(item.location_code)
+            ? 'حرف FL'
+            : isALocation(item.location_code)
+            ? 'حرف A'
+            : sz.consumableTargetType;
+          const consLabel = isCons ? ` | 🔄 *قطعة استهلاكية (${shelfTag})*` : '';
+          const isMoved = item.is_moved === 1 && (item.status === 'منقول' || item.status === 'تم النقل');
+          const statusStr = isMoved
+            ? 'منقول ✓'
+            : item.user_verified === 1 && item.status === 'مدقق'
+            ? 'مدقق ✓'
+            : 'غير مدقق';
           return (
-            `${idx + 1}) القطعة: *${item.part_number}*\n` +
+            `${idx + 1}) القطعة: *${item.part_number}*${consLabel}\n` +
             `   الوصف: ${item.description_ar || item.description_en}\n` +
-            `   الكمية: ${item.qty_total} | من الموقع: [${item.old_location || 'السابق'}] ⬅ إلى الموقع الجديد: *[${item.location_code}]*\n` +
-            `   الحالة: تم الاعتماد والنقل ✓`
+            `   الكمية: ${item.qty_total} | من: [${item.old_location || 'السابق'}] ⬅ إلى الموقع الجديد: *[${item.location_code}]*\n` +
+            `   الحالة: ${statusStr}`
           );
         })
         .join('\n\n');
 
       const extra =
-        reportItems.length > 18
-          ? `\n\n... بالإضافة إلى ${reportItems.length - 18} أصناف أخرى مدرجة في ملف الـ PDF المرفق.`
+        reportItems.length > 22
+          ? `\n\n... بالإضافة إلى ${reportItems.length - 22} أصناف أخرى مدرجة بالكامل في ملف الـ PDF المرفق.`
           : '';
 
-      const outro =
-        `\n\n✅ تم اعتماد خطة النقل وتحديث المواقع الفعلية في النظام.`;
+      const outro = `\n\n✅ تم حفظ القائمة في سجل النقل اليومي وتحديث المواقع الفعلية في النظام.`;
 
       const fullWhatsAppText = intro + rows + extra + outro;
       const directWaUrl = `https://wa.me/?text=${encodeURIComponent(fullWhatsAppText)}`;
 
       const res = await sharePdfFile({
         reportElementId: 'relocation-printable-report',
-        title: `تقرير نقل وتجميع القطع الميداني - ASMO [${reportId}]`,
+        title: `${reportTitleLabel} - ASMO [${reportId}]`,
         text: fullWhatsAppText,
         targetApp: 'whatsapp',
       });
@@ -258,34 +281,40 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
     setIsExporting(true);
     setActionFeedback({ message: 'جاري توليد ملف PDF وتجهيز الإيميل... ✉️' });
     try {
-      const subject = `تقرير نقل القطع الميداني - للاعتماد في النظام الشامل (ASMO) [${reportId}]`;
+      const subject = `${reportTitleLabel} - للاعتماد في النظام الشامل (ASMO) [${reportId}]`;
 
-      const intro = `السلام عليكم ورحمة الله وبركاته،\n\n` +
+      const intro =
+        `السلام عليكم ورحمة الله وبركاته،\n\n` +
         `سعادة المشرف العام / إدارة المستودعات المحترمين،\n\n` +
-        `مرفق طيه تقرير نقل القطع الميداني رقم [${reportId}] كملف PDF رسمي للاعتماد والرصد في النظام الشامل بشركة ASMO.\n\n` +
-        `بيانات التقرير الملخصة:\n` +
-        `- رقم التقرير: ${reportId}\n` +
+        `مرفق طيه تقرير وقائمة نقل القطع رقم [${reportId}] كملف PDF رسمي للاعتماد والرصد في النظام الشامل بشركة ASMO.\n\n` +
+        `بيانات القائمة الملخصة:\n` +
+        `- رقم القائمة: ${reportId}\n` +
         `- تاريخ ووقت الإصدار: ${currentDate} - ${currentTime}\n` +
-        `- إجمالي القطع: ${reportItems.length} صنف\n` +
+        `- إجمالي القطع: ${reportItems.length} صنف (منها ${consumableInReportCount} قطعة استهلاكية موجهة إلى حرف A أو FL)\n` +
         `- إجمالي الكميات: ${totalQty} وحدة\n\n` +
         `قائمة القطع المعتمدة:\n` +
         `----------------------------------------------------------------------\n`;
 
-      const rows = reportItems.map((item, idx) => {
-        return `${idx + 1}. رقم القطعة: ${item.part_number}\n` +
-               `   الوصف: ${item.description_ar || item.description_en}\n` +
-               `   الموقع القديم: ${item.old_location || '---'}\n` +
-               `   الموقع الجديد: ${item.location_code}\n` +
-               `   الكمية (QTY): ${item.qty_total}\n` +
-               `   وقت النقل: ${item.moved_at || currentDate}\n` +
-               `   حالة النقل: تم النقل`;
-      }).join('\n\n');
+      const rows = reportItems
+        .map((item, idx) => {
+          const isCons = isConsumablePart(item);
+          return (
+            `${idx + 1}. رقم القطعة: ${item.part_number}${isCons ? ' [قطعة استهلاكية — A/FL]' : ''}\n` +
+            `   الوصف: ${item.description_ar || item.description_en}\n` +
+            `   الموقع القديم: ${item.old_location || '---'}\n` +
+            `   الموقع الجديد: ${item.location_code}\n` +
+            `   الكمية (QTY): ${item.qty_total}\n` +
+            `   وقت النقل: ${item.moved_at || currentDate}\n` +
+            `   حالة النقل: ${item.is_moved === 1 ? 'منقول' : item.user_verified === 1 ? 'مدقق' : 'غير مدقق'}`
+          );
+        })
+        .join('\n\n');
 
-      const outro = `\n----------------------------------------------------------------------\n\n` +
+      const outro =
+        `\n----------------------------------------------------------------------\n\n` +
         `يرجى التكرم بمراجعة البيانات والملف المرفق وتأكيد اعتماد رصد المواقع على النظام الشامل.\n\n` +
         `وتقبلوا خالص التحية والتقدير،\n` +
-        `مسؤول جرد المستودعات - ASMO\n` +
-        `رابط المعاينة: ${window.location.origin}`;
+        `مسؤول جرد المستودعات - ASMO`;
 
       const res = await sharePdfFile({
         reportElementId: 'relocation-printable-report',
@@ -314,28 +343,30 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
         className="w-full max-w-5xl bg-[#20140F] border border-amber-900/40 rounded-3xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden"
         dir="rtl"
       >
-        {/* Top Controls Bar (Hidden during print) */}
         <div className="p-4 bg-[#2A1B14] border-b border-[#432A1F] flex flex-col md:flex-row items-center justify-between gap-3.5 no-print print:hidden">
-          {/* Right: Title & Count Badge */}
           <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-start">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-amber-600/20 border border-amber-600/40 flex items-center justify-center text-amber-400 shrink-0">
                 <FileText className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-                  تقرير الاعتماد (PDF Report)
+                <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2 flex-wrap">
+                  <span>قائمة النقل اليومية المحفوظة وتقرير PDF</span>
                   <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30 font-mono">
                     {reportItems.length} صنف
                   </span>
+                  {consumableInReportCount > 0 && (
+                    <span className="text-xs px-2.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-200 font-bold border border-cyan-500/40">
+                      🔄 استهلاكية (A/FL): {consumableInReportCount}
+                    </span>
+                  )}
                 </h2>
                 <p className="text-xs text-neutral-300">
-                  تصدير وطباعة تقرير رسمي نقي بدقة A4 للاعتماد والرصد في النظام الشامل
+                  تحفظ قائمة النقل تلقائياً لكل يوم يتم فيه النقل مع الإشارة للقطع الاستهلاكية الموجهة إلى الحرف (A) أو (FL)
                 </p>
               </div>
             </div>
 
-            {/* Mobile close button */}
             <button
               type="button"
               onClick={onClose}
@@ -345,9 +376,7 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
             </button>
           </div>
 
-          {/* Center & Actions: Direct Print/PDF + WhatsApp + Email + Close */}
           <div className="flex flex-wrap items-center justify-center gap-2 w-full md:w-auto">
-            {/* أزرار التبديل بين القطع المنقولة وكافة القطع */}
             <div className="flex items-center bg-[#1F1410] p-1 rounded-xl border border-[#432A1F]">
               <button
                 type="button"
@@ -363,6 +392,18 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
               </button>
               <button
                 type="button"
+                onClick={() => setReportScope('consumables')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  reportScope === 'consumables'
+                    ? 'bg-cyan-700 text-white shadow-sm'
+                    : 'text-neutral-400 hover:text-white'
+                }`}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>استهلاكية (A / FL)</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setReportScope('all')}
                 className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
                   reportScope === 'all'
@@ -375,18 +416,27 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
               </button>
             </div>
 
-            {/* 🌟 الزر الأساسي الأضمن والأعلى دقة: طباعة / حفظ كـ PDF نقي عبر المتصفح 🌟 */}
+            <button
+              type="button"
+              onClick={handleShareWhatsApp}
+              disabled={isExporting}
+              className="px-3.5 py-2 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-md transition-all cursor-pointer active:scale-95"
+              title="توليد وتصدير ملف PDF وإرساله مباشرة عبر تطبيق WhatsApp"
+            >
+              {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageCircle className="w-4 h-4" />}
+              <span>إرسال PDF عبر واتساب 📲</span>
+            </button>
+
             <button
               type="button"
               onClick={handlePrint}
-              className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-700 to-indigo-800 hover:from-blue-600 hover:to-indigo-700 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-blue-950/60 transition-all cursor-pointer border border-blue-400/40 active:scale-95"
-              title="طباعة أو حفظ مباشر كملف PDF نقي وفكتور عالي الجودة عبر المتصفح"
+              className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-blue-700 to-indigo-800 hover:from-blue-600 hover:to-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-blue-950/60 transition-all cursor-pointer border border-blue-400/40 active:scale-95"
+              title="طباعة أو حفظ مباشر كملف PDF نقي"
             >
               <Printer className="w-4 h-4 text-blue-200" />
-              <span>طباعة / حفظ كـ PDF نقي 🖨️</span>
+              <span>طباعة / حفظ PDF 🖨️</span>
             </button>
 
-            {/* زر تصدير ومشاركة Excel القابل للتعديل 📊 */}
             <button
               type="button"
               onClick={async () => {
@@ -399,38 +449,22 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
                 setIsExporting(false);
               }}
               disabled={isExporting}
-              className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-all cursor-pointer active:scale-95"
-              title="تصدير ومشاركة تقرير الجرد كملف Excel CSV قابل للتعديل"
+              className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-all cursor-pointer active:scale-95"
             >
               {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Share2 className="w-4 h-4" />}
-              <span>مشاركة Excel 📊</span>
+              <span>Excel 📊</span>
             </button>
 
-            {/* زر تصدير ومشاركة PDF عبر الواتساب 📲 */}
-            <button
-              type="button"
-              onClick={handleShareWhatsApp}
-              disabled={isExporting}
-              className="px-3 py-2 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-all cursor-pointer active:scale-95"
-              title="توليد وتصدير ملف PDF ومشاركته مباشرة عبر تطبيق WhatsApp"
-            >
-              {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageCircle className="w-4 h-4" />}
-              <span>واتساب 📲</span>
-            </button>
-
-            {/* زر تصدير وإرسال PDF عبر الإيميل ✉️ */}
             <button
               type="button"
               onClick={handleShareEmail}
               disabled={isExporting}
               className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-all cursor-pointer active:scale-95"
-              title="توليد وتصدير ملف PDF وتجهيز رسالة الإيميل للمشرف"
             >
               {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
               <span>إيميل ✉️</span>
             </button>
 
-            {/* إغلاق ✖️ */}
             <button
               type="button"
               onClick={onClose}
@@ -442,12 +476,12 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
           </div>
         </div>
 
-        {/* شريط اختيار تقارير عمليات النقل المحفوظة (تقرير 1 بتاريخ ...، تقرير 2 بتاريخ ...) */}
-        {reportScope === 'moved' && (
+        {/* شريط اختيار قوائم النقل اليومية المحفوظة (كل يوم يتم فيه النقل يحفظ تلقائياً) */}
+        {(reportScope === 'moved' || reportScope === 'consumables') && (
           <div className="px-4 py-2.5 bg-[#19110D] border-b border-[#432A1F] flex flex-wrap items-center gap-2 no-print print:hidden">
             <span className="text-xs font-black text-amber-300 flex items-center gap-1.5">
               <Calendar className="w-3.5 h-3.5 text-amber-400" />
-              <span>تقارير عمليات النقل المحفوظة ({savedReports.length}):</span>
+              <span>قوائم النقل اليومية المحفوظة ({savedReports.length} يوم):</span>
             </span>
 
             <button
@@ -464,12 +498,14 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
 
             {savedReports.length === 0 ? (
               <span className="text-[11px] text-neutral-400">
-                لا توجد عمليات نقل مسجلة بعد — عند قيامك بأي عملية نقل سيُحفظ هنا (تقرير 1 بتاريخ ...، تقرير 2 بتاريخ ...)
+                لا توجد عمليات نقل مسجلة بعد — عند قيامك بأي عملية نقل تُحفظ تلقائياً في قائمة نقل اليوم مع الإشارة للقطع الاستهلاكية (A أو FL)
               </span>
             ) : (
               savedReports.map((rep, idx) => {
-                const count = rep.transferredItemsSnapshot?.length || rep.lines.length;
-                const label = rep.reportTitle || `تقرير ${idx + 1}`;
+                const snaps = rep.transferredItemsSnapshot || [];
+                const count = snaps.length || rep.lines.length;
+                const consCount = snaps.filter((s) => s.is_consumable === 1).length;
+                const label = rep.reportTitle || `قائمة نقل #${idx + 1}`;
                 const isSelected = selectedReportId === rep.id;
                 return (
                   <button
@@ -484,7 +520,7 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
                   >
                     <span>{label}</span>
                     <span className="px-1.5 py-0.5 rounded bg-black/30 text-[10px] font-mono">
-                      {count} قطعة
+                      {count} قطعة{consCount > 0 ? ` (🔄 ${consCount} استهلاكية)` : ''}
                     </span>
                   </button>
                 );
@@ -493,7 +529,6 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
           </div>
         )}
 
-        {/* Action feedback banner with direct PDF download link & WhatsApp link */}
         {actionFeedback && (
           <div className="bg-[#1C2826] border-b border-emerald-600/40 px-4 py-2.5 text-xs font-bold text-emerald-200 flex flex-wrap items-center justify-between gap-2 no-print print:hidden animate-in fade-in">
             <div className="flex items-center gap-2">
@@ -515,7 +550,7 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
               {actionFeedback.downloadUrl && (
                 <a
                   href={actionFeedback.downloadUrl}
-                  download={actionFeedback.filename || 'تقرير-الاعتماد-ASMO.pdf'}
+                  download={actionFeedback.filename || 'قائمة-النقل-اليومية-ASMO.pdf'}
                   className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center gap-1 transition-colors shadow-sm"
                 >
                   <FileDown className="w-3.5 h-3.5" />
@@ -526,7 +561,6 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
           </div>
         )}
 
-        {/* Printable Document Body: Solid & Clean Full A4 Corporate PDF Template */}
         <div 
           className="pdf-template pdf-container p-6 md:p-8 overflow-y-auto flex-1 bg-white text-slate-900" 
           id="relocation-printable-report" 
@@ -549,7 +583,6 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
             boxSizing: 'border-box'
           }}
         >
-          {/* 1. Header (Corporate Palette: #1e3a8a / #0f172a) */}
           <div 
             className="report-header"
             style={{ 
@@ -564,7 +597,6 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
               unicodeBidi: 'embed'
             }}
           >
-            {/* الطرف الأيمن: الشعار + اسم ASMO + وصف التقرير */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '14px', direction: 'rtl', flex: '1' }}>
               <div style={{ 
                 width: '50px', 
@@ -604,12 +636,11 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
                   letterSpacing: '0px',
                   fontFamily: "'Cairo', sans-serif"
                 }}>
-                  تقرير حركة ونقل القطع الميداني
+                  قائمة النقل اليومية المحفوظة وتوجيه القطع الاستهلاكية إلى (A و FL)
                 </p>
               </div>
             </div>
 
-            {/* الطرف الأيسر: مربع البيانات العلوي (report-info-box) */}
             <div 
               className="report-info-box"
               style={{ 
@@ -632,7 +663,7 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
               }}
             >
               <div style={{ padding: '4px 8px', borderRadius: '4px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', lineHeight: 1.6 }}>
-                <strong style={{ color: '#0f172a' }}>رقم التقرير:</strong>
+                <strong style={{ color: '#0f172a' }}>رقم القائمة:</strong>
                 <span style={{ fontFamily: 'monospace', fontWeight: 'bold', color: '#1e3a8a' }}>{reportId}</span>
               </div>
               <div style={{ padding: '4px 8px', borderRadius: '4px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', lineHeight: 1.6 }}>
@@ -659,7 +690,6 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
             </div>
           </div>
 
-          {/* 2. Summary Cards (حد خارجي #e2e8f0 مع خلفية #f1f5f9 وأرقام بالكحلي #1e3a8a / #0f172a) */}
           <div style={{ 
             display: 'grid', 
             gridTemplateColumns: 'repeat(4, 1fr)', 
@@ -673,6 +703,10 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
               <strong style={{ fontSize: '18px', color: '#1e3a8a' }}>{reportItems.length} صنف</strong>
             </div>
             <div style={{ backgroundColor: '#f1f5f9', border: '1px solid #e2e8f0', padding: '12px 14px', borderRadius: '6px', textAlign: 'center' }}>
+              <span style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '4px', lineHeight: 1.4 }}>القطع الاستهلاكية (A / FL)</span>
+              <strong style={{ fontSize: '18px', color: '#0891b2' }}>{consumableInReportCount} صنف</strong>
+            </div>
+            <div style={{ backgroundColor: '#f1f5f9', border: '1px solid #e2e8f0', padding: '12px 14px', borderRadius: '6px', textAlign: 'center' }}>
               <span style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '4px', lineHeight: 1.4 }}>إجمالي الكمية (QTY)</span>
               <strong style={{ fontSize: '18px', color: '#1e3a8a' }}>{totalQty.toLocaleString()} وحدة</strong>
             </div>
@@ -680,36 +714,40 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
               <span style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '4px', lineHeight: 1.4 }}>الكمية المتبقية</span>
               <strong style={{ fontSize: '18px', color: '#0f172a' }}>{remainingQty.toLocaleString()} وحدة</strong>
             </div>
-            <div style={{ backgroundColor: '#f1f5f9', border: '1px solid #e2e8f0', padding: '12px 14px', borderRadius: '6px', textAlign: 'center' }}>
-              <span style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '4px', lineHeight: 1.4 }}>الجهة المصدرة</span>
-              <strong style={{ fontSize: '13px', color: '#1e3a8a' }}>إدارة المستودعات</strong>
-            </div>
           </div>
 
-          {/* 3. Official Clean Table with Zebra Striping and Corporate Header */}
           {reportItems.length === 0 ? (
             <div style={{ padding: '40px', textAlign: 'center', border: '1px dashed #cbd5e1', borderRadius: '8px', color: '#64748b', margin: '20px 0' }}>
               <p style={{ fontSize: '16px', fontWeight: 'bold', margin: '0 0 6px 0' }}>لا توجد قطع منقولة من قِبلك حتى الآن</p>
-              <p style={{ fontSize: '13px', margin: '0' }}>لا يتم تسجيل أي قطعة كمنقولة إلا عندما تقوم بنقلها بنفسك، وسيتم حفظ كل عملية نقل برقم وتاريخ مستقل (تقرير 1 بتاريخ ...، تقرير 2 بتاريخ ...).</p>
+              <p style={{ fontSize: '13px', margin: '0' }}>لا يتم تسجيل أي قطعة كمنقولة إلا عندما تقوم بنقلها بنفسك، وتُحفظ كل عملية نقل تلقائياً في قائمة النقل اليومية مع الإشارة للقطع الاستهلاكية المنقولة إلى حرف (A) أو (FL).</p>
             </div>
           ) : (
             <div style={{ width: '100%', overflowX: 'auto', marginBottom: '20px', flex: '1' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px', direction: 'rtl', unicodeBidi: 'embed' }}>
                 <thead>
                   <tr style={{ backgroundColor: '#1e3a8a', color: '#ffffff' }}>
-                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '38px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>#</th>
-                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', fontWeight: '700', textAlign: 'center', width: '150px', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>رقم القطعة (Part No)</th>
+                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '36px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>#</th>
+                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', fontWeight: '700', textAlign: 'center', width: '130px', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>رقم القطعة</th>
                     <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', fontWeight: '700', textAlign: 'right', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>اسم / وصف القطعة</th>
-                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '60px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>الكمية</th>
-                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '105px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>الموقع السابق</th>
-                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '105px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#172554' }}>الموقع الجديد</th>
-                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '105px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>وقت التحديث</th>
-                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '95px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>الحالة</th>
+                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', fontWeight: '700', textAlign: 'center', width: '115px', fontSize: '12px', color: '#ffffff', backgroundColor: '#0e7490' }}>إشارة الاستهلاكية</th>
+                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '55px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>الكمية</th>
+                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '95px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>الموقع السابق</th>
+                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '100px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#172554' }}>الموقع الجديد (A/FL)</th>
+                    <th style={{ padding: '8px 10px', border: '1px solid #1e3a8a', textAlign: 'center', width: '90px', fontWeight: '700', fontSize: '12px', color: '#ffffff', backgroundColor: '#1e3a8a' }}>الحالة</th>
                   </tr>
                 </thead>
                 <tbody>
                   {reportItems.map((item, idx) => {
-                    const isMoved = item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول';
+                    const isMoved =
+                      item.is_moved === 1 && (item.status === 'تم النقل' || item.status === 'منقول');
+                    const isVerified = item.user_verified === 1 && item.status === 'مدقق';
+                    const isCons = isConsumablePart(item);
+                    const sz = estimatePartSizeProfile(item);
+                    const targetShelfCode = isFLLocation(item.location_code)
+                      ? 'FL'
+                      : isALocation(item.location_code)
+                      ? 'A'
+                      : sz.consumableTargetType;
                     const rowBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
 
                     return (
@@ -724,6 +762,15 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
                           <div style={{ fontWeight: '700', color: '#0f172a', lineHeight: 1.4 }}>{item.description_ar || item.description_en}</div>
                           <div style={{ fontSize: '10px', color: '#64748b', fontFamily: 'monospace', marginTop: '2px' }} dir="ltr">{item.description_en}</div>
                         </td>
+                        <td style={{ padding: '8px 10px', textAlign: 'center', border: '1px solid #cbd5e1', fontSize: '11px' }}>
+                          {isCons ? (
+                            <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: '700', backgroundColor: '#ecfeff', color: '#0e7490', border: '1px solid #a5f3fc' }}>
+                              🔄 استهلاكية (حرف {targetShelfCode})
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: '10px', color: '#64748b' }}>اعتيادية</span>
+                          )}
+                        </td>
                         <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 'bold', color: '#0f172a', border: '1px solid #cbd5e1', fontSize: '11px' }}>
                           {item.qty_total}
                         </td>
@@ -733,17 +780,18 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
                         <td style={{ padding: '8px 10px', textAlign: 'center', fontFamily: 'monospace', fontWeight: 'bold', color: '#1e3a8a', backgroundColor: '#eff6ff', border: '1px solid #cbd5e1', fontSize: '11px' }}>
                           {item.location_code}
                         </td>
-                        <td style={{ padding: '8px 10px', textAlign: 'center', fontSize: '10px', color: '#64748b', border: '1px solid #cbd5e1' }}>
-                          {item.moved_at || currentDate}
-                        </td>
                         <td style={{ padding: '8px 10px', textAlign: 'center', border: '1px solid #cbd5e1', fontSize: '11px' }}>
                           {isMoved ? (
                             <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: '600', backgroundColor: '#eff6ff', color: '#1e3a8a', border: '1px solid #bfdbfe' }}>
-                              تم النقل
+                              منقول
+                            </span>
+                          ) : isVerified ? (
+                            <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: '600', backgroundColor: '#ecfdf5', color: '#047857', border: '1px solid #a7f3d0' }}>
+                              مدقق ✓
                             </span>
                           ) : (
                             <span style={{ display: 'inline-block', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: '500', backgroundColor: '#ffffff', color: '#64748b', border: '1px solid #cbd5e1' }}>
-                              {item.status || 'مضاف'}
+                              غير مدقق
                             </span>
                           )}
                         </td>
@@ -755,14 +803,12 @@ export const RelocationReportModal: React.FC<RelocationReportModalProps> = ({
             </div>
           )}
 
-          {/* Footer */}
           <div style={{ marginTop: 'auto', paddingTop: '16px', borderTop: '1px solid #cbd5e1', textAlign: 'center', fontSize: '11px', color: '#64748b', lineHeight: 1.5 }}>
-            تم إصدار هذا المستند رسمياً عبر نظام إدارة قطع الغيار ASMO
+            تم إصدار هذا المستند رسمياً عبر نظام إدارة قطع الغيار ASMO — قائمة النقل اليومية المحفوظة
           </div>
         </div>
       </div>
 
-      {/* Strict CSS for A4 PDF Print Template */}
       <style>{`
         @media print {
           @page {
