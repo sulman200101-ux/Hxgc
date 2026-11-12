@@ -21,11 +21,25 @@ export function charToDigitMapper(raw: string | number | null | undefined, defau
     return isNaN(raw) ? defaultValue : Math.max(0, Math.floor(raw));
   }
 
-  const str = String(raw).trim();
-  if (!/^\d+$/.test(str)) return defaultValue;
+  const str = String(raw)
+    .normalize('NFKC')
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .trim();
+  const numMatch = str.match(/\d+/);
+  if (!numMatch) return defaultValue;
 
-  const parsed = parseInt(str, 10);
+  const parsed = parseInt(numMatch[0], 10);
   return isNaN(parsed) ? defaultValue : Math.max(0, parsed);
+}
+
+function mapOcrLookalikeDigits(token: string): string {
+  return token
+    .replace(/[OoQq]/g, '0')
+    .replace(/[Il|!]/g, '1')
+    .replace(/[Zz]/g, '2')
+    .replace(/[Ss$]/g, '5')
+    .replace(/[Gg]/g, '6')
+    .replace(/[Bb]/g, '8');
 }
 
 export function normalizeSapMaterialPrefix(code10: string): string {
@@ -34,20 +48,38 @@ export function normalizeSapMaterialPrefix(code10: string): string {
 }
 
 export function strict10DigitRegexFilter(raw: string | null | undefined): string | null {
-  const value = String(raw ?? '').trim();
-  return /^\d{10}$/.test(value) ? value : null;
+  if (raw === null || raw === undefined) return null;
+  const value = String(raw)
+    .normalize('NFKC')
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .trim();
+  if (!value) return null;
+  if (/^\d{10}$/.test(value)) return value;
+
+  // إزالة المسافات أو الشرطات الداخلية بين أرقام القطعة الواحدة (مثل 1000 123456)
+  const compact = value.replace(/[\s\-_.]/g, '');
+  if (/^\d{10}$/.test(compact)) return compact;
+
+  // تصحيح الحروف المتشابهة بصرياً مع الأرقام إذا كان الطول 10 خانات وأغلبها أرقام
+  if (compact.length === 10) {
+    const digitCount = (compact.match(/\d/g) || []).length;
+    if (digitCount >= 8) {
+      const mapped = mapOcrLookalikeDigits(compact);
+      if (/^\d{10}$/.test(mapped)) return mapped;
+    }
+  }
+
+  const exactMatch = value.match(/\b(\d{10})\b/);
+  if (exactMatch) return exactMatch[1];
+
+  return null;
 }
 
 /**
- * قبول رقم القطعة فقط إذا كان مقروءاً بوضوح من 10 أرقام دقيقة بدون أي تخمين أو استنتاج.
- * إذا كان غير مقروء يُرجع null ليُترك الحقل فارغاً.
+ * قبول رقم القطعة بدقة (10 أرقام قياسية لـ SAP مع معالجة أخطاء القراءة البصرية للحروف المتشابهة).
  */
 export function repair10DigitMaterialCode(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const trimmed = String(raw).trim();
-  if (/^\d{10}$/.test(trimmed)) return trimmed;
-  const exactMatch = trimmed.match(/\b(\d{10})\b/);
-  return exactMatch ? exactMatch[1] : null;
+  return strict10DigitRegexFilter(raw);
 }
 
 const FORBIDDEN_LOCATIONS = new Set([
@@ -63,9 +95,6 @@ const FORBIDDEN_LOCATIONS = new Set([
   'UNDEFINED',
   '002',
   '001',
-  'C006',
-  'M016',
-  'D04D',
   'EA',
   'SET',
   'PK',
@@ -78,6 +107,18 @@ const FORBIDDEN_LOCATIONS = new Set([
   'PAA',
   'ZYD',
   'KIT',
+  'PCS',
+  'ROL',
+  'BOX',
+  'STORAGE',
+  'BIN',
+  'LOCATION',
+  'MATERIAL',
+  'DESCRIPTION',
+  'QTY',
+  'QUANTITY',
+  'UNIT',
+  'ITEM',
 ]);
 
 export function isValidSpecificLocation(loc: string | null | undefined): boolean {
@@ -85,21 +126,7 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
   const trimmed = String(loc).trim().toUpperCase();
   if (!trimmed) return false;
 
-  if (
-    trimmed === 'A' ||
-    /^A\d{1,3}$/.test(trimmed) ||
-    trimmed === 'FL' ||
-    /^FL\d{1,3}$/.test(trimmed) ||
-    trimmed === 'D' ||
-    /^D\d{1,3}$/.test(trimmed) ||
-    trimmed === 'C' ||
-    /^C\d{1,3}$/.test(trimmed) ||
-    trimmed === 'B' ||
-    /^B\d{1,3}$/.test(trimmed) ||
-    trimmed === 'BB' ||
-    /^BB\d{1,3}$/.test(trimmed)
-  ) {
-    if (trimmed === 'C006') return false;
+  if (trimmed === 'D' || /^D\d{1,3}$/.test(trimmed) || trimmed === 'FL' || /^FL\d{1,2}$/.test(trimmed)) {
     return true;
   }
 
@@ -107,21 +134,19 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
   if (FORBIDDEN_LOCATIONS.has(trimmed)) return false;
   if (trimmed.includes('عام') || trimmed.includes('غير محدد')) return false;
 
-  if (/^(?:M\d{1,2}|304L?|316L?|A105|B16|A234|SCH\d+|PN\d+|CL\d+)$/i.test(trimmed)) {
+  if (/^(?:304L?|316L?|A105|B16|A234|SCH\d+|PN\d+|CL\d+)$/i.test(trimmed)) {
     return false;
   }
 
-  if (/^[A-Z]\d{2}(?:FL|BB|[A-D])\d{0,2}$/.test(trimmed)) {
-    if (trimmed === 'D04D') return false;
+  if (/^[A-Z]\d{2}(?:FL|BB|[A-D])\d{1,2}$/.test(trimmed)) {
     return true;
   }
 
-  if (/^[A-Z]\d{2}[A-Z]{1,3}\d{0,2}$/.test(trimmed)) {
-    if (['C006', 'M016', 'D04D'].includes(trimmed)) return false;
+  if (/^[A-Z]\d{1,3}[A-Z]{1,3}\d{0,3}$/.test(trimmed)) {
     return true;
   }
 
-  if (/^[A-Z]\d{2}\s+[A-Z]{1,3}\d{0,2}$/.test(trimmed)) {
+  if (/^[A-Z]\d{1,3}\s+[A-Z]{1,3}\d{0,3}$/.test(trimmed)) {
     return true;
   }
 
@@ -129,7 +154,12 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
     return true;
   }
 
-  if (/^(?:FL|[A-D]|BB|C4)\d{1,2}$/.test(trimmed)) {
+  if (/^(?:FL|[A-Z]|BB|C4)\d{1,3}$/.test(trimmed)) {
+    return true;
+  }
+
+  // قبول أكواد المواقع المخزنية التي تجمع بين حروف وأرقام (مثل A-01 أو N11-A1)
+  if (/^[A-Z]{1,4}[-_]?[A-Z0-9]{1,8}(?:[-_][A-Z0-9]{1,4})?$/.test(trimmed) && /\d/.test(trimmed) && /[A-Z]/.test(trimmed)) {
     return true;
   }
 
@@ -137,34 +167,33 @@ export function isValidSpecificLocation(loc: string | null | undefined): boolean
 }
 
 /**
- * قراءة الموقع الفعلي فقط كما ظهر في السطر، وإذا لم يتمكن من قراءته يُترك فارغاً ("")
+ * قراءة الموقع الفعلي كما ظهر في السطر مع تطبيع المسافات والشرطات وأخطاء OCR الشائعة في أكواد أسمو (مثل N11A1)
  */
 export function dynamicLocationNormalizer(raw: string | null | undefined): string {
   if (!raw) return '';
-  const cleaned = String(raw)
+  let cleaned = String(raw)
+    .normalize('NFKC')
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
     .trim()
     .toUpperCase()
     .replace(/عام/g, '')
     .replace(/غير محدد/g, '')
     .replace(/\s+/g, '');
 
-  if (!cleaned) return '';
+  if (!cleaned || cleaned === 'NULL' || cleaned === 'UNDEFINED') return '';
 
-  if (
-    cleaned === 'A' ||
-    /^A\d{1,3}$/.test(cleaned) ||
-    cleaned === 'FL' ||
-    /^FL\d{1,3}$/.test(cleaned) ||
-    cleaned === 'D' ||
-    /^D\d{1,3}$/.test(cleaned) ||
-    cleaned === 'C' ||
-    /^C\d{1,3}$/.test(cleaned)
-  ) {
-    if (cleaned === 'C006') return '';
+  // إصلاح القراءة البصرية لأكواد الممرات مثل NII -> N11 أو NO7 -> N07
+  cleaned = cleaned.replace(/^N([IOl|]{2})(?=[A-Z])/i, (_, p1) => {
+    return 'N' + p1.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1');
+  });
+  cleaned = cleaned.replace(/^N([Oo])(\d)/i, 'N0$2').replace(/^N(\d)([Oo])/i, 'N$10');
+  cleaned = cleaned.replace(/^(N\d{2})[-_]+([A-Z]+\d*)$/, '$1$2');
+
+  if (cleaned === 'D' || /^D\d{1,3}$/.test(cleaned) || cleaned === 'FL' || /^FL\d{1,2}$/.test(cleaned)) {
     return cleaned;
   }
 
-  const stdSapBinMatch = cleaned.match(/\b(N\d{2}(?:FL|BB|[A-D])\d{0,2})\b/);
+  const stdSapBinMatch = cleaned.match(/\b([A-Z]\d{2}(?:FL|BB|[A-Z]{1,2})\d{1,2})\b/);
   if (stdSapBinMatch) {
     return stdSapBinMatch[1].toUpperCase();
   }

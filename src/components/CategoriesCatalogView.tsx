@@ -1,12 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { InventoryItem } from '../types';
 import { dbService } from '../services/db';
-import {
-  exportCategoryToPdfFile,
-  exportInventoryListToPdfFile,
-  buildInventoryWhatsAppSummary,
-} from '../utils/pdfExportUtil';
-import { estimatePartSizeProfile } from '../services/transferSuggestions';
+import { exportCategoryToPdfFile, exportInventoryListToPdfFile } from '../utils/pdfExportUtil';
 import {
   Package,
   ArrowRight,
@@ -21,7 +16,6 @@ import {
   ExternalLink,
   ArrowRightLeft,
   XCircle,
-  MessageCircle,
 } from 'lucide-react';
 
 interface CategoriesCatalogViewProps {
@@ -46,7 +40,6 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [searchFilter, setSearchFilter] = useState('');
   const [exportNotice, setExportNotice] = useState<string | null>(null);
-  const [lastWhatsappUrl, setLastWhatsappUrl] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState(50);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
 
@@ -74,38 +67,25 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
     return '📦';
   };
 
-  const handleExportPdf = async (targetCategory?: string, sendViaWhatsApp = true) => {
+  const handleExportPdf = async (targetCategory?: string) => {
     setIsExportingPdf(true);
     try {
       if (targetCategory) {
         const itemsToExport = dbService.getItemsByCategory(targetCategory);
-        const file = await exportCategoryToPdfFile({
+        await exportCategoryToPdfFile({
           categoryName: targetCategory,
           items: itemsToExport,
-          sendViaWhatsApp,
         });
-        const summary = buildInventoryWhatsAppSummary(
-          itemsToExport,
-          `تقرير تصنيف: ${targetCategory}`,
-          file.name
-        );
-        setLastWhatsappUrl(`https://wa.me/?text=${encodeURIComponent(summary)}`);
-        setExportNotice(
-          `تم تصدير ملف PDF لصنف (${targetCategory}) وتجهيز الإرسال عبر واتساب بنجاح! 📲`
-        );
+        setExportNotice(`تم تصدير ملف PDF لصنف (${targetCategory}) بنجاح! 📥`);
       } else {
         const itemsToExport = dbService.getAllItems();
-        const title = 'تقرير شامل لحركة ونقل أصناف أسمو (ASMO)';
-        const file = await exportInventoryListToPdfFile({
+        await exportInventoryListToPdfFile({
           items: itemsToExport,
-          title,
-          sendViaWhatsApp,
+          title: 'تقرير شامل لحركة ونقل أصناف أسمو (ASMO)',
         });
-        const summary = buildInventoryWhatsAppSummary(itemsToExport, title, file.name);
-        setLastWhatsappUrl(`https://wa.me/?text=${encodeURIComponent(summary)}`);
-        setExportNotice('تم تصدير ملف PDF الشامل وتجهيز الإرسال عبر واتساب بنجاح! 📲');
+        setExportNotice('تم تصدير ملف PDF الشامل بنجاح! 📥');
       }
-      setTimeout(() => setExportNotice(null), 6000);
+      setTimeout(() => setExportNotice(null), 4000);
     } catch (err) {
       console.error('PDF export error:', err);
       setExportNotice('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
@@ -121,19 +101,9 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
     <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] shadow-2xl overflow-hidden flex flex-col min-h-[650px] relative">
       {exportNotice && (
         <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 animate-bounce">
-          <div className="px-4 py-2.5 rounded-xl bg-emerald-950 text-emerald-200 border border-emerald-700 shadow-2xl text-xs font-bold flex items-center gap-3">
+          <div className="px-4 py-2.5 rounded-xl bg-emerald-950 text-emerald-200 border border-emerald-700 shadow-2xl text-xs font-bold flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
             <span>{exportNotice}</span>
-            {lastWhatsappUrl && (
-              <a
-                href={lastWhatsappUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-2.5 py-1 rounded-lg bg-[#25D366] text-white font-black"
-              >
-                فتح واتساب 📲
-              </a>
-            )}
           </div>
         </div>
       )}
@@ -156,20 +126,20 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
                 دليل الأصناف المنظم
               </h2>
               <p className="text-xs text-neutral-400">
-                تجميع ذكي لكافة القطع حسب نوعها ومواقعها الفعلية مع تمييز القطع الاستهلاكية (A / FL)
+                تجميع ذكي لكافة القطع حسب نوعها ومواقعها الفعلية
               </p>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5 w-full md:w-auto justify-end flex-wrap">
+        <div className="flex items-center gap-2.5 w-full md:w-auto justify-end">
           <button
-            onClick={() => handleExportPdf(undefined, true)}
+            onClick={() => handleExportPdf()}
             disabled={isExportingPdf}
-            className="px-3.5 py-2 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] text-white font-black text-xs flex items-center gap-1.5 shadow-lg shadow-emerald-950/50 border border-emerald-400/50 transition-all cursor-pointer shrink-0"
+            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-700 to-emerald-800 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-emerald-950/50 border border-emerald-600/50 transition-all cursor-pointer shrink-0"
           >
-            <MessageCircle className="w-4 h-4" />
-            <span>تصدير PDF وإرسال واتساب 📲</span>
+            <Printer className="w-4 h-4 text-emerald-300" />
+            <span>تصدير تقرير PDF</span>
           </button>
 
           <div className="relative flex-1 md:w-56">
@@ -217,7 +187,7 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
                         <span className="text-[11px] text-neutral-400">
                           {group.missing_count > 0
                             ? `منها ${group.missing_count} معلمة بـ (× غير موجودة)`
-                            : `إجمالي ${group.count} قطعة مسجلة`}
+                            : 'كافة القطع متوفرة ✓'}
                         </span>
                       </div>
                     </div>
@@ -259,7 +229,7 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
       {selectedCategory && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/85 backdrop-blur-sm">
           <div className="bg-[#2C1E18] border border-[#52382D] w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-4 bg-[#231713] border-b border-[#3D271F] flex flex-wrap items-center justify-between gap-2">
+            <div className="p-4 bg-[#231713] border-b border-[#3D271F] flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <span className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-xl">
                   {getCategoryIcon(selectedCategory)}
@@ -272,26 +242,18 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
                     </span>
                   </h3>
                   <p className="text-xs text-neutral-400">
-                    كافة مقاسات الصنف ومواقع التخزين وحالة التدقيق والنقل الفعلية
+                    كافة مقاسات الصنف ومواقع التخزين وحالة التوفر (✓ / ×)
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={() => handleExportPdf(selectedCategory, true)}
-                  className="px-3 py-1.5 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] text-white font-black text-xs flex items-center gap-1.5 shadow-md transition-all cursor-pointer"
-                >
-                  <MessageCircle className="w-3.5 h-3.5" />
-                  <span>PDF للصنف وإرسال واتساب 📲</span>
-                </button>
-
-                <button
-                  onClick={() => handleExportPdf(selectedCategory, false)}
+                  onClick={() => handleExportPdf(selectedCategory)}
                   className="px-3 py-1.5 rounded-xl bg-[#27AE60] hover:bg-[#219150] text-white font-bold text-xs flex items-center gap-1.5 shadow-md transition-all cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  <span>تنزيل PDF</span>
+                  <span>تصدير PDF للصنف</span>
                 </button>
 
                 <button
@@ -306,14 +268,8 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
             <div className="p-4 overflow-y-auto flex-1 space-y-3">
               {visibleCategoryItems.map((item, idx) => {
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
-                const isVerified = !isMissing && item.user_verified === 1 && item.status === 'مدقق';
-                const isMoved =
-                  !isMissing &&
-                  item.is_moved === 1 &&
-                  (item.status === 'تم النقل' || item.status === 'منقول');
+                const isMoved = item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول';
                 const isGin = Boolean(item.gin_code && item.gin_code.trim());
-                const sizeProf = estimatePartSizeProfile(item);
-                const isConsumable = sizeProf.isConsumable;
 
                 return (
                   <div
@@ -332,11 +288,6 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
                         <h4 className="font-bold text-white text-sm">
                           {item.description_ar}
                         </h4>
-                        {isConsumable && (
-                          <span className="px-2.5 py-0.5 rounded-md bg-cyan-950 text-cyan-200 border border-cyan-500/70 font-black text-[11px] inline-flex items-center gap-1">
-                            🔄 قطعة استهلاكية (تنقل إلى {sizeProf.consumableTargetType})
-                          </span>
-                        )}
                         {isGin && (
                           <span className="px-2.5 py-0.5 rounded-md bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 font-black text-xs inline-flex items-center gap-1">
                             🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}
@@ -362,18 +313,13 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
                         <span className="text-neutral-600">|</span>
                         {isMissing ? (
                           <span className="text-red-300 font-bold">× غير موجودة بالرف</span>
-                        ) : isVerified ? (
+                        ) : isMoved ? (
                           <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/60">
-                            ✓ مدقق
+                            تم النقل 🟢
                           </span>
                         ) : (
-                          <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-950/80 text-amber-300 border border-amber-600/70">
-                            غير مدقق
-                          </span>
-                        )}
-                        {isMoved && (
-                          <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/60">
-                            منقول 🟢{item.old_location ? ` (من ${item.old_location})` : ''}
+                          <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950/50 text-emerald-300 border border-emerald-700/50">
+                            ✓ موجودة
                           </span>
                         )}
                       </div>
@@ -399,7 +345,7 @@ export const CategoriesCatalogView: React.FC<CategoriesCatalogViewProps> = ({
                         className="px-2.5 py-1.5 rounded-lg bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-500/50 font-bold text-xs flex items-center gap-1 cursor-pointer transition-all shadow-sm active:scale-95"
                       >
                         <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>{isConsumable ? `نقل (${sizeProf.consumableTargetType}) 🟢` : 'نقل 🟢'}</span>
+                        <span>نقل 🟢</span>
                       </button>
 
                       <button

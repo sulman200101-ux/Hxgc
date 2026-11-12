@@ -7,10 +7,9 @@ import {
   buildSimilaritySwapPlans,
   buildHighValueConsolidationPlans,
   suggestHeavyItemsToLocationD,
-  suggestConsumableItemsToAOrFL,
   MAX_ITEMS_PER_SHELF,
 } from '../services/transferSuggestions';
-import { MessageCircle, ArrowRightLeft, ShieldCheck, RefreshCw } from 'lucide-react';
+import { MessageCircle, ArrowRightLeft, ShieldCheck } from 'lucide-react';
 
 export function TransferSuggestionsPanel({
   items,
@@ -54,10 +53,6 @@ export function TransferSuggestionsPanel({
     [documents]
   );
 
-  const consumableSuggestions = useMemo(
-    () => suggestConsumableItemsToAOrFL(items, pendingSet, 'AUTO'),
-    [items, pendingSet]
-  );
   const heavySuggestions = useMemo(
     () => suggestHeavyItemsToLocationD(items, pendingSet),
     [items, pendingSet]
@@ -84,10 +79,10 @@ export function TransferSuggestionsPanel({
         <header className="flex flex-wrap justify-between items-center gap-2 border-b border-stone-800 pb-3">
           <div>
             <h2 className="text-lg font-bold">
-              نقل القطع الاستهلاكية إلى (A و FL) + تجميع المتشابهات + توجيه الثقيلة إلى (D و C)
+              تجميع المتشابهات + فرز الأغلى سعراً + توجيه الثقيلة جداً إلى (D و C) — حد {MAX_ITEMS_PER_SHELF} صنف لكل رف
             </h2>
             <p className="text-xs text-neutral-400">
-              يتم الإشارة للقطع الاستهلاكية ونقلها إلى حرف (A) أو (FL) مع حفظ قائمة النقل تلقائياً لكل يوم يتم فيه النقل
+              تجميع المتشابهات حسب (الصنف + الحجم + الملم)، وتجميع القطع الأغلى سعراً في رف واحد، وتوجيه القطع الثقيلة جداً إلى الموقعين D و C بحد أقصى {MAX_ITEMS_PER_SHELF} صنفاً لكل رف
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -101,7 +96,7 @@ export function TransferSuggestionsPanel({
                 className="px-3 py-2 bg-[#25D366] hover:bg-[#1da851] text-white rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer"
               >
                 <MessageCircle className="w-4 h-4" />
-                <span>قائمة النقل اليومية PDF وواتساب 📲</span>
+                <span>تقرير PDF وواتساب 📲</span>
               </button>
             )}
             <button onClick={onClose} className="p-2 bg-stone-800 hover:bg-stone-700 rounded-xl text-xs font-bold cursor-pointer">
@@ -111,71 +106,8 @@ export function TransferSuggestionsPanel({
         </header>
 
         <p className="text-xs text-neutral-300">
-          لا تُسجل أي قطعة كـ (منقول) إلا إذا قمت بنقلها أو اعتماد نقلها بنفسك، وتُحفظ كل عملية في قائمة النقل اليومية.
+          اقتراحات حسب السعر والوزن والحجم (القطع الثقيلة جداً تنقل إلى الموقعين D و C، والأغلى سعراً تجمع في رف واحد بحد {MAX_ITEMS_PER_SHELF} صنف فقط لكل رف). لا تُدمج أرقام القطع ولا يتغير الموقع قبل اعتماد المشرف.
         </p>
-
-        {/* 0. بطاقة نقل القطع الاستهلاكية إلى حرف (A) أو (FL) */}
-        {ready && consumableSuggestions.length > 0 && (
-          <div className="p-3.5 rounded-xl bg-cyan-950/60 border border-cyan-500/70 flex flex-wrap items-center justify-between gap-3">
-            <div className="text-xs space-y-1">
-              <strong className="text-cyan-300 block text-sm flex items-center gap-1.5">
-                <RefreshCw className="w-4 h-4 text-cyan-400" />
-                <span>
-                  🔄 توجيه ونقل القطع الاستهلاكية إلى حرف (A) أو (FL) ({consumableSuggestions.length} قطعة استهلاكية)
-                </span>
-              </strong>
-              <p className="text-neutral-200">
-                يتم الإشارة إلى القطع الاستهلاكية ونقلها إلى مواقع الحرف (A) أو (FL) وحفظها في قائمة النقل اليومية.
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    const moved = await dbService.relocateAllConsumableItemsToAOrFL('A');
-                    await refresh();
-                    onRefresh();
-                    setLastMoved(moved);
-                    setMessage(`✅ تم نقل ${moved.length} قطعة استهلاكية إلى حرف (A) وحفظها في قائمة النقل اليومية!`);
-                  } catch (err) {
-                    setMessage((err as Error).message);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-                className="px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer"
-              >
-                <ShieldCheck className="w-4 h-4" />
-                <span>نقل الاستهلاكية إلى حرف (A)</span>
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    const moved = await dbService.relocateAllConsumableItemsToAOrFL('FL');
-                    await refresh();
-                    onRefresh();
-                    setLastMoved(moved);
-                    setMessage(`✅ تم نقل ${moved.length} قطعة استهلاكية إلى حرف (FL) وحفظها في قائمة النقل اليومية!`);
-                  } catch (err) {
-                    setMessage((err as Error).message);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-                className="px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer"
-              >
-                <ShieldCheck className="w-4 h-4" />
-                <span>نقل الاستهلاكية إلى حرف (FL)</span>
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* 1. بطاقة تجميع القطع الأغلى سعراً في رف واحد (بحد 15 صنفاً) */}
         {ready && highValuePlans.length > 0 && (
@@ -213,7 +145,7 @@ export function TransferSuggestionsPanel({
           </div>
         )}
 
-        {/* 2. بطاقة توجيه القطع الثقيلة جداً إلى الموقعين D و C */}
+        {/* 2. بطاقة توجيه القطع الثقيلة جداً إلى الموقعين D و C (بحد 15 صنفاً لكل رف) */}
         {ready && heavySuggestions.length > 0 && (
           <div className="p-3.5 rounded-xl bg-emerald-950/60 border border-emerald-500/60 flex flex-wrap items-center justify-between gap-3">
             <div className="text-xs space-y-1">
@@ -253,40 +185,6 @@ export function TransferSuggestionsPanel({
           {message}
         </p>
 
-        {/* عرض طلبات النقل المعلقة لاعتماد المشرف مباشرة داخل النافذة */}
-        {documents
-          .filter((doc) => doc.kind === 'transfer' && doc.status === 'pending')
-          .map((doc) => (
-            <div
-              key={doc.id}
-              className="p-3 rounded-xl bg-amber-950/50 border border-amber-500/60 flex flex-wrap items-center justify-between gap-2 text-xs"
-            >
-              <div>
-                <strong className="text-amber-300 font-mono">{doc.id}</strong> — {doc.reason}
-              </div>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await dbService.approveDocument(doc.id);
-                    await refresh();
-                    onRefresh();
-                    setMessage('تم اعتماد النقل وتحديث الموقع وتسجيل العملية');
-                  } catch (err) {
-                    setMessage((err as Error).message);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-black cursor-pointer"
-              >
-                اعتماد المشرف وتنفيذ النقل
-              </button>
-            </div>
-          ))}
-
         {ready && !suggestions.length && !swapPlans.length && (
           <p className="text-sm text-neutral-400">
             لا توجد اقتراحات مناسبة حاليًا داخل المنطقة نفسها، أو توجد طلبات نقل معلقة لهذه القطع.
@@ -303,8 +201,6 @@ export function TransferSuggestionsPanel({
                 className={`border p-3.5 rounded-xl space-y-2 ${
                   suggestion.isHeavyToD || suggestion.isHeavyToC
                     ? 'border-emerald-600/70 bg-emerald-950/30'
-                    : suggestion.isConsumable
-                    ? 'border-cyan-600/70 bg-cyan-950/30'
                     : 'border-amber-900 bg-stone-950/60'
                 }`}
               >
@@ -312,11 +208,6 @@ export function TransferSuggestionsPanel({
                   <strong>
                     {suggestion.partNumber} — الصنف: {suggestion.categoryAr} | الحجم: {suggestion.sizeCategory} | المقاس: {suggestion.mmLabel} | السعر: {suggestion.estimatedPriceSar.toLocaleString()} ر.س
                   </strong>
-                  {suggestion.isConsumable && (
-                    <span className="px-2 py-0.5 rounded bg-cyan-700 text-white text-[11px] font-black">
-                      🔄 قطعة استهلاكية ⬅ حرف {suggestion.consumableTargetType || 'A/FL'}
-                    </span>
-                  )}
                   {(suggestion.isHeavyToD || suggestion.isHeavyToC) && (
                     <span className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[11px] font-black">
                       قطعة ثقيلة جداً ⬅ موقع {suggestion.isHeavyToC ? 'C' : 'D'}
@@ -351,7 +242,6 @@ export function TransferSuggestionsPanel({
                             location: suggestion.to,
                             description_en: item.description_en,
                             description_ar: item.description_ar,
-                            is_consumable: suggestion.isConsumable ? 1 : 0,
                             check: '',
                             remark: '',
                             reviewed: true,
@@ -386,7 +276,7 @@ export function TransferSuggestionsPanel({
               >
                 <div className="flex flex-wrap justify-between items-center gap-2">
                   <strong className="text-amber-300 text-sm">
-                    {plan.familyAr} {plan.isConsumableFamily ? '🔄 (قطع استهلاكية ⬅ A / FL)' : ''} — الموقع الموحد: {plan.targetBin} (سعة {MAX_ITEMS_PER_SHELF} صنف/رف)
+                    {plan.familyAr} (الحجم: {plan.groupSizeCategory} | المقاس بالملم: {plan.groupMmSummary}) — الموقع الموحد: {plan.targetBin} (سعة {MAX_ITEMS_PER_SHELF} صنف/رف)
                   </strong>
                   <span className="text-neutral-400 font-mono">
                     مواقع متقاربة: {plan.adjacentBins.join('، ')}
@@ -423,7 +313,6 @@ export function TransferSuggestionsPanel({
                           location: ev.evictToBin,
                           description_en: ev.descriptionEn,
                           description_ar: ev.descriptionAr,
-                          is_consumable: ev.sizeProfile.isConsumable ? 1 : 0,
                           check: '',
                           remark: 'إخراج لإحلال المتشابهات (سقف 15 صنف للرف)',
                           reviewed: true,
@@ -434,7 +323,6 @@ export function TransferSuggestionsPanel({
                           location: c.toBin,
                           description_en: c.descriptionEn,
                           description_ar: c.descriptionAr,
-                          is_consumable: c.sizeProfile.isConsumable ? 1 : 0,
                           check: '',
                           remark: `تجميع عائلة ${plan.family} (سقف 15 صنف للرف)`,
                           reviewed: true,

@@ -1,14 +1,7 @@
 import React, { useState } from 'react';
 import { InventoryItem, LocationSummary } from '../types';
-import { exportLocationToPdfFile, buildInventoryWhatsAppSummary } from '../utils/pdfExportUtil';
-import {
-  isDLocation,
-  isCLocation,
-  isALocation,
-  isFLLocation,
-  MAX_ITEMS_PER_SHELF,
-  estimatePartSizeProfile,
-} from '../services/transferSuggestions';
+import { exportLocationToPdfFile } from '../utils/pdfExportUtil';
+import { isDLocation, isCLocation, MAX_ITEMS_PER_SHELF, estimatePartSizeProfile } from '../services/transferSuggestions';
 import {
   ArrowRight,
   Plus,
@@ -20,7 +13,6 @@ import {
   ArrowRightLeft,
   Loader2,
   XCircle,
-  MessageCircle,
 } from 'lucide-react';
 
 interface LocationDetailModalProps {
@@ -55,7 +47,6 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
   const [filterQuery, setFilterQuery] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(50);
   const [showExportSuccess, setShowExportSuccess] = useState(false);
-  const [lastWhatsappUrl, setLastWhatsappUrl] = useState<string | null>(null);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
 
   if (!isOpen || !locationCode) return null;
@@ -73,27 +64,20 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
 
   const visibleItems = filtered.slice(0, visibleLimit);
 
-  const handleExportPdf = async (sendViaWhatsApp = true) => {
+  const handleExportPdf = async () => {
     if (onExportPdf) {
       onExportPdf(locationCode);
     }
 
     setIsExportingPdf(true);
     try {
-      const file = await exportLocationToPdfFile({
+      await exportLocationToPdfFile({
         locationCode,
         items,
         summary,
-        sendViaWhatsApp,
       });
-      const summaryText = buildInventoryWhatsAppSummary(
-        items,
-        `تقرير موقع: ${locationCode}`,
-        file.name
-      );
-      setLastWhatsappUrl(`https://wa.me/?text=${encodeURIComponent(summaryText)}`);
       setShowExportSuccess(true);
-      setTimeout(() => setShowExportSuccess(false), 6000);
+      setTimeout(() => setShowExportSuccess(false), 4000);
     } catch (err) {
       console.error('PDF export error:', err);
       setShowExportSuccess(false);
@@ -126,8 +110,6 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                     ? 'bg-red-950/85 text-red-200 border-red-500/60'
                     : isCLocation(locationCode)
                     ? 'bg-orange-950/85 text-orange-200 border-orange-500/60'
-                    : isALocation(locationCode) || isFLLocation(locationCode)
-                    ? 'bg-cyan-950/85 text-cyan-200 border-cyan-500/60'
                     : 'bg-amber-950/80 text-amber-200 border-amber-600/50'
                 }`}
               >
@@ -135,30 +117,19 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                   ? `موقع أرضي ثقيل (D) • سعة ${items.length}/${MAX_ITEMS_PER_SHELF}`
                   : isCLocation(locationCode)
                   ? `موقع ثقيل مساند (C) • سعة ${items.length}/${MAX_ITEMS_PER_SHELF}`
-                  : isALocation(locationCode) || isFLLocation(locationCode)
-                  ? `🔄 موقع قطع استهلاكية (${isFLLocation(locationCode) ? 'FL' : 'A'}) • سعة ${items.length}/${MAX_ITEMS_PER_SHELF}`
                   : `رف قياسي • سعة ${items.length}/${MAX_ITEMS_PER_SHELF}`}
               </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => handleExportPdf(true)}
+              onClick={handleExportPdf}
               disabled={isExportingPdf}
-              className="px-3.5 py-1.5 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-lg shadow-emerald-950/40 transition-all cursor-pointer active:scale-95"
+              className="px-4 py-1.5 rounded-xl bg-[#27AE60] hover:bg-[#219653] disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-lg shadow-emerald-950/40 transition-all cursor-pointer active:scale-95"
             >
-              {isExportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageCircle className="w-4 h-4" />}
-              <span>تصدير PDF وإرسال واتساب 📲</span>
-            </button>
-
-            <button
-              onClick={() => handleExportPdf(false)}
-              disabled={isExportingPdf}
-              className="px-3 py-1.5 rounded-xl bg-[#27AE60] hover:bg-[#219653] disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-all cursor-pointer active:scale-95"
-            >
-              <FileDown className="w-4 h-4" />
-              <span>تنزيل PDF</span>
+              {isExportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+              <span>تصدير ملف PDF</span>
             </button>
 
             <button
@@ -172,19 +143,9 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
         </div>
 
         {showExportSuccess && (
-          <div className="bg-[#27AE60]/20 border-b border-[#27AE60]/40 p-2.5 px-4 text-xs font-bold text-emerald-300 flex flex-wrap items-center justify-between gap-2">
-            <span>تم إنشاء وتجهيز تقرير PDF للموقع {locationCode} للإرسال عبر واتساب بنجاح! 📲</span>
-            {lastWhatsappUrl && (
-              <a
-                href={lastWhatsappUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-3 py-1 rounded-lg bg-[#25D366] hover:bg-[#1da851] text-white font-black text-[11px] flex items-center gap-1"
-              >
-                <MessageCircle className="w-3.5 h-3.5" />
-                <span>فتح واتساب الآن 📲</span>
-              </a>
-            )}
+          <div className="bg-[#27AE60]/20 border-b border-[#27AE60]/40 p-2.5 px-4 text-xs font-bold text-emerald-300 flex items-center justify-between">
+            <span>تم إنشاء وتجهيز تقرير PDF للموقع {locationCode} بنجاح!</span>
+            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
           </div>
         )}
 
@@ -247,16 +208,9 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
             <>
               {visibleItems.map((item, idx) => {
                 const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
-                // لا تظهر مدقق إلا إذا دققها المستخدم بنفسه
-                const isVerified = !isMissing && item.user_verified === 1 && item.status === 'مدقق';
-                // لا تظهر منقول إلا إذا نقلها المستخدم بنفسه
-                const isMoved =
-                  !isMissing &&
-                  item.is_moved === 1 &&
-                  (item.status === 'منقول' || item.status === 'تم النقل');
+                const isVerified = !isMissing && item.status === 'مدقق';
+                const isMoved = item.is_moved === 1 || item.status === 'منقول' || item.status === 'تم النقل';
                 const isGin = Boolean(item.gin_code && item.gin_code.trim());
-                const sizeProf = estimatePartSizeProfile(item);
-                const isConsumable = sizeProf.isConsumable;
 
                 return (
                   <div
@@ -277,11 +231,6 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                         <h4 className="font-bold text-neutral-100 text-sm">
                           {item.description_ar}
                         </h4>
-                        {isConsumable && (
-                          <span className="px-2.5 py-0.5 rounded-md text-[11px] font-black bg-cyan-950 text-cyan-200 border border-cyan-500/70 shadow-sm inline-flex items-center gap-1">
-                            <span>🔄 قطعة استهلاكية (⬅ {sizeProf.consumableTargetType})</span>
-                          </span>
-                        )}
                         {isGin && (
                           <span className="px-2.5 py-0.5 rounded-md text-xs font-black bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 shadow-sm inline-flex items-center gap-1">
                             <span>🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}</span>
@@ -300,7 +249,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                           رقم القطعة: {item.part_number}
                         </span>
                         <span className="px-2 py-0.5 rounded bg-[#19110D] text-amber-200 border border-amber-700/40 font-bold">
-                          الحجم: {sizeProf.sizeCategory} ({sizeProf.dimensionsLabel})
+                          الحجم: {estimatePartSizeProfile(item).sizeCategory} ({estimatePartSizeProfile(item).dimensionsLabel})
                         </span>
                         <span className="text-neutral-500">|</span>
                         <span>
@@ -332,10 +281,10 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                             غير مدقق
                           </span>
                         )}
-                        {isMoved && (
+                        {isMoved && !isMissing && (
                           <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/60 inline-flex items-center gap-1 shadow-sm">
                             <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                            منقول 🟢{item.old_location ? ` (من ${item.old_location})` : ''}
+                            تم النقل 🟢
                           </span>
                         )}
                       </div>
@@ -354,7 +303,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                               isVerified ? 'غير مدقق' : 'مدقق'
                             )
                           }
-                          title="اضغط لتدقيق القطعة بنفسك وتحويلها إلى مدقق ✓"
+                          title="اضغط لتحويل القطعة إلى اللون الأخضر مدقق ✓"
                           className={`px-3 py-1 rounded-lg text-xs font-black border flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 ${
                             isVerified
                               ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-md shadow-emerald-950/60'
@@ -369,8 +318,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                         onClick={() =>
                           onMarkItemStatus(
                             item.part_number,
-                            // عند إلغاء علامة غير موجودة تعود إلى غير مدقق حتى يدققها المستخدم بنفسه
-                            isMissing ? 'غير مدقق' : 'غير موجودة'
+                            isMissing ? 'مدقق' : 'غير موجودة'
                           )
                         }
                         className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
@@ -379,7 +327,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                             : 'bg-red-950/60 text-red-200 border-red-700/60'
                         }`}
                       >
-                        {isMissing ? 'إلغاء علامة ×' : '× غير موجودة'}
+                        {isMissing ? 'تغيير المشرف لموجودة ✓' : '× غير موجودة'}
                       </button>
 
                       {onToggleGin && (
@@ -403,7 +351,7 @@ export const LocationDetailModal: React.FC<LocationDetailModalProps> = ({
                         className="px-2.5 py-1 rounded-lg bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200 border border-emerald-500/50 text-xs font-bold flex items-center gap-1 transition-all cursor-pointer shadow-sm active:scale-95"
                       >
                         <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>{isConsumable ? `نقل إلى ${sizeProf.consumableTargetType} 🟢` : 'نقل 🟢'}</span>
+                        <span>نقل 🟢</span>
                       </button>
 
                       <button

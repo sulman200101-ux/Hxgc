@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { createWorker } from 'tesseract.js';
 import { parseRawTextOcr, combineBestSheetExtractions } from './src/services/localOcr';
+import { strict10DigitRegexFilter, dynamicLocationNormalizer } from './src/utils/regexSanitizer';
 
 dotenv.config();
 
@@ -54,7 +55,6 @@ function getServerGeminiClient(customApiKey?: string): GoogleGenAI | null {
   if (cleanCustom) {
     return new GoogleGenAI({ apiKey: cleanCustom });
   }
-  if (geminiKeyInvalid) return null;
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey || apiKey === 'undefined' || apiKey === 'MY_GEMINI_API_KEY') {
     return null;
@@ -83,17 +83,27 @@ async function runGeminiVisionTableOcr(
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/i, '').trim();
     if (!cleanBase64) return null;
 
-    const candidateModels = ['gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-flash-latest'];
+    const candidateModels = [
+      'gemini-3-flash-preview',
+      'gemini-3.1-flash-lite-preview',
+      'gemini-flash-latest',
+    ];
     const strictPrompt = `
-    أنت محرك Gemini Vision الصناعي فائق الدقة المخصص لجرد مستودعات شركة أسمو (ASMO SAP Inventory Controller).
-    اقرأ جدول قطع الغيار من الصورة المرفقة بالكامل واستخرج جميع السطور المرئية بوضوح من أول سطر حتى آخر سطر.
+    أنت محرك OCR بصري فائق الدقة مخصص لقراءة جداول جرد مستودعات شركة أسمو (ASMO SAP Physical Inventory).
+    اقرأ جميع سطور جدول قطع الغيار من الصورة المرفقة من أول سطر في الأعلى حتى آخر سطر في الأسفل دون تخطي أي سطر (حتى 40+ سطراً في الورقة).
 
-    قواعد صارمة جداً لمنع الهلوسة:
-    1. يُمنع منعاً باتاً توليد أو تخمين أي أرقام قطع أو مواقع أو كميات أو أوصاف غير موجودة في الصورة.
-    2. رقم القطعة (part_number) يجب أن يُقرأ كما هو بدقة (10 أرقام)، وإذا لم تستطع قراءته اتركه فارغاً "" أو null.
-    3. رمز الموقع (location_code) هو عمود Storage Bin (مثل N11A1, N11FL2, N16D2, N07B1)؛ تجاهل رموز M016 و 002.
-    4. استخرج الوصف الإنجليزي الكامل (description) مع ترجمة عربية هندسية دقيقة (description_ar) شاملة المقاسات بالملم.
-    5. لا تجعل حقل status أبداً "مدقق" أو "تم النقل" أو "منقول" لأن التدقيق والنقل يتمان حصراً من قِبل المستخدم بنفسه؛ استخدم فقط "غير موجود" عند وجود علامة X، و"غير مدقق" لكافة السطور الأخرى.
+    قواعد استخراج الأعمدة بدقة 100%:
+    1. رقم القطعة (part_number): يتكون من 10 أرقام في عمود Material (يبدأ غالباً بـ 10 أو 20 أو 30 أو 40). اقرأ الأرقام الـ 10 بدقة تامة بدون مسافات.
+    2. كود الموقع المخزني (location_code): في عمود Storage Bin / Bin (مثل N11A1 أو N11FL1 أو N07BB2 أو N12C1 أو D1 أو A1). لا تخلط بينه وبين وحدة القياس (EA, SET, PK, PCS, KG).
+    3. الوصف الإنجليزي (description): في عمود Material Description، انسخه كاملاً كما هو في السطر مع المقاسات والأرقام الفنية.
+    4. الكمية (quantity): الرقم الصحيح المسجل في عمود الكمية (Qty / Count) بجوار وحدة القياس (مثل EA أو SET أو PCS).
+    5. العلامات اليدوية والملاحظات (mark_symbol و remark):
+       - إذا وجدت علامة صح (✓): اجعل mark_symbol = "✓" و remark = "" و audit_meaning = "القطع موجودة" و status = "مدقق".
+       - إذا وجدت علامة خطأ أو إكس (X أو ✗): اجعل mark_symbol = "X" و remark = "" و audit_meaning = "القطع غير موجودة" و status = "غير موجود".
+       - إذا وجدت حرف (F أو f مثل F أو F1): اجعل mark_symbol = "F" و remark = "F" و audit_meaning = "تم نقل العدد الزائد إلى مكان آخر" و status = "تم النقل".
+       - إذا وجدت علامة ناقص مع رقم (مثل -1 أو -2 أو -3 أو 4-1 أو حرف N): اجعل mark_symbol = "N" وضع قيمة النقص الفعلية في remark (مثل "-1" أو "-2") و audit_meaning = "ناقص العدد" و status = "ناقص العدد".
+       - إذا لم توجد أي علامة يدوية أمام السطر: اجعل mark_symbol = null و remark = "" و audit_meaning = null و status = "غير مدقق".
+    6. لا تخمن أي بيانات غير موجودة في الصورة، وأخرج جميع السطور المرئية بترتيبها الفعلي في الورقة.
   `;
 
     for (const modelName of candidateModels) {
@@ -117,7 +127,7 @@ async function runGeminiVisionTableOcr(
             temperature: 0.0,
             topK: 1,
             topP: 0.1,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.ARRAY,
@@ -133,33 +143,28 @@ async function runGeminiVisionTableOcr(
                   location_code: {
                     type: Type.STRING,
                     nullable: true,
-                    description: 'كود الموقع المخزني',
+                    description: 'كود الموقع المخزني (Storage Bin)',
                   },
                   description: {
                     type: Type.STRING,
                     nullable: true,
                     description: 'وصف القطعة بالإنجليزية كما في الجدول',
                   },
-                  description_ar: {
-                    type: Type.STRING,
-                    nullable: true,
-                    description: 'ترجمة عربية هندسية دقيقة للوصف مع المقاسات بالملم',
-                  },
                   quantity: {
                     type: Type.INTEGER,
                     nullable: true,
                     description: 'الكمية المسجلة في الجدول',
-                  },
-                  remark: {
-                    type: Type.STRING,
-                    nullable: true,
-                    description: 'ملاحظات النقص مثل -1 أو -4 أو F',
                   },
                   mark_symbol: {
                     type: Type.STRING,
                     nullable: true,
                     enum: ['✓', 'X', 'F', 'N'],
                     description: 'الرمز المرسوم أمام القطعة إن وجد',
+                  },
+                  remark: {
+                    type: Type.STRING,
+                    nullable: true,
+                    description: 'الملاحظة أو مقدار النقص مثل -1 أو -2 أو F إن وجد',
                   },
                   audit_meaning: {
                     type: Type.STRING,
@@ -174,8 +179,8 @@ async function runGeminiVisionTableOcr(
                   },
                   status: {
                     type: Type.STRING,
-                    enum: ['غير موجود', 'ناقص العدد', 'غير مدقق'],
-                    description: 'حالة الصنف الأولية (دائماً غير مدقق إلا إذا كانت معلمة بـ X غير موجود)',
+                    enum: ['مدقق', 'غير موجود', 'تم النقل', 'ناقص العدد', 'غير مدقق'],
+                    description: 'حالة الصنف النهائية',
                   },
                 },
                 required: [
@@ -184,6 +189,7 @@ async function runGeminiVisionTableOcr(
                   'description',
                   'quantity',
                   'mark_symbol',
+                  'remark',
                   'audit_meaning',
                   'status',
                 ],
@@ -217,23 +223,22 @@ async function runGeminiVisionTableOcr(
               sym === 'F'
                 ? 'F'
                 : sym === 'N'
-                ? row?.remark || '-1'
-                : row?.remark
-                ? String(row.remark)
+                ? row?.remark && String(row.remark).trim() !== '' && String(row.remark).trim() !== 'null'
+                  ? String(row.remark).trim()
+                  : '-1'
+                : row?.remark && String(row.remark).trim() !== 'null'
+                ? String(row.remark).trim()
                 : '';
 
             const rawPart = row?.part_number && row.part_number !== 'null' ? String(row.part_number).trim() : '';
-            const cleanPart = /^\d{10}$/.test(rawPart) ? rawPart : '';
-            const cleanLoc = row?.location_code && row.location_code !== 'null' ? String(row.location_code).trim() : '';
+            const cleanPart = strict10DigitRegexFilter(rawPart) || (/^\d{10}$/.test(rawPart) ? rawPart : '');
+            const rawLoc = row?.location_code && row.location_code !== 'null' ? String(row.location_code).trim() : '';
+            const cleanLoc = dynamicLocationNormalizer(rawLoc) || rawLoc.toUpperCase();
             const cleanDesc =
               row?.description && row.description !== 'null'
                 ? String(row.description).trim()
                 : row?.description_en && row.description_en !== 'null'
                 ? String(row.description_en).trim()
-                : '';
-            const cleanDescAr =
-              row?.description_ar && row.description_ar !== 'null'
-                ? String(row.description_ar).trim()
                 : '';
             const hasQty =
               row?.quantity !== null &&
@@ -247,12 +252,10 @@ async function runGeminiVisionTableOcr(
               location_code: cleanLoc,
               description_en: cleanDesc,
               description: cleanDesc,
-              description_ar: cleanDescAr,
               qty_total: cleanQty !== null && cleanQty > 0 ? cleanQty : 0,
               quantity: cleanQty,
               mark_symbol: sym,
               audit_meaning: row?.audit_meaning ?? null,
-              // قاعدة صارمة: عدم كتابة مدقق أو منقول تلقائياً من القراءة الضوئية
               status: isMissing ? 'غير موجودة' : 'غير مدقق',
               is_missing: isMissing,
               remark,
@@ -267,8 +270,7 @@ async function runGeminiVisionTableOcr(
         }
       } catch (modelErr: any) {
         const msg = String(modelErr?.message || '');
-        if (msg.includes('API key not valid') || msg.includes('UNAUTHENTICATED')) {
-          geminiKeyInvalid = true;
+        if (msg.includes('API key not valid') || msg.includes('API_KEY_INVALID')) {
           break;
         }
       }
@@ -480,13 +482,6 @@ async function runBestServerTableOcr(
     return geminiResult;
   }
 
-  if (preprocessedBase64) {
-    const geminiPreResult = await runGeminiVisionTableOcr(preprocessedBase64, customPrompt, customApiKey);
-    if (geminiPreResult?.success && Array.isArray(geminiPreResult.items) && geminiPreResult.items.length > 0) {
-      return geminiPreResult;
-    }
-  }
-
   const pyResult = await runPythonTableOcr(imageBase64);
   if (pyResult?.success && Array.isArray(pyResult.items) && pyResult.items.length > 0) {
     return pyResult;
@@ -628,11 +623,10 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
   }
 
   const statusModels = [
-    'gemini-2.5-flash-lite',
-    'gemini-2.5-flash',
     'gemini-3-flash-preview',
-    'gemini-flash-lite-latest',
+    'gemini-3.1-flash-lite-preview',
     'gemini-flash-latest',
+    'gemini-flash-lite-latest',
   ];
 
   for (const modelName of statusModels) {
@@ -640,6 +634,11 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
       const response = await ai.models.generateContent({
         model: modelName,
         contents: 'OK',
+        config: {
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.MINIMAL,
+          },
+        },
       });
       const reply = (response.text || '').trim();
       if (reply.length > 0) {
@@ -671,7 +670,7 @@ const handleGeminiStatusCheck = async (req: express.Request, res: express.Respon
     ok: true,
     geminiActive: false,
     localOcrActive: true,
-    model: 'gemini-2.5-flash-lite',
+    model: 'gemini-3-flash-preview',
     latencyMs: Date.now() - startMs,
     statusLabel: 'متوقف (يعمل القارئ المحلي الذكي تلقائياً)',
     details: 'تعذر الاتصال بمحرك Gemini السحابي حالياً؛ يعمل محرك القراءة المحلي الذكي (37 سطراً) بكفاءة 100% بدون انقطاع.',
@@ -698,7 +697,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
         success: false,
         fallbackToLocal: true,
         analyses: [],
-        message: 'يتم استخدام المساعد الهندسي المحلي الذكي للترجمة وحسبة المقاسات بالملم وتوجيه القطع الاستهلاكية إلى A و FL والثقيلة إلى D و C.',
+        message: 'يتم استخدام المساعد الهندسي المحلي الذكي للترجمة وحسبة المقاسات بالملم وتوجيه الثقيل لموقع D.',
       });
     }
 
@@ -711,7 +710,7 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
     }));
 
     const prompt = `أنت مساعد هندسي ذكي (Gemini Industrial Assistant) متخصص في مستودعات قطع الغيار الصناعية (SAP Inventory Controller - ASMO).
-المطلوب لكل قطعة في القائمة المرفقة:
+المطلوب لكل قطعة في القائمة المرفقة (مع التركيز التام على المتشابهات بالصنف والحجم والمليمتر MM وبدون أي ارتفاع مواقع):
 1. "description_ar": ترجمة عربية هندسية دقيقة وواضحة لوصف القطعة الإنجليزي مع ذكر الصنف والمقاس بالملم.
 2. "dimensions_calculation_ar": حسبة تفصيلية للمقاسات والأبعاد المذكورة في الوصف مع تحويل أي مقاس بالبوصة (IN أو ") إلى المليمتر (MM) بدقة (1 بوصة = 25.4 ملم).
 3. "material_ar": نوع المعدن أو المادة بالعربية.
@@ -719,21 +718,19 @@ app.post('/api/gemini/analyze-parts', async (req, res) => {
 5. "weight_label_ar": نص يوضح الوزن التقريبي للقطعة وإجمالي الوزن للكمية.
 6. "size_category": تصنيف الحجم والوزن ويجب أن يكون أحد القيم الثلاث فقط: "كبير / ثقيل" أو "متوسط الحجم" أو "صغير / خفيف".
 7. "recommended_shelf_code": رمز الموقع الأنسب للقطعة حسب القاعدة المعتمدة:
-   - "A" و "FL": مخصصان لنقل وتجميع القطع الاستهلاكية (المسامير، الصواميل، الوردات، الجازكيت، الأورينج، الفلاتر، الفيوزات، اللمبات، القفازات، أطقم الإصلاح) مع الإشارة إليها.
-   - "D" و "C": مخصصان للقطع الثقيلة جداً والكبيرة ("كبير / ثقيل") بحد أقصى 15 صنفاً لكل رف.
-   - "B" أو "BB": لتجميع بقية القطع المتشابهة من نفس الصنف والحجم والمقاس بالملم (MM).
-8. "recommended_bin": رمز الموقع المقترح كاملاً (مثال: للقطعة الاستهلاكية اقترح "N11A1" أو "N11FL1"، وللثقيلة "N11D1").
-9. "placement_reason_ar": سبب اختيار هذا الموقع مع الإشارة بوضوح إذا كانت قطعة استهلاكية تنقل إلى حرف A أو FL.
+   - "D" و "C": مخصصان للقطع الثقيلة جداً والكبيرة ("كبير / ثقيل") بحد أقصى 15 صنفاً لكل رف، وتجمع القطع الأغلى سعراً في رف واحد بحد أقصى 15 صنفاً فقط لكل رف.
+   - "A" أو "B" أو "BB" أو "C": لتجميع القطع المتشابهة من نفس الصنف والحجم والمقاس بالملم (MM).
+8. "recommended_bin": رمز الموقع المقترح كاملاً (مثال: إذا كانت القطعة ثقيلة في الممر N11 اقترح "N11D1" أو "D1").
+9. "placement_reason_ar": سبب اختيار هذا الموقع بناءً على الصنف والحجم والمقاس بالملم (أو نقل الثقيل إلى الموقع D).
 
 القطع المطلوب تحليلها:
 ${JSON.stringify(inputSummary)}`;
 
     const candidateModels = [
-      'gemini-2.5-flash-lite',
-      'gemini-2.5-flash',
       'gemini-3-flash-preview',
-      'gemini-flash-lite-latest',
+      'gemini-3.1-flash-lite-preview',
       'gemini-flash-latest',
+      'gemini-flash-lite-latest',
     ];
     for (const modelName of candidateModels) {
       try {
@@ -741,6 +738,9 @@ ${JSON.stringify(inputSummary)}`;
           model: modelName,
           contents: prompt,
           config: {
+            thinkingConfig: {
+              thinkingLevel: ThinkingLevel.MINIMAL,
+            },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.ARRAY,
@@ -791,7 +791,7 @@ ${JSON.stringify(inputSummary)}`;
       success: false,
       fallbackToLocal: true,
       analyses: [],
-      message: error?.message || 'تم تفعيل المحلل الهندسي المحلي لحسبة المقاسات بالملم وتوجيه القطع الاستهلاكية إلى A و FL.',
+      message: error?.message || 'تم تفعيل المحلل الهندسي المحلي لحسبة المقاسات بالملم وتوجيه الثقيل لموقع D.',
     });
   }
 });
@@ -848,6 +848,7 @@ async function startServer() {
 
   app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
+    // Prepare OCR static files in the background without blocking server startup
     import('./scripts/prepare-ocr.mjs').catch(() => {});
   });
 }

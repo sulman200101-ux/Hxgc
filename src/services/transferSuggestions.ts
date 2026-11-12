@@ -1,5 +1,5 @@
 import type { InventoryItem } from '../types';
-import { categorizeAndTranslate, isConsumableDescription } from '../utils/translator';
+import { categorizeAndTranslate } from '../utils/translator';
 import {
   getClientGeminiApiKey,
   getStoredCustomGeminiApiKey,
@@ -21,9 +21,6 @@ export interface PartSizeProfile {
   mmLabel: string; // نص المقاس بالمليمتر (مثل: 100 × 215 ملم أو 80.5 ملم)
   dimensionsLabel: string; // ملخص الأبعاد والمقاس بالملم
   targetHeavyLocation: string; // موقع D أو C المعتمد للقطع الثقيلة جداً
-  targetConsumableLocation: string; // موقع A أو FL المعتمد للقطع الاستهلاكية
-  isConsumable: boolean; // هل القطعة استهلاكية يشار إليها وتنقل إلى A أو FL
-  consumableTargetType: 'A' | 'FL'; // حرف الوجهة المقترحة للقطعة الاستهلاكية
   estimatedPriceSar: number; // السعر التقديري للقطعة الواحدة بالريال السعودي
   totalValueSar: number; // القيمة التقديرية الإجمالية للكمية المتبقية
   priceCategory: 'أغلى سعراً / قيمة عالية' | 'متوسط السعر' | 'سعر اقتصادي';
@@ -44,7 +41,6 @@ export interface GeminiPartAnalysis {
   price_label_ar: string;
   price_category: 'أغلى سعراً / قيمة عالية' | 'متوسط السعر' | 'سعر اقتصادي';
   size_category: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
-  is_consumable: boolean;
   current_bin: string;
   recommended_shelf_code: 'D' | 'C' | 'A' | 'B' | 'BB' | 'FL';
   recommended_bin: string;
@@ -67,8 +63,6 @@ export interface TransferSuggestion {
   reason: string;
   isHeavyToD?: boolean;
   isHeavyToC?: boolean;
-  isConsumable?: boolean;
-  consumableTargetType?: 'A' | 'FL';
   isHighValueConsolidation?: boolean;
 }
 
@@ -132,7 +126,6 @@ export interface SimilaritySwapPlan {
   groupSizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف';
   groupMmSummary: string;
   groupTotalValueSar: number;
-  isConsumableFamily?: boolean;
   subGroupsBySizeAndMm: SimilaritySubGroup[];
   adjacentBins: string[];
   existingMatchingInTarget: InventoryItem[];
@@ -168,7 +161,6 @@ export interface HighValueShelfPlan {
   summaryReason: string;
 }
 
-const MAX_SIZE_PROFILE_CACHE = 25000;
 const SIZE_PROFILE_CACHE = new Map<string, PartSizeProfile>();
 
 export function isDLocation(locationCode: string | null | undefined): boolean {
@@ -187,100 +179,8 @@ export function isCLocation(locationCode: string | null | undefined): boolean {
   return /^[A-Z]\d{2}C\d*$/.test(clean);
 }
 
-export function isALocation(locationCode: string | null | undefined): boolean {
-  const clean = (locationCode || '').trim().toUpperCase().replace(/\s+/g, '');
-  if (!clean) return false;
-  if (clean === 'A' || /^A\d+$/.test(clean)) return true;
-  return /^[A-Z]\d{2}A\d*$/.test(clean);
-}
-
-export function isFLLocation(locationCode: string | null | undefined): boolean {
-  const clean = (locationCode || '').trim().toUpperCase().replace(/\s+/g, '');
-  if (!clean) return false;
-  if (clean === 'FL' || /^FL\d+$/.test(clean)) return true;
-  return /^[A-Z]\d{2}FL\d*$/.test(clean);
-}
-
-export function isConsumableAOrFLLocation(locationCode: string | null | undefined): boolean {
-  return isALocation(locationCode) || isFLLocation(locationCode);
-}
-
 export function isHeavyDutyDOrCLocation(locationCode: string | null | undefined): boolean {
   return isDLocation(locationCode) || isCLocation(locationCode);
-}
-
-export function getConsumableCandidateShelvesForLocation(
-  currentLocation: string,
-  allBins: string[] = [],
-  preferFL = false
-): string[] {
-  const clean = (currentLocation || '').trim().toUpperCase().replace(/\s+/g, '');
-  const zonePrefix = clean.match(/^([A-Z]\d{2})/)?.[1];
-  const candidates: string[] = [];
-
-  const pushUnique = (bin: string) => {
-    const u = bin.trim().toUpperCase();
-    if (u && !candidates.includes(u)) candidates.push(u);
-  };
-
-  if (zonePrefix) {
-    const orderedCodes = preferFL
-      ? [`${zonePrefix}FL1`, `${zonePrefix}FL2`, `${zonePrefix}A1`, `${zonePrefix}A2`]
-      : [`${zonePrefix}A1`, `${zonePrefix}A2`, `${zonePrefix}FL1`, `${zonePrefix}FL2`];
-    for (const c of orderedCodes) pushUnique(c);
-  }
-
-  for (const b of allBins) {
-    if (preferFL ? isFLLocation(b) || isALocation(b) : isALocation(b) || isFLLocation(b)) {
-      pushUnique(b);
-    }
-  }
-
-  for (const fallback of preferFL
-    ? ['FL1', 'FL2', 'A1', 'A2', 'N11FL1', 'N11A1']
-    : ['A1', 'A2', 'FL1', 'FL2', 'N11A1', 'N11FL1']) {
-    pushUnique(fallback);
-  }
-
-  return candidates;
-}
-
-export function resolveTargetConsumableLocation(
-  currentLocation: string,
-  allBins: string[] = [],
-  shelfOccupancy?: Map<string, number>,
-  preferredType: 'A' | 'FL' | 'AUTO' = 'AUTO'
-): string {
-  const clean = (currentLocation || '').trim().toUpperCase().replace(/\s+/g, '');
-  const preferFL = preferredType === 'FL';
-
-  if (preferredType === 'A' && isALocation(clean)) {
-    const currentCount = shelfOccupancy?.get(clean) ?? 0;
-    if (currentCount <= MAX_ITEMS_PER_SHELF) return clean;
-  } else if (preferredType === 'FL' && isFLLocation(clean)) {
-    const currentCount = shelfOccupancy?.get(clean) ?? 0;
-    if (currentCount <= MAX_ITEMS_PER_SHELF) return clean;
-  } else if (preferredType === 'AUTO' && isConsumableAOrFLLocation(clean)) {
-    const currentCount = shelfOccupancy?.get(clean) ?? 0;
-    if (currentCount <= MAX_ITEMS_PER_SHELF) return clean;
-  }
-
-  const candidates = getConsumableCandidateShelvesForLocation(clean, allBins, preferFL).filter((cand) =>
-    preferredType === 'A' ? isALocation(cand) : preferredType === 'FL' ? isFLLocation(cand) : true
-  );
-
-  if (shelfOccupancy) {
-    for (const cand of candidates) {
-      const count = shelfOccupancy.get(cand) ?? 0;
-      if (count < MAX_ITEMS_PER_SHELF) {
-        return cand;
-      }
-    }
-  }
-
-  if (candidates.length > 0) return candidates[0];
-  const zonePrefix = clean.match(/^([A-Z]\d{2})/)?.[1] || 'N11';
-  return preferFL ? `${zonePrefix}FL1` : `${zonePrefix}A1`;
 }
 
 export function getHeavyCandidateShelvesForLocation(
@@ -510,8 +410,7 @@ export function estimatePartSizeProfile(item: InventoryItem): PartSizeProfile {
   const desc: string = String(item.description_en || (item as any).description || '').trim().toUpperCase();
   const loc: string = String(item.location_code || (item as any).location || '').trim().toUpperCase();
   const qtyRem = Math.max(1, Number(item.qty_remaining ?? item.qty_total ?? 1));
-  const manualConsumable = item.is_consumable;
-  const cacheKey = `${desc}|${loc}|${qtyRem}|${manualConsumable ?? ''}`;
+  const cacheKey = `${desc}|${loc}|${qtyRem}`;
   const cached = SIZE_PROFILE_CACHE.get(cacheKey);
   if (cached) return cached;
 
@@ -706,34 +605,6 @@ export function estimatePartSizeProfile(item: InventoryItem): PartSizeProfile {
 
   const targetHeavyLocation = resolveTargetDLocation(loc, [], undefined, finalScore >= 65 && finalScore < 72);
 
-  const isConsumable =
-    manualConsumable === 1
-      ? true
-      : manualConsumable === 0
-      ? false
-      : sizeCategory !== 'كبير / ثقيل' && isConsumableDescription(desc, item.category);
-
-  // توجيه القطع الاستهلاكية إلى حرف A أو FL:
-  // القطع الاستهلاكية الدقيقة والخفيفة جداً (O-RING, GASKET, FUSE, TIE, LAMP, GLOVES) أو التي تقع في FL توجه إلى FL أو A
-  const preferFLForConsumable =
-    isFLLocation(loc) ||
-    desc.includes('O-RING') ||
-    desc.includes('ORING') ||
-    desc.includes('GASKET') ||
-    desc.includes('PACKING') ||
-    desc.includes('FUSE') ||
-    desc.includes('TIE') ||
-    desc.includes('GLOVES') ||
-    desc.includes('SHIM');
-
-  const consumableTargetType: 'A' | 'FL' = preferFLForConsumable ? 'FL' : 'A';
-  const targetConsumableLocation = resolveTargetConsumableLocation(
-    loc,
-    [],
-    undefined,
-    consumableTargetType
-  );
-
   const estimatedPriceSar = estimatePartUnitPriceSar(desc, primaryMm, finalScore);
   const totalValueSar = estimatedPriceSar * qtyRem;
   const priceCategory: 'أغلى سعراً / قيمة عالية' | 'متوسط السعر' | 'سعر اقتصادي' =
@@ -752,29 +623,18 @@ export function estimatePartSizeProfile(item: InventoryItem): PartSizeProfile {
     mmLabel,
     dimensionsLabel,
     targetHeavyLocation,
-    targetConsumableLocation,
-    isConsumable,
-    consumableTargetType,
     estimatedPriceSar,
     totalValueSar,
     priceCategory,
     priceLabelAr,
   };
 
-  if (SIZE_PROFILE_CACHE.size >= MAX_SIZE_PROFILE_CACHE) {
-    const firstKey = SIZE_PROFILE_CACHE.keys().next().value;
-    if (firstKey !== undefined) SIZE_PROFILE_CACHE.delete(firstKey);
-  }
   SIZE_PROFILE_CACHE.set(cacheKey, profile);
   return profile;
 }
 
 export function isHeavyPart(item: InventoryItem): boolean {
   return estimatePartSizeProfile(item).sizeCategory === 'كبير / ثقيل';
-}
-
-export function isConsumablePart(item: InventoryItem): boolean {
-  return estimatePartSizeProfile(item).isConsumable;
 }
 
 export function isHighValuePart(item: InventoryItem): boolean {
@@ -811,7 +671,7 @@ const FAMILY_ARABIC_NAMES: Record<string, string> = {
 
 const zone = (location: string) =>
   (location || '').toUpperCase().replace(/\s+/g, '').match(/^([A-Z]\d{2})/)?.[1] ||
-  (isDLocation(location) ? 'D' : isCLocation(location) ? 'C' : isALocation(location) ? 'A' : isFLLocation(location) ? 'FL' : undefined);
+  (isDLocation(location) ? 'D' : isCLocation(location) ? 'C' : undefined);
 
 export function detectTechnicalFamily(item: InventoryItem): string | undefined {
   const text = (item.description_en || (item as any).description || '').toUpperCase();
@@ -855,98 +715,6 @@ export function detectTechnicalFamily(item: InventoryItem): string | undefined {
 
 function family(item: InventoryItem): string | undefined {
   return detectTechnicalFamily(item);
-}
-
-/**
- * اقتراح نقل القطع الاستهلاكية إلى حرف (A) أو (FL) مع الإشارة إليها بوضوح
- */
-export function suggestConsumableItemsToAOrFL(
-  items: InventoryItem[],
-  pendingParts: Set<string> = new Set(),
-  preferredTarget: 'AUTO' | 'A' | 'FL' = 'AUTO'
-): TransferSuggestion[] {
-  const allBins = Array.from(
-    new Set(items.map((i) => (i.location_code || '').trim().toUpperCase()).filter(Boolean))
-  );
-
-  const shelfOccupancy = new Map<string, number>();
-  for (const it of items) {
-    if (it.qty_remaining <= 0 || it.is_missing === 1) continue;
-    const b = (it.location_code || '').trim().toUpperCase();
-    if (isConsumableAOrFLLocation(b)) {
-      shelfOccupancy.set(b, (shelfOccupancy.get(b) || 0) + 1);
-    }
-  }
-
-  const consumableCandidates: Array<{ item: InventoryItem; sizeProf: PartSizeProfile }> = [];
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    if (item.qty_remaining <= 0 || item.is_missing === 1) continue;
-    if (pendingParts.has(item.part_number)) continue;
-
-    const sizeProf = estimatePartSizeProfile(item);
-    if (!sizeProf.isConsumable) continue;
-
-    const currentLoc = (item.location_code || '').trim().toUpperCase();
-    if (preferredTarget === 'A' && isALocation(currentLoc)) continue;
-    if (preferredTarget === 'FL' && isFLLocation(currentLoc)) continue;
-    if (preferredTarget === 'AUTO' && isConsumableAOrFLLocation(currentLoc)) continue;
-
-    consumableCandidates.push({ item, sizeProf });
-  }
-
-  consumableCandidates.sort(
-    (a, b) =>
-      b.item.qty_remaining - a.item.qty_remaining ||
-      a.sizeProf.sizeScore - b.sizeProf.sizeScore
-  );
-
-  const results: TransferSuggestion[] = [];
-
-  for (const { item, sizeProf } of consumableCandidates) {
-    const targetMode =
-      preferredTarget === 'AUTO' ? sizeProf.consumableTargetType : preferredTarget;
-    const candidates = getConsumableCandidateShelvesForLocation(
-      item.location_code,
-      allBins,
-      targetMode === 'FL'
-    ).filter((cand) =>
-      preferredTarget === 'A' ? isALocation(cand) : preferredTarget === 'FL' ? isFLLocation(cand) : true
-    );
-
-    let chosenBin = candidates[0] || (targetMode === 'FL' ? 'N11FL1' : 'N11A1');
-    for (const cand of candidates) {
-      const occ = shelfOccupancy.get(cand) || 0;
-      if (occ < MAX_ITEMS_PER_SHELF) {
-        chosenBin = cand;
-        break;
-      }
-    }
-
-    shelfOccupancy.set(chosenBin, (shelfOccupancy.get(chosenBin) || 0) + 1);
-    const isTargetFL = isFLLocation(chosenBin);
-    const fam = detectTechnicalFamily(item) || item.category || 'CONSUMABLE';
-    const currentShelfCount = Math.min(MAX_ITEMS_PER_SHELF, shelfOccupancy.get(chosenBin) || 1);
-
-    results.push({
-      partNumber: item.part_number,
-      from: item.location_code,
-      to: chosenBin,
-      quantity: item.qty_remaining,
-      family: fam,
-      categoryAr: item.category || FAMILY_ARABIC_NAMES[fam] || fam,
-      sizeCategory: sizeProf.sizeCategory,
-      mmLabel: sizeProf.mmLabel,
-      estimatedPriceSar: sizeProf.estimatedPriceSar,
-      totalValueSar: sizeProf.totalValueSar,
-      priceLabelAr: sizeProf.priceLabelAr,
-      isConsumable: true,
-      consumableTargetType: isTargetFL ? 'FL' : 'A',
-      reason: `🔄 قطعة استهلاكية (${item.category || fam} | المقاس: ${sizeProf.mmLabel}) — نقل من ${item.location_code} إلى حرف (${isTargetFL ? 'FL' : 'A'}) في الموقع ${chosenBin} (سعة الرف: ${currentShelfCount}/${MAX_ITEMS_PER_SHELF} صنف).`,
-    });
-  }
-
-  return results;
 }
 
 export function suggestHeavyItemsToLocationD(
@@ -1018,7 +786,6 @@ export function suggestHeavyItemsToLocationD(
       priceLabelAr: sizeProf.priceLabelAr,
       isHeavyToD: !isTargetC,
       isHeavyToC: isTargetC,
-      isConsumable: false,
       reason: `نقل قطعة ثقيلة جداً — الصنف: (${item.category || fam}) | المقاس: (${sizeProf.mmLabel}) | السعر: (${sizeProf.estimatedPriceSar.toLocaleString()} ر.س) من ${item.location_code} إلى موقع الثقيلة ${chosenBin} (${isTargetC ? 'موقع C' : 'موقع D'} — السعة: ${currentShelfCount}/${MAX_ITEMS_PER_SHELF} صنف).`,
     });
   }
@@ -1204,7 +971,6 @@ export function suggestTransfers(
         priceLabelAr: sizeProf.priceLabelAr,
         isHeavyToD: !isTargetC,
         isHeavyToC: isTargetC,
-        isConsumable: false,
         reason: `نقل قطعة ثقيلة جداً (${technicalFamily} — المقاس: ${sizeProf.mmLabel}) إلى موقع القطع الثقيلة المعتمد ${targetHeavyBin} (${isTargetC ? 'موقع C' : 'موقع D'} — بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف للرف).`,
       });
       if (result.length >= limit) break;
@@ -1215,10 +981,6 @@ export function suggestTransfers(
     const bins = groups.get(key)!;
     const target = targets.get(key)!;
     if (target[0] === item.location_code || target[1] <= bins.get(item.location_code)!) continue;
-
-    const isConsumable = sizeProf.isConsumable;
-    const isDestAOrFL = isConsumableAOrFLLocation(target[0]);
-
     result.push({
       partNumber: item.part_number,
       from: item.location_code,
@@ -1231,11 +993,7 @@ export function suggestTransfers(
       estimatedPriceSar: sizeProf.estimatedPriceSar,
       totalValueSar: sizeProf.totalValueSar,
       priceLabelAr: sizeProf.priceLabelAr,
-      isConsumable,
-      consumableTargetType: isFLLocation(target[0]) ? 'FL' : 'A',
-      reason: isConsumable
-        ? `🔄 قطعة استهلاكية — تجميع متشابهات الصنف (${technicalFamily} — المقاس: ${sizeProf.mmLabel}) في الموقع ${target[0]}${isDestAOrFL ? ` (رف استهلاكي ${isFLLocation(target[0]) ? 'FL' : 'A'})` : ''} (بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف لكل رف).`
-        : `تجميع متشابهات الصنف (${technicalFamily} — المقاس: ${sizeProf.mmLabel}) في الموقع ${target[0]} (بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف لكل رف).`,
+      reason: `تجميع متشابهات الصنف (${technicalFamily} — المقاس: ${sizeProf.mmLabel}) في الموقع ${target[0]} (بحد أقصى ${MAX_ITEMS_PER_SHELF} صنف لكل رف).`,
     });
     if (result.length >= limit) break;
   }
@@ -1282,26 +1040,19 @@ export function getAdjacentStorageBins(targetBin: string, allBins: string[], max
     const prefix = m[1];
     const shelf = m[2];
     const level = parseInt(m[3], 10);
-    candidates.add(`${prefix}A1`);
-    candidates.add(`${prefix}A2`);
-    candidates.add(`${prefix}FL1`);
-    candidates.add(`${prefix}FL2`);
     candidates.add(`${prefix}D1`);
     candidates.add(`${prefix}D2`);
     candidates.add(`${prefix}C1`);
     candidates.add(`${prefix}C2`);
     candidates.add(`${prefix}${shelf}${level === 1 ? 2 : 1}`);
-    for (const adjShelf of ['A', 'FL', 'D', 'C', 'B', 'BB']) {
+    for (const adjShelf of ['D', 'C', 'A', 'B', 'BB', 'FL']) {
       candidates.add(`${prefix}${adjShelf}1`);
       candidates.add(`${prefix}${adjShelf}2`);
     }
   } else {
-    candidates.add('N11A1');
-    candidates.add('N11FL1');
-    candidates.add('A1');
-    candidates.add('FL1');
     candidates.add('N11D1');
     candidates.add('N11C1');
+    candidates.add('N16D1');
     candidates.add('D1');
     candidates.add('C1');
   }
@@ -1418,12 +1169,11 @@ export function buildSimilaritySwapPlans(
       allGroupItemsSortedBySize.reduce((acc, x) => acc + x.sizeProfile.sizeScore, 0) /
       allGroupItemsSortedBySize.length;
     const hasHeavyItems = allGroupItemsSortedBySize.some((x) => x.sizeProfile.sizeCategory === 'كبير / ثقيل');
-    const isConsumableFamily = allGroupItemsSortedBySize.some((x) => x.sizeProfile.isConsumable) && !hasHeavyItems;
 
     const groupSizeCategory: 'كبير / ثقيل' | 'متوسط الحجم' | 'صغير / خفيف' =
       avgSizeScore >= 65 || hasHeavyItems ? 'كبير / ثقيل' : avgSizeScore >= 38 ? 'متوسط الحجم' : 'صغير / خفيف';
 
-    if (groupItems.length < 2 && groupSizeCategory !== 'كبير / ثقيل' && !isConsumableFamily) continue;
+    if (groupItems.length < 2 && groupSizeCategory !== 'كبير / ثقيل') continue;
 
     const binsCount = new Map<string, number>();
     for (let i = 0; i < groupItems.length; i++) {
@@ -1436,10 +1186,6 @@ export function buildSimilaritySwapPlans(
         const isDA = isDLocation(a[0]) ? 2 : isCLocation(a[0]) ? 1 : 0;
         const isDB = isDLocation(b[0]) ? 2 : isCLocation(b[0]) ? 1 : 0;
         if (isDA !== isDB) return isDB - isDA;
-      } else if (isConsumableFamily) {
-        const isAFL_A = isConsumableAOrFLLocation(a[0]) ? 1 : 0;
-        const isAFL_B = isConsumableAOrFLLocation(b[0]) ? 1 : 0;
-        if (isAFL_A !== isAFL_B) return isAFL_B - isAFL_A;
       }
       if (b[1] !== a[1]) return b[1] - a[1];
       const occA = (itemsByBin.get(a[0]) || []).length - a[1];
@@ -1455,15 +1201,6 @@ export function buildSimilaritySwapPlans(
         ? isDLocation(primaryBin)
           ? primaryBin
           : resolveTargetDLocation(primaryBin, allBins)
-        : isConsumableFamily
-        ? isConsumableAOrFLLocation(primaryBin)
-          ? primaryBin
-          : resolveTargetConsumableLocation(
-              primaryBin,
-              allBins,
-              undefined,
-              allGroupItemsSortedBySize[0]?.sizeProfile.consumableTargetType || 'A'
-            )
         : primaryBin;
 
     const recommendedBin = targetBin;
@@ -1472,23 +1209,12 @@ export function buildSimilaritySwapPlans(
     const candidateShelvesForBatches =
       groupSizeCategory === 'كبير / ثقيل'
         ? [targetBin, ...getHeavyCandidateShelvesForLocation(targetBin, allBins, false).filter((b) => b !== targetBin)]
-        : isConsumableFamily
-        ? [
-            targetBin,
-            ...getConsumableCandidateShelvesForLocation(
-              targetBin,
-              allBins,
-              isFLLocation(targetBin)
-            ).filter((b) => b !== targetBin),
-          ]
         : [targetBin, ...adjacentBins];
 
     const shelfBatches: ShelfBatchAllocation[] = [];
     for (let start = 0, bIdx = 0; start < allGroupItemsSortedBySize.length; start += MAX_ITEMS_PER_SHELF, bIdx++) {
       const batchSlice = allGroupItemsSortedBySize.slice(start, start + MAX_ITEMS_PER_SHELF);
-      const assignedBin =
-        candidateShelvesForBatches[bIdx] ||
-        (isConsumableFamily ? `${targetZone}A${(bIdx % 2) + 1}` : `${targetZone}B${(bIdx % 2) + 1}`);
+      const assignedBin = candidateShelvesForBatches[bIdx] || `${targetZone}B${(bIdx % 2) + 1}`;
       shelfBatches.push({
         shelfBin: assignedBin,
         batchIndex: bIdx + 1,
@@ -1533,10 +1259,6 @@ export function buildSimilaritySwapPlans(
             ? `${targetZone}D1` !== targetBin
               ? `${targetZone}D1`
               : `${targetZone}C1`
-            : occSize.isConsumable
-            ? `${targetZone}A1` !== targetBin
-              ? `${targetZone}A1`
-              : `${targetZone}FL1`
             : vacatedSourceBins[idx % Math.max(1, vacatedSourceBins.length)]) ||
           adjacentBins[0] ||
           `${targetZone}B1`;
@@ -1573,8 +1295,6 @@ export function buildSimilaritySwapPlans(
           sizeProfile: sizeProf,
           reason: isHeavyDest
             ? `نقل قطعة ثقيلة جداً (${fam} — المقاس: ${sizeProf.mmLabel}) من ${fromBin} إلى رف الثقيلة ${batch.shelfBin} (دفعة #${batch.batchIndex}: ${batch.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف)`
-            : sizeProf.isConsumable
-            ? `🔄 نقل قطعة استهلاكية (${fam} — المقاس: ${sizeProf.mmLabel}) من ${fromBin} إلى حرف (${isFLLocation(batch.shelfBin) ? 'FL' : 'A'}) في الرف ${batch.shelfBin} (دفعة #${batch.batchIndex}: ${batch.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف)`
             : `تجميع الصنف المتشابه (${fam} — المقاس: ${sizeProf.mmLabel}) من ${fromBin} إلى الرف ${batch.shelfBin} (دفعة #${batch.batchIndex}: ${batch.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف)`,
         });
       }
@@ -1598,7 +1318,6 @@ export function buildSimilaritySwapPlans(
       groupSizeCategory,
       groupMmSummary,
       groupTotalValueSar,
-      isConsumableFamily,
       subGroupsBySizeAndMm,
       adjacentBins,
       existingMatchingInTarget,
@@ -1610,8 +1329,6 @@ export function buildSimilaritySwapPlans(
       summaryReason:
         groupSizeCategory === 'كبير / ثقيل'
           ? `خطة تجميع الصنف الثقيل جداً (${FAMILY_ARABIC_NAMES[fam] || fam} | المقاسات: ${groupMmSummary}) في مواقع الثقيلة D و C (${shelfBatches.map((b) => `${b.shelfBin}: ${b.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف`).join(' ، ')}).`
-          : isConsumableFamily
-          ? `🔄 خطة تجميع القطع الاستهلاكية (${FAMILY_ARABIC_NAMES[fam] || fam} | المقاسات: ${groupMmSummary}) ونقلها إلى حرف (A أو FL) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف (${shelfBatches.map((b) => `${b.shelfBin}: ${b.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف`).join(' ، ')}).`
           : `خطة تجميع متشابهات الصنف (${FAMILY_ARABIC_NAMES[fam] || fam}) حسب الحجم (${groupSizeCategory}) والمقاس بالملم (${groupMmSummary}) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف (${shelfBatches.map((b) => `${b.shelfBin}: ${b.itemsCount}/${MAX_ITEMS_PER_SHELF} صنف`).join(' ، ')}).`,
     });
   }
@@ -1654,7 +1371,6 @@ export function computeLocalPartEngineeringAnalysis(
     qty_out: item.qty_out ?? 0,
     qty_remaining: Math.max(1, item.qty_remaining ?? item.qty_total ?? 1),
     is_moved: item.is_moved ?? 0,
-    is_consumable: item.is_consumable,
     status: item.status || 'غير مدقق',
   };
 
@@ -1684,12 +1400,6 @@ export function computeLocalPartEngineeringAnalysis(
       ? fullItem.location_code
       : `${zonePrefix}${recommendedShelfCode}1`;
     placementReasonAr = `قطعة ثقيلة جداً (${unitWeightKg} كجم | المقاس: ${sizeProf.mmLabel}) — توجه إلى مواقع القطع الثقيلة (D و C) في (${recommendedBin}) مع التزام سقف ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف.`;
-  } else if (sizeProf.isConsumable) {
-    recommendedShelfCode = sizeProf.consumableTargetType;
-    recommendedBin = isConsumableAOrFLLocation(fullItem.location_code)
-      ? fullItem.location_code
-      : sizeProf.targetConsumableLocation || `${zonePrefix}${recommendedShelfCode}1`;
-    placementReasonAr = `🔄 قطعة استهلاكية (${sizeProf.mmLabel}) — يتم الإشارة إليها وتوجيه نقلها إلى حرف (${recommendedShelfCode}) في الموقع (${recommendedBin}) بحد أقصى ${MAX_ITEMS_PER_SHELF} صنفاً لكل رف.`;
   } else if (sizeProf.priceCategory === 'أغلى سعراً / قيمة عالية') {
     recommendedShelfCode = 'A';
     recommendedBin = `${zonePrefix}A1`;
@@ -1713,7 +1423,6 @@ export function computeLocalPartEngineeringAnalysis(
     price_label_ar: sizeProf.priceLabelAr,
     price_category: sizeProf.priceCategory,
     size_category: sizeProf.sizeCategory,
-    is_consumable: sizeProf.isConsumable,
     current_bin: fullItem.location_code,
     recommended_shelf_code: recommendedShelfCode,
     recommended_bin: recommendedBin,
@@ -1803,6 +1512,9 @@ ${JSON.stringify(inputSummary)}`;
               generationConfig: {
                 temperature: 0.1,
                 responseMimeType: 'application/json',
+                thinkingConfig: {
+                  thinkingLevel: 'MINIMAL',
+                },
               },
             }),
             signal: controller.signal,

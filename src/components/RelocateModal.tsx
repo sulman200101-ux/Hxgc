@@ -1,14 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { InventoryItem } from '../types';
 import { sanitizeLocationCode, isValidSpecificLocation } from '../utils/regexSanitizer';
-import {
-  getAdjacentStorageBins,
-  estimatePartSizeProfile,
-  getConsumableCandidateShelvesForLocation,
-  isALocation,
-  isFLLocation,
-} from '../services/transferSuggestions';
-import { MapPin, ArrowRightLeft, CheckCircle2, X, RefreshCw } from 'lucide-react';
+import { getAdjacentStorageBins } from '../services/transferSuggestions';
+import { MapPin, ArrowRightLeft, CheckCircle2, X } from 'lucide-react';
 
 interface RelocateModalProps {
   isOpen: boolean;
@@ -29,37 +23,12 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
 
-  const sizeProf = useMemo(() => (item ? estimatePartSizeProfile(item) : null), [item]);
-  const isConsumable = Boolean(sizeProf?.isConsumable);
-
-  const consumableAOrFLBins = useMemo(() => {
-    if (!item) return [];
-    const zonePrefix = item.location_code.trim().toUpperCase().match(/^([A-Z]\d{2})/)?.[1] || 'N11';
-    const cands = getConsumableCandidateShelvesForLocation(item.location_code, popularLocations, false);
-    const ordered = Array.from(
-      new Set([
-        `${zonePrefix}A1`,
-        `${zonePrefix}FL1`,
-        `${zonePrefix}A2`,
-        `${zonePrefix}FL2`,
-        'A1',
-        'FL1',
-        ...cands,
-      ])
-    ).filter((loc) => loc !== item.location_code);
-    return ordered.slice(0, 6);
-  }, [item, popularLocations]);
-
   useEffect(() => {
     if (item) {
-      if (sizeProf?.isConsumable && sizeProf.targetConsumableLocation && sizeProf.targetConsumableLocation !== item.location_code) {
-        setNewLocation(sizeProf.targetConsumableLocation);
-      } else {
-        setNewLocation('');
-      }
+      setNewLocation('');
       setError('');
     }
-  }, [item, isOpen, sizeProf]);
+  }, [item, isOpen]);
 
   const suggestedBins = useMemo(() => {
     if (!item) return [];
@@ -73,7 +42,7 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
     e.preventDefault();
     const clean = sanitizeLocationCode(newLocation.trim()) || newLocation.trim().toUpperCase();
     if (!clean || !isValidSpecificLocation(clean)) {
-      setError('يرجى إدخال رمز الموقع الجديد بشكل صحيح (مثل A1 أو FL1 أو N11A1 أو N11FL1)');
+      setError('يرجى إدخال رمز الموقع الجديد بشكل صحيح (مثل N11C2 أو N12A1)');
       return;
     }
 
@@ -104,6 +73,7 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
       dir="rtl"
     >
       <div className="w-full max-w-md bg-[#241712] border-2 border-emerald-500/50 rounded-2xl shadow-2xl overflow-hidden text-right">
+        {/* ترويسة مبسطة */}
         <div className="p-4 bg-[#1C120E] border-b border-emerald-500/30 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
@@ -112,7 +82,7 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
             <div>
               <h2 className="text-base font-black text-white">نقل القطعة إلى موقع جديد 🟢</h2>
               <p className="text-xs text-neutral-300">
-                تُسجل القطعة كـ (منقول) وتحفظ في قائمة النقل اليومية فور اعتمادك للنقل
+                تنتقل القطعة فوراً لموقعها الجديد بعد اعتماد المشرف
               </p>
             </div>
           </div>
@@ -126,8 +96,9 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="p-4 space-y-4">
+          {/* بيانات القطعة باختصار ووضوح */}
           <div className="p-3.5 rounded-xl bg-[#19100C] border border-[#3D2820] space-y-2">
-            <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center justify-between">
               <span className="font-mono font-black text-base text-amber-300">
                 رقم القطعة: {item.part_number}
               </span>
@@ -135,47 +106,12 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
                 الكمية: {item.qty_remaining}
               </span>
             </div>
-            {isConsumable && (
-              <div className="px-2.5 py-1 rounded-lg bg-cyan-950/90 border border-cyan-500/70 text-cyan-200 text-xs font-black flex items-center gap-1.5">
-                <RefreshCw className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                <span>🔄 قطعة استهلاكية — يُنصح بنقلها إلى حرف (A) أو (FL)</span>
-              </div>
-            )}
             <p className="text-xs font-bold text-white">
               {item.description_ar || item.description_en}
             </p>
           </div>
 
-          {/* أزرار سريعة لنقل القطعة إلى حرف A أو FL */}
-          <div className="p-3 rounded-xl bg-cyan-950/30 border border-cyan-600/50 space-y-2">
-            <span className="text-xs font-black text-cyan-200 block">
-              🔄 اختيار سريع لمواقع القطع الاستهلاكية (حرف A أو FL):
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              {consumableAOrFLBins.map((loc) => {
-                const isFL = isFLLocation(loc);
-                const isA = isALocation(loc);
-                return (
-                  <button
-                    key={loc}
-                    type="button"
-                    onClick={() => {
-                      setNewLocation(loc);
-                      setError('');
-                    }}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-mono font-black border transition-all cursor-pointer ${
-                      newLocation === loc
-                        ? 'bg-cyan-600 text-white border-cyan-300 shadow-md'
-                        : 'bg-[#142229] text-cyan-200 border-cyan-700/60 hover:bg-cyan-900/60'
-                    }`}
-                  >
-                    {loc} {isFL ? '(حرف FL)' : isA ? '(حرف A)' : ''}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
+          {/* مسار النقل الواضح: من -> إلى */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center bg-[#1C120E] p-3.5 rounded-xl border border-[#3D2820]">
             <div>
               <span className="text-xs text-neutral-400 block mb-1">من الموقع الحالي:</span>
@@ -187,7 +123,7 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
 
             <div>
               <label className="text-xs font-bold text-emerald-300 block mb-1">
-                إلى الموقع الجديد (A أو FL أو غيره):
+                إلى الموقع الجديد:
               </label>
               <input
                 type="text"
@@ -196,7 +132,7 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
                   setNewLocation(e.target.value.toUpperCase());
                   setError('');
                 }}
-                placeholder="مثال: N11A1 أو N11FL1 أو A1 أو FL1"
+                placeholder="مثال: N11FL2"
                 autoFocus
                 required
                 dir="ltr"
@@ -205,10 +141,11 @@ export const RelocateModal: React.FC<RelocateModalProps> = ({
             </div>
           </div>
 
+          {/* مواقع مقترحة متقاربة بضغطة واحدة */}
           {suggestedBins.length > 0 && (
             <div>
               <span className="text-xs text-neutral-300 font-bold block mb-1.5">
-                أو اختر موقعاً متقارباً في نفس الممر:
+                أو اختر موقعاً متقارباً بضغطة واحدة:
               </span>
               <div className="flex flex-wrap gap-1.5">
                 {suggestedBins.map((loc) => (
