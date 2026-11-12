@@ -2,14 +2,16 @@
  * محلل جدول أسمو الصارم (Strict Zero-Guessing SAP Table Parser)
  * يقرأ فقط ما هو مرئي بوضوح تام في السطر دون أي بيانات مخزنة أو استنتاج من السطور الأخرى.
  * أي حقل لم يتمكن من قراءته يُترك فارغاً تماماً ("").
+ * لا يتم تسجيل أي قطعة كـ "مدقق" أو "منقول" تلقائياً؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم.
  */
 
 import { ExtractedSparePart } from '../services/localOcr';
-import { categorizeAndTranslate } from './translator';
+import { categorizeAndTranslate, isConsumableDescription } from './translator';
 import {
   sanitizeLocationCode,
   isValidSpecificLocation,
   strict10DigitRegexFilter,
+  dynamicLocationNormalizer,
 } from './regexSanitizer';
 
 export function isRandomNoiseOrGibberish(text: string): boolean {
@@ -18,7 +20,7 @@ export function isRandomNoiseOrGibberish(text: string): boolean {
 }
 
 /**
- * استخراج رقم القطعة الصارم: 10 أرقام قياسية في جداول SAP مع معالجة المسافات والحروف المتشابهة بصرياً.
+ * استخراج رقم القطعة الصارم: 10 أرقام دقيقة فقط مع إصلاح أخطاء التشابه البصري (مثل O->0, I->1)، وإذا كان غير مقروء يُرجع null ليُترك فارغاً.
  */
 export function extractStrictMaterialNumber(line: string): string | null {
   if (!line) return null;
@@ -27,26 +29,30 @@ export function extractStrictMaterialNumber(line: string): string | null {
 
   const tokens = line.split(/[\s|;,\[\]{}()]+/);
   for (const tok of tokens) {
-    const cleaned = strict10DigitRegexFilter(tok);
-    if (cleaned) return cleaned;
+    const repaired = strict10DigitRegexFilter(tok);
+    if (repaired) return repaired;
   }
 
-  return null;
+  return strict10DigitRegexFilter(line);
 }
 
 /**
- * استخراج رمز الموقع المرئي في نفس السطر مع تطبيع أكواد أسمو (مثل N11A1, N07BB1, D1, FL1).
+ * استخراج رمز الموقع المرئي فقط في نفس السطر، وإذا لم يُقرأ يُرجع "" (فارغ).
  */
 export function extractStrictStorageBin(line: string, partNumber: string): string {
   if (!line) return '';
   const withoutPart = partNumber ? line.replace(partNumber, ' ') : line;
-  const sapBinMatch = withoutPart.match(/\b(N\d{2}(?:FL|BB|[A-Z]{1,2})\d{1,2})\b/i);
+  const sapBinMatch = withoutPart.match(/\b(N\d{2}(?:FL|BB|[A-D])\d{1,2})\b/i);
   if (sapBinMatch) {
     return sapBinMatch[1].toUpperCase();
   }
 
   const tokens = withoutPart.split(/[\s|;,\[\]{}()]+/);
   for (const tok of tokens) {
+    const norm = dynamicLocationNormalizer(tok);
+    if (norm && isValidSpecificLocation(norm)) {
+      return norm;
+    }
     const clean = sanitizeLocationCode(tok);
     if (clean && isValidSpecificLocation(clean)) {
       return clean;
@@ -56,10 +62,10 @@ export function extractStrictStorageBin(line: string, partNumber: string): strin
 }
 
 const UNIT_PATTERN =
-  '(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|PCS|ROL|BOX|PC)';
+  '(?:EA|SET|PK|SH|CO|AY|KG|PAA|ZYD|KIT|PCS|ROL|BOX|M|L|FT|PR|PAIR)';
 
 /**
- * استخراج الكمية المرئية سواء جاءت بعد رمز الوحدة (EA 5) أو قبله (5 EA) أو بجوار رمز الموقع المخزني.
+ * استخراج الكمية المرئية بوضوح فقط، وإذا لم يتمكن من قراءتها يُرجع 0 (حقل فارغ) بدلاً من افتراض 1.
  */
 export function extractStrictQuantity(
   line: string,
@@ -69,33 +75,37 @@ export function extractStrictQuantity(
   const partIdx = partNumber ? line.indexOf(partNumber) : -1;
   const afterPart = partIdx >= 0 ? line.slice(partIdx + partNumber.length) : line;
 
-  // 1. نمط: EA 5
-  const unitBeforeQty = afterPart.match(
+  // 1. النمط القياسي بوجود رمز الوحدة متبوعاً بالكمية (مثل EA 5)
+  const unitQtyMatch = afterPart.match(
     new RegExp(`\\b${UNIT_PATTERN}[\\s|\\[\\]()—\\-~:°.]+(\\d{1,5})\\b`, 'i')
   );
-  if (unitBeforeQty) {
-    const val = Number(unitBeforeQty[1]);
-    return { total: val >= 0 ? val : 0, out: 0 };
+  if (unitQtyMatch) {
+    const val = Number(unitQtyMatch[1]);
+    return { total: val > 0 ? val : 0, out: 0 };
   }
 
-  // 2. نمط: 5 EA
-  const qtyBeforeUnit = afterPart.match(
+  // 2. النمط العكسي: الكمية متبوعة برمز الوحدة (مثل 5 EA)
+  const qtyUnitMatch = afterPart.match(
     new RegExp(`\\b(\\d{1,5})[\\s|\\[\\]()—\\-~:°.]+${UNIT_PATTERN}\\b`, 'i')
   );
-  if (qtyBeforeUnit) {
-    const val = Number(qtyBeforeUnit[1]);
-    return { total: val >= 0 ? val : 0, out: 0 };
+  if (qtyUnitMatch) {
+    const val = Number(qtyUnitMatch[1]);
+    if (val > 0 && val !== 16 && val !== 2) {
+      return { total: val, out: 0 };
+    }
   }
 
-  // 3. نمط: رقم كمية مستقل بعد كود الموقع المخزني مباشرة
+  // 3. النمط المباشر بعد رمز الموقع (Storage Bin) عندما لا يظهر رمز الوحدة في السطر
   if (storageBin) {
-    const binIdx = afterPart.indexOf(storageBin);
+    const binIdx = afterPart.toUpperCase().indexOf(storageBin.toUpperCase());
     if (binIdx >= 0) {
       const afterBin = afterPart.slice(binIdx + storageBin.length);
-      const qtyAfterBin = afterBin.match(/^\s*[|\[\]()—\-~:°.]*\s*(\d{1,4})\b/);
-      if (qtyAfterBin) {
-        const val = Number(qtyAfterBin[1]);
-        return { total: val >= 0 ? val : 0, out: 0 };
+      const directQtyMatch = afterBin.match(/^\s*(?:[|\[\]()—\-~:°.]+\s*)*(\d{1,5})(?=\s|\||$)/);
+      if (directQtyMatch) {
+        const val = Number(directQtyMatch[1]);
+        if (val > 0) {
+          return { total: val, out: 0 };
+        }
       }
     }
   }
@@ -109,7 +119,7 @@ export function extractCheckAndRemark(
 ): { isMissing: number; remark: string; shortage: number; markSymbol: '✓' | 'X' | 'F' | 'N' | null } {
   const binIdx = storageBin ? line.indexOf(storageBin) : -1;
   const tail = binIdx >= 0 ? line.slice(binIdx + storageBin.length) : line;
-  const checkRemarkWindow = tail.slice(0, 45);
+  const checkRemarkWindow = tail.slice(0, 35);
 
   const isCross = /(?:^|[\s|\[\](){}])([Xx×✗✘])(?=\s|\||\[|\]|\)|$)/.test(checkRemarkWindow);
   const isCheck = /(?:^|[\s|\[\](){}])([✓✔])(?=\s|\||\[|\]|\)|$)/.test(checkRemarkWindow);
@@ -148,7 +158,7 @@ export function extractCheckAndRemark(
 }
 
 /**
- * استخراج الوصف الإنجليزي بدقة سواء كان العمود بعد الكمية/الموقع أو بين رقم القطعة والموقع.
+ * استخراج الوصف المرئي فقط، وإذا لم يُقرأ يُترك فارغاً ("") تماماً بدون أي نص افتراضي.
  */
 export function extractStrictDescription(
   line: string,
@@ -160,25 +170,22 @@ export function extractStrictDescription(
 
   const unitQtyRegex = new RegExp(`\\b${UNIT_PATTERN}\\s+\\d{1,5}\\b(.*)$`, 'i');
   const mUnit = withoutPart.match(unitQtyRegex);
-  let rawDesc = mUnit && mUnit[1] && /[A-Za-z]{3,}/.test(mUnit[1]) ? mUnit[1] : '';
+  let rawDesc = mUnit && mUnit[1] ? mUnit[1] : '';
 
   if (!rawDesc && storageBin) {
-    const binIdx = withoutPart.indexOf(storageBin);
+    const binIdx = withoutPart.toUpperCase().indexOf(storageBin.toUpperCase());
     if (binIdx >= 0) {
-      const afterBin = withoutPart.slice(binIdx + storageBin.length);
-      const beforeBin = withoutPart.slice(0, binIdx);
+      const afterBin = withoutPart
+        .slice(binIdx + storageBin.length)
+        .replace(/^\s*(?:[|\[\]()—\-~_✓✔×Xx\/:.°'"]+|\d{1,5}\b)+\s*/, '')
+        .trim();
+      const beforeBin = withoutPart
+        .slice(0, binIdx)
+        .replace(/\b(?:M016|0002|002|0001|001)\b/gi, ' ')
+        .trim();
       rawDesc = /[A-Za-z]{3,}/.test(afterBin) ? afterBin : beforeBin;
     }
   }
-
-  if (!rawDesc) {
-    rawDesc = withoutPart;
-  }
-
-  if (storageBin) {
-    rawDesc = rawDesc.replace(new RegExp(`\\b${storageBin}\\b`, 'gi'), ' ');
-  }
-  rawDesc = rawDesc.replace(new RegExp(`\\b${UNIT_PATTERN}\\b\\s*\\d{0,5}`, 'gi'), ' ');
 
   const cleaned = rawDesc
     .replace(/^\s*(?:[|\[\]()—\-~_✓✔×Xx\/:.°'"])+\s*/i, '')
@@ -245,6 +252,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
 
     // لا يتم تسجيل أي قطعة كـ "مدقق" أو "تم النقل" تلقائياً؛ التدقيق والنقل يتمان حصراً من قِبل المستخدم
     const status = isMissing ? 'غير موجودة' : 'غير مدقق';
+    const isConsumable = isConsumableDescription(descEn, category) ? 1 : 0;
 
     finalResults.push({
       part_number: partNumber,
@@ -256,6 +264,7 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
       qty_out: out,
       qty_remaining: isMissing ? 0 : Math.max(0, total - out),
       is_missing: isMissing,
+      is_consumable: isConsumable,
       remark: remark || undefined,
       mark_symbol: markSymbol,
       audit_meaning: auditMeaning,
@@ -267,6 +276,9 @@ export function parseStrictAsmoTable(rawText: string): ExtractedSparePart[] {
   return finalResults;
 }
 
+/**
+ * دمج نتائج تمريرتي قراءة ضوئية بحيث تُستكمل الحقول الناقصة للسطر نفسه دون أي تخمين
+ */
 export function unionOrderedRowSequences(
   passA: ExtractedSparePart[],
   passB: ExtractedSparePart[]
@@ -276,40 +288,41 @@ export function unionOrderedRowSequences(
   if (!cleanA.length) return [...cleanB];
   if (!cleanB.length) return [...cleanA];
 
-  const primary = cleanA.length >= cleanB.length ? [...cleanA] : [...cleanB];
+  const primary = cleanA.length >= cleanB.length ? cleanA : cleanB;
   const secondary = cleanA.length >= cleanB.length ? cleanB : cleanA;
 
-  const byPart = new Map<string, ExtractedSparePart>();
+  const secByPart = new Map<string, ExtractedSparePart>();
   for (const row of secondary) {
-    if (row.part_number) {
-      byPart.set(row.part_number, row);
+    if (row.part_number && /^\d{10}$/.test(row.part_number) && !secByPart.has(row.part_number)) {
+      secByPart.set(row.part_number, row);
     }
   }
 
-  const merged = primary.map((row) => {
-    const match = row.part_number ? byPart.get(row.part_number) : undefined;
-    if (!match) return row;
-    byPart.delete(row.part_number);
+  return primary.map((row) => {
+    if (!row.part_number) return { ...row };
+    const comp = secByPart.get(row.part_number);
+    if (!comp) return { ...row };
+    const mergedDescEn =
+      row.description_en && row.description_en.length >= (comp.description_en?.length || 0)
+        ? row.description_en
+        : comp.description_en || row.description_en;
+    const { category, descAr } = mergedDescEn
+      ? categorizeAndTranslate(mergedDescEn)
+      : { category: row.category || comp.category, descAr: row.description_ar || comp.description_ar };
+    const total = row.qty_total > 0 ? row.qty_total : comp.qty_total;
+    const isMissing = row.is_missing === 1 || comp.is_missing === 1 ? 1 : 0;
+    const out = isMissing ? 0 : Math.max(row.qty_out || 0, comp.qty_out || 0);
     return {
       ...row,
-      location_code: row.location_code || match.location_code,
-      description_en:
-        row.description_en.length >= match.description_en.length
-          ? row.description_en
-          : match.description_en,
-      description_ar: row.description_ar || match.description_ar,
-      category: row.category || match.category,
-      qty_total: row.qty_total > 0 ? row.qty_total : match.qty_total,
-      qty_remaining: row.qty_remaining > 0 ? row.qty_remaining : match.qty_remaining,
-      remark: row.remark || match.remark,
-      mark_symbol: row.mark_symbol || match.mark_symbol,
-      audit_meaning: row.audit_meaning || match.audit_meaning,
+      location_code: row.location_code || comp.location_code || '',
+      description_en: mergedDescEn,
+      description_ar: row.description_ar || descAr,
+      category: row.category || category,
+      qty_total: total,
+      qty_out: out,
+      qty_remaining: isMissing ? 0 : Math.max(0, total - out),
+      is_missing: isMissing,
+      status: isMissing ? 'غير موجودة' : 'غير مدقق',
     };
   });
-
-  for (const leftover of byPart.values()) {
-    merged.push(leftover);
-  }
-
-  return merged;
 }

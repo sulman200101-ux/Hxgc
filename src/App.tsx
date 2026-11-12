@@ -21,6 +21,7 @@ import { RelocateModal } from './components/RelocateModal';
 import { RelocationReportModal } from './components/RelocationReportModal';
 import { GinListModal } from './components/GinListModal';
 import { ExtractedSparePart } from './services/localOcr';
+import { estimatePartSizeProfile } from './services/transferSuggestions';
 import { Camera, Plus, CheckCircle, RefreshCw, MapPin, Edit3, XCircle, CheckCircle2, Layers } from 'lucide-react';
 
 export default function App() {
@@ -52,7 +53,6 @@ export default function App() {
   const [selectedLocationCode, setSelectedLocationCode] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [renameLocationCode, setRenameLocationCode] = useState<string | null>(null);
-  const [isBulkLoading, setIsBulkLoading] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
   useEffect(() => {
@@ -74,7 +74,7 @@ export default function App() {
   };
 
   const refreshData = () => {
-    const items = [...dbService.getAllItems()];
+    const items = dbService.getAllItems();
     const locs = dbService.getLocationsSummary();
     setAllItems(items);
     setLocationsSummary(locs);
@@ -103,7 +103,7 @@ export default function App() {
     const updated = await dbService.relocateItem(partNumber, newLocation);
     if (updated) {
       refreshData();
-      showNotification(`تم اعتماد ونقل القطعة (${partNumber}) بنجاح إلى الموقع الجديد (${newLocation}) 🟢`, 'success');
+      showNotification(`تم اعتماد ونقل القطعة (${partNumber}) بنجاح إلى الموقع الجديد (${newLocation}) وحفظها في قائمة النقل اليومية 🟢`, 'success');
       handleOpenRelocationReportWithItems([updated]);
     }
   };
@@ -186,7 +186,6 @@ export default function App() {
     setSelectedLocationCode(locCode);
   };
 
-  // CRUD Handlers
   const handleSaveItem = async (data: {
     part_number: string;
     location_code: string;
@@ -264,23 +263,18 @@ export default function App() {
     newStatus: InventoryItem['status']
   ) => {
     try {
-    await dbService.markStatus(partNumber, newStatus);
-    refreshData();
-    if (newStatus === 'غير موجودة') {
-      showNotification(`تم وضع علامة (× غير موجودة) على القطعة ${partNumber}`, 'info');
-    } else {
-      showNotification(`تم تحديث حالة القطعة ${partNumber} إلى (${newStatus})`, 'success');
+      await dbService.markStatus(partNumber, newStatus);
+      refreshData();
+      if (newStatus === 'غير موجودة') {
+        showNotification(`تم وضع علامة (× غير موجودة) على القطعة ${partNumber}`, 'info');
+      } else if (newStatus === 'مدقق') {
+        showNotification(`تم تدقيق القطعة ${partNumber} من قِبلك بنجاح (✓ مدقق)`, 'success');
+      } else {
+        showNotification(`تم تحديث حالة القطعة ${partNumber} إلى (غير مدقق)`, 'info');
+      }
+    } catch (error) {
+      showNotification((error as Error).message, 'info');
     }
-    } catch (error) { showNotification((error as Error).message, 'info'); }
-  };
-
-  const handleOcrSaveItems = async (extracted: ExtractedSparePart[]) => {
-    const result = await dbService.smartUpsertBatch(extracted);
-    refreshData();
-
-    showNotification(
-      `✅ تم حفظ الورقة المكتملة (${result.total} قطعة | منها ${result.missingCount} معلمة بـ × غير موجودة)!`
-    );
   };
 
   const handleWipeDatabase = async () => {
@@ -310,7 +304,7 @@ export default function App() {
         <button type="button" aria-pressed={screen === 'inventory'} onClick={() => changeScreen('inventory')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer ${screen === 'inventory' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>المخزون</button>
         <button type="button" aria-pressed={screen === 'similar'} onClick={() => changeScreen('similar')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer flex items-center justify-center gap-1.5 ${screen === 'similar' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-amber-200'}`}>
           <Layers className="w-4 h-4" />
-          <span>مساعد جمني للمقاسات والترجمة وخطة النقل ✨</span>
+          <span>قائمة النقل اليومية والقطع الاستهلاكية (A / FL) ✨</span>
         </button>
         <button type="button" aria-pressed={screen === 'operations'} onClick={() => changeScreen('operations')} className={`flex-1 rounded-xl py-3 font-bold cursor-pointer ${screen === 'operations' ? 'bg-amber-600 text-white' : 'bg-stone-800 text-neutral-300'}`}>العمليات والتقارير</button>
       </nav>
@@ -329,6 +323,7 @@ export default function App() {
         {isDbReady && (
           <SimilarItemsPlannerView
             items={allItems}
+            isActive={screen === 'similar'}
             onRefresh={refreshData}
             onOpenRelocationReport={handleOpenRelocationReportWithItems}
             onOpenLocation={(locCode) => {
@@ -342,7 +337,7 @@ export default function App() {
         <header className="p-4" dir="rtl"><h1 className="text-xl font-bold">العمليات والتقارير</h1><p className="text-sm text-neutral-400">اسحب لليسار للعودة إلى المخزون</p></header>
         <div className="flex flex-wrap gap-2 px-4">
           <button className="p-3 rounded-xl bg-amber-800 hover:bg-amber-700 text-white font-bold cursor-pointer" onClick={() => setShowSuggestions(true)}>اقتراح تجميع القطع في مواقع متجاورة</button>
-          <button className="p-3 rounded-xl bg-emerald-800 hover:bg-emerald-700 text-white font-bold cursor-pointer" onClick={() => changeScreen('similar')}>فتح واجهة المتشابهات وخطة الإحلال الكاملة</button>
+          <button className="p-3 rounded-xl bg-cyan-800 hover:bg-cyan-700 text-white font-black cursor-pointer" onClick={() => changeScreen('similar')}>فتح قائمة النقل اليومية ونقل القطع الاستهلاكية إلى (A و FL) 🔄</button>
           <button className="p-3 rounded-xl bg-green-700 hover:bg-green-600 text-white font-black cursor-pointer" onClick={() => setIsGinListOpen(true)}>فتح قائمة (قين) للإرسال عبر الواتساب 💬 ({ginItems.length})</button>
         </div>
         <DataSafetyPanel onRefresh={refreshData} />
@@ -412,7 +407,6 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* View Mode 1: المواقع والبحث الفوري */}
             {activeTab === 'locations' && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -443,7 +437,6 @@ export default function App() {
                   )}
                 </div>
 
-                {/* نتائج البحث الفوري بالقطعة أو الرقم أو الموقع */}
                 {(searchQuery.trim() !== '' || selectedStatus === 'غير موجودة' || selectedStatus === 'مفقود') && (
                   <div className="space-y-2 mb-6">
                     <div className="text-xs font-bold text-neutral-400 mb-1 flex items-center justify-between">
@@ -465,9 +458,16 @@ export default function App() {
                         item.is_missing === 1 ||
                         item.status === 'غير موجودة' ||
                         item.status === 'مفقود';
+                      // لا يظهر مدقق إلا إذا دققه المستخدم بنفسه
                       const isVerified =
-                        !isMissing && (item.status === 'مدقق' || item.status === 'موجود');
+                        !isMissing && item.user_verified === 1 && item.status === 'مدقق';
+                      const isMoved =
+                        !isMissing &&
+                        item.is_moved === 1 &&
+                        (item.status === 'منقول' || item.status === 'تم النقل');
                       const isGin = Boolean(item.gin_code && item.gin_code.trim());
+                      const sizeProf = estimatePartSizeProfile(item);
+                      const isConsumable = sizeProf.isConsumable;
                       return (
                         <div
                           key={`${item.part_number}-${idx}`}
@@ -486,6 +486,11 @@ export default function App() {
                               <span className="font-mono font-bold text-amber-300 bg-[#19110D] px-2 py-0.5 rounded border border-[#3D271F]">
                                 رقم: {item.part_number}
                               </span>
+                              {isConsumable && (
+                                <span className="px-2 py-0.5 rounded-md bg-cyan-950 text-cyan-200 border border-cyan-500/70 font-black text-[11px]">
+                                  🔄 قطعة استهلاكية (⬅ {sizeProf.consumableTargetType})
+                                </span>
+                              )}
                               {isGin && (
                                 <span className="px-2.5 py-0.5 rounded-md bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 font-black text-[11px] shadow-sm inline-flex items-center gap-1">
                                   <span>🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}</span>
@@ -507,6 +512,11 @@ export default function App() {
                               ) : (
                                 <span className="px-2 py-0.5 rounded-md bg-orange-950/80 text-orange-300 border border-orange-600/70 font-bold text-[11px] inline-flex items-center gap-1">
                                   غير مدقق
+                                </span>
+                              )}
+                              {isMoved && (
+                                <span className="px-2 py-0.5 rounded-md bg-emerald-950/80 text-emerald-300 border border-emerald-500/60 font-bold text-[11px]">
+                                  منقول 🟢
                                 </span>
                               )}
                             </div>
@@ -570,7 +580,7 @@ export default function App() {
                                   : 'bg-red-950/60 text-red-200 border-red-700/60'
                               }`}
                             >
-                              {isMissing ? 'اعتماد المشرف: تحويل لموجودة ✓' : 'علامة × غير موجودة'}
+                              {isMissing ? 'إلغاء علامة ×' : 'علامة × غير موجودة'}
                             </button>
                             <button
                               onClick={() => showLocationDetails(item.location_code)}
@@ -595,7 +605,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* بطاقات المواقع */}
                 {filteredLocations.length === 0 ? (
                   <div className="bg-[#2C1E18] rounded-2xl border border-[#432d24] p-10 text-center space-y-4">
                     <div>
@@ -656,7 +665,6 @@ export default function App() {
               </div>
             )}
 
-            {/* View Mode 2: دليل الأصناف */}
             {activeTab === 'categories' && (
               <CategoriesCatalogView
                 onBack={showMainLocations}
@@ -670,7 +678,6 @@ export default function App() {
               />
             )}
 
-            {/* View Mode 3: جدول القطع المفهرس (يدعم 100,000 قطعة) */}
             {activeTab === 'items' && (
               <ItemsTableView
                 items={filteredItems}
@@ -685,10 +692,10 @@ export default function App() {
               />
             )}
 
-            {/* View Mode 4: واجهة المتشابهات وخطة الإحلال والتخزين المتقارب */}
             {activeTab === 'similar' && (
               <SimilarItemsPlannerView
                 items={allItems}
+                isActive={screen === 'inventory' && activeTab === 'similar'}
                 onRefresh={refreshData}
                 onOpenRelocationReport={handleOpenRelocationReportWithItems}
                 onOpenLocation={showLocationDetails}
@@ -698,7 +705,6 @@ export default function App() {
         )}
       </main>
 
-      {/* الزر البرتقالي المزخرف العائم أسفل الشاشة لفتح نافذة الكاميرا والألبوم (Gemini Vision) */}
       <div className="fixed bottom-6 inset-x-0 flex justify-center z-40 pointer-events-none">
         <button
           onClick={() => { setCaptureKind('inventory'); setIsOcrOpen(true); }}
@@ -716,7 +722,6 @@ export default function App() {
       </section>
       </div>
 
-      {/* Location Details Modal */}
       <LocationDetailModal
         locationCode={selectedLocationCode}
         summary={selectedLocationSummary}
@@ -749,7 +754,6 @@ export default function App() {
         onToggleGin={handleToggleGin}
       />
 
-      {/* OCR Modal (Gemini Vision Camera & Album) */}
       <OcrModal
         kind={captureKind}
         isOpen={isOcrOpen}
@@ -757,7 +761,6 @@ export default function App() {
         onRefresh={refreshData}
       />
 
-      {/* Item Modal */}
       <ItemModal
         isOpen={isItemModalOpen}
         item={editingItem}
@@ -769,7 +772,6 @@ export default function App() {
         onOpenRelocate={handleOpenRelocate}
       />
 
-      {/* Gin (قين) List Modal for WhatsApp */}
       <GinListModal
         isOpen={isGinListOpen}
         onClose={() => setIsGinListOpen(false)}
@@ -781,7 +783,6 @@ export default function App() {
         }}
       />
 
-      {/* Rename Location Modal */}
       <RenameLocationModal
         isOpen={!!renameLocationCode}
         currentLocationCode={renameLocationCode || ''}
@@ -789,7 +790,6 @@ export default function App() {
         onConfirmRename={handleRenameLocation}
       />
 
-      {/* Relocate Modal */}
       <RelocateModal
         isOpen={isRelocateOpen}
         item={relocatingItem}
@@ -801,7 +801,6 @@ export default function App() {
         popularLocations={locationsSummary.map((l) => l.location_code)}
       />
 
-      {/* Relocation Report Modal */}
       <RelocationReportModal
         isOpen={isRelocationReportOpen}
         onClose={() => {
@@ -811,7 +810,6 @@ export default function App() {
         movedItems={reportMovedOverride && reportMovedOverride.length > 0 ? reportMovedOverride : movedItems}
       />
 
-      {/* Wipe Database Modal */}
       <WipeDatabaseModal
         isOpen={isWipeModalOpen}
         onClose={() => setIsWipeModalOpen(false)}

@@ -45,8 +45,6 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenRelocationReport,
   onOpenGinList,
   onOpenBackup,
-  onGenerateBulk100k,
-  isBulkLoading = false,
 }) => {
   return (
     <header className="sticky top-0 z-30 bg-[#2C1E18] border-b border-[#432d24] shadow-xl">
@@ -72,14 +70,14 @@ export const Header: React.FC<HeaderProps> = ({
                     قطع الغيار - أسمو
                   </h1>
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/25 text-emerald-300 font-black border border-emerald-400/50 font-mono">
-                    v2.9.0
+                    v3.0.0 Pro
                   </span>
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-orange-500/25 text-amber-200 font-bold border border-amber-400/40">
-                    سقف 15 صنف للرف
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/25 text-cyan-200 font-bold border border-cyan-400/40">
+                    🔄 الاستهلاكية ⬅ A / FL
                   </span>
                 </div>
                 <p className="text-[11px] text-amber-200/60 font-medium">
-                  نظام الجرد الذكي للمواقع والأرقام الـ 10 (SAP Controller)
+                  نظام الجرد الذكي للمواقع والأرقام الـ 10 (SAP Controller + Gemini Vision)
                 </p>
               </div>
             </div>
@@ -130,7 +128,7 @@ export const Header: React.FC<HeaderProps> = ({
             {/* شارة القطع المعلمة بـ × غير موجودة */}
             <button
               type="button"
-              onClick={() => onStatusChange(selectedStatus === 'غير موجودة' ? 'الكل' : 'غير موجودة')}
+              onClick={() => onStatusChange(selectedStatus === 'غير موجودة' ? '' : 'غير موجودة')}
               title="عرض القطع المعلمة بـ (× غير موجودة) في أوراق الجرد"
               className={`px-3 py-1 rounded-xl border flex items-center gap-1.5 text-xs font-bold cursor-pointer transition-all ${
                 selectedStatus === 'غير موجودة'
@@ -190,7 +188,7 @@ export const Header: React.FC<HeaderProps> = ({
                 className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-emerald-800 to-emerald-950 hover:from-emerald-700 hover:to-emerald-900 text-emerald-200 text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-950/50 transition-all cursor-pointer border border-emerald-500/50"
               >
                 <FileText className="w-3.5 h-3.5 text-emerald-400" />
-                <span>تقرير المنقولة</span>
+                <span>قائمة النقل اليومية</span>
                 {movedCount > 0 && (
                   <span className="px-1.5 py-0.2 rounded-full bg-emerald-500 text-neutral-950 text-[10px] font-black">
                     {movedCount}
@@ -223,10 +221,10 @@ export const Header: React.FC<HeaderProps> = ({
                   searchField === 'part'
                     ? '🔍 اكتب رقم القطعة (10 أرقام مثل 1001023714)...'
                     : searchField === 'location'
-                    ? '🔍 اكتب اسم الموقع (مثل N11C2 أو N06C1 أو N11FL2)...'
+                    ? '🔍 اكتب اسم الموقع (مثل N11A1 أو N06FL1 أو N11C2)...'
                     : searchField === 'name'
                     ? '🔍 اكتب اسم القطعة بالعربي أو الإنجليزي (مسمار، محبس، GASKET, VALVE)...'
-                    : '🔍 بحث فوري بـ: اسم القطعة أو رقم القطعة (10 أرقام) أو اسم الموقع (مثل N11C2)...'
+                    : '🔍 بحث فوري بـ: اسم القطعة أو رقم القطعة (10 أرقام) أو اسم الموقع (مثل N11A1)...'
                 }
                 className="w-full pl-9 pr-10 py-2 rounded-xl bg-[#1F1511] text-neutral-100 placeholder-neutral-400 border border-[#4D3429] focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 text-xs sm:text-sm transition-all"
               />
@@ -276,14 +274,12 @@ export const Header: React.FC<HeaderProps> = ({
                   className="bg-transparent text-neutral-200 text-xs font-bold focus:outline-none cursor-pointer"
                 >
                   <option value="" className="bg-[#2C1E18]">كل الحالات</option>
-                  <option value="موجود" className="bg-[#2C1E18]">✓ موجود</option>
-                  <option value="مفقود" className="bg-[#2C1E18]">× مفقود ({missingCount})</option>
-                  <option value="غير موجودة" className="bg-[#2C1E18]">× غير موجودة ({missingCount})</option>
-                  <option value="مضاف" className="bg-[#2C1E18]">✓ موجودة / مضاف</option>
-                  <option value="تم النقل" className="bg-[#2C1E18]">تم النقل 🟢</option>
+                  <option value="استهلاكية" className="bg-[#2C1E18]">🔄 قطع استهلاكية (A / FL)</option>
+                  <option value="منقول" className="bg-[#2C1E18]">منقول 🟢 (نقلته بنفسي) ({movedCount})</option>
                   <option value="لم تنتقل" className="bg-[#2C1E18]">لم تنتقل 🟠</option>
-                  <option value="مدقق" className="bg-[#2C1E18]">مدقق</option>
+                  <option value="مدقق" className="bg-[#2C1E18]">✓ مدقق (دققته بنفسي)</option>
                   <option value="غير مدقق" className="bg-[#2C1E18]">غير مدقق</option>
+                  <option value="غير موجودة" className="bg-[#2C1E18]">× غير موجودة ({missingCount})</option>
                 </select>
               </div>
 

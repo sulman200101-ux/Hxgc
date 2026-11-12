@@ -4,6 +4,7 @@ import { dbService } from '../services/db';
 import { interpretMark, auditSheetCompleteness, type DocumentLine, type StockDocument } from '../services/documents';
 import { processOcrFromImage } from '../services/localOcr';
 import { readImageBatch } from '../services/batchOcr';
+import { isConsumableDescription } from '../utils/translator';
 import { prepareAudio, playOperationSound } from '../utils/operationSounds';
 import { CheckSquare, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
 
@@ -140,7 +141,7 @@ export function BatchDocumentsPanel({
             sheetIndex: index,
             totalSheets: total,
             sheetName: currentSheet?.original?.name || `ورقة ${index}`,
-            stage: 'جارٍ قراءة الورقة كاملة واستخراج بيانات الجدول...',
+            stage: 'جارٍ قراءة الورقة كاملة واستخراج بيانات الجدول بأعلى دقة بمساعدة جمني...',
           });
           setMessage('');
         },
@@ -150,16 +151,23 @@ export function BatchDocumentsPanel({
             return;
           }
           const mappedLines: DocumentLine[] = result.rows.map((row) => {
+            // لا تُعتمد إشارة (✓) أو (F) تلقائياً كـ "مدقق" أو "منقول" من قراءة الورقة إلا إذا دققها أو نقلها المستخدم بنفسه
             const sym =
-              row.mark_symbol ||
-              (row.is_missing === 1
+              row.is_missing === 1 || row.mark_symbol === 'X'
                 ? 'X'
-                : row.remark && /^F/i.test(row.remark)
-                ? 'F'
-                : row.remark && /^[-N]/i.test(row.remark)
+                : row.mark_symbol === 'N' || (row.remark && /^[-N]/i.test(row.remark))
                 ? 'N'
-                : '');
+                : '';
             const marks = interpretMark(sym, row.remark || '');
+            const descEn =
+              row.description_en &&
+              row.description_en !== 'غير محدد' &&
+              row.description_en !== 'SPARE PART ASMO'
+                ? row.description_en
+                : '';
+            const isConsumable =
+              row.is_consumable === 1 || isConsumableDescription(descEn, row.category) ? 1 : 0;
+
             return {
               part_number: row.part_number || '',
               quantity:
@@ -167,17 +175,13 @@ export function BatchDocumentsPanel({
                   ? row.qty_total
                   : 0,
               location: row.location_code || '',
-              description_en:
-                row.description_en &&
-                row.description_en !== 'غير محدد' &&
-                row.description_en !== 'SPARE PART ASMO'
-                  ? row.description_en
-                  : '',
+              description_en: descEn,
               description_ar: row.description_ar || '',
               check: marks.mark_symbol || '',
-              remark: marks.shortage > 0 ? `-${marks.shortage}` : sym === 'F' ? 'F' : '',
+              remark: marks.shortage > 0 ? `-${marks.shortage}` : '',
               mark_symbol: marks.mark_symbol,
               audit_meaning: row.audit_meaning || marks.audit_meaning,
+              is_consumable: isConsumable,
               reviewed: true,
             };
           });
@@ -197,7 +201,7 @@ export function BatchDocumentsPanel({
             batchId: 'AUTO-' + crypto.randomUUID(),
             kind,
             requester: requester || 'المستخدم المحلي',
-            reason: 'حفظ تلقائي فوري بعد انتهاء القراءة',
+            reason: 'حفظ تلقائي فوري بعد انتهاء القراءة (تبقى غير مدققة وغير منقولة حتى تدققها أو تنقلها بنفسك)',
             lines: mappedLines,
             original: (targetSheets || sheets).find((s) => s.key === result.key)?.original,
             status: 'pending',
@@ -213,7 +217,7 @@ export function BatchDocumentsPanel({
         const totalAutoSaved = newlyReadSheets.reduce((acc, d) => acc + d.lines.length, 0);
         playOperationSound('issued');
         setMessage(
-          `✅ اكتملت القراءة وتم حفظ واعتماد جميع السطور تلقائياً في المخزون (${totalAutoSaved} سطراً من ${newlyReadSheets.length} ورقة). يمكنك أيضاً تعديل أي سطر أدناه وإعادة الحفظ فوراً.`
+          `✅ اكتملت القراءة وتم حفظ جميع السطور تلقائياً في المخزون (${totalAutoSaved} سطراً من ${newlyReadSheets.length} ورقة) بحالة "غير مدقق" و"لم تنتقل" حتى تدققها أو تنقلها بنفسك.`
         );
       } else {
         playOperationSound('uncertain');
@@ -256,7 +260,6 @@ export function BatchDocumentsPanel({
         قراءة وحفظ عدة أوراق دفعة واحدة
       </summary>
 
-      {/* مؤشر تحميل دائري بسيط يظهر عند بدء الطلب الموحد ويختفي فور استلام الـ JSON */}
       {readingProgress.active && (
         <div
           role="status"
@@ -370,7 +373,6 @@ export function BatchDocumentsPanel({
           </div>
         </div>
 
-        {/* عرض رسائل الخطأ للأوراق التي تعذرت قراءتها فقط دون إظهار صناديق الأوراق المنتظرة */}
         {errorSheets.map((sheet) => (
           <div
             key={sheet.key}
@@ -391,11 +393,13 @@ export function BatchDocumentsPanel({
           </div>
         ))}
 
-        {/* عرض الأوراق التي تمت قراءتها فقط بشكل مختصر ونظيف */}
         {reviewedSheets.map((sheet, sheetIndex) => {
           const verifiedCount = sheet.lines.filter((l) => l.check === '✓').length;
           const unverifiedCount = sheet.lines.filter((l) => l.check === '').length;
           const missingCount = sheet.lines.filter((l) => l.check === 'X').length;
+          const consumableCount = sheet.lines.filter(
+            (l) => l.is_consumable === 1 || isConsumableDescription(l.description_en)
+          ).length;
           const completeness = auditSheetCompleteness(sheet.lines, {
             expectedRows: sheet.expectedRowCount ?? sheet.lines.length,
           });
@@ -412,12 +416,13 @@ export function BatchDocumentsPanel({
               data-sheet-index={sheetIndex}
             >
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                <div className="flex items-center gap-1.5 font-bold text-amber-300">
+                <div className="flex items-center gap-1.5 font-bold text-amber-300 flex-wrap">
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                   <span>
                     {sheet.original.name} ({completeness.extractedRowCount} سطر | صافي:{' '}
-                    {completeness.netUniquePartsCount} | مدقق ✓: {verifiedCount} | غير مدقق:{' '}
-                    {unverifiedCount} | غير موجود ×: {missingCount})
+                    {completeness.netUniquePartsCount} | مدقق يدوياً ✓: {verifiedCount} | غير مدقق:{' '}
+                    {unverifiedCount} | غير موجود ×: {missingCount}
+                    {consumableCount > 0 ? ` | 🔄 استهلاكية (A/FL): ${consumableCount}` : ''})
                   </span>
                 </div>
                 <button
@@ -466,95 +471,103 @@ export function BatchDocumentsPanel({
               )}
 
               <div className="max-h-72 overflow-y-auto space-y-1.5 pr-1">
-                {sheet.lines.map((line, index) => (
-                  <div
-                    key={index}
-                    className="border border-stone-800 py-1.5 px-2 rounded-lg bg-stone-900/50 flex flex-wrap items-center justify-between gap-2 text-xs"
-                  >
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <input
-                        placeholder="رقم القطعة"
-                        pattern="[0-9]{10}"
-                        className="bg-stone-800 px-1.5 py-1 w-28 rounded font-mono text-amber-300"
-                        value={line.part_number}
-                        onChange={(e) =>
-                          patchLine(sheet.key, index, {
-                            part_number: e.target.value,
-                          })
-                        }
-                        title="رقم القطعة"
-                      />
-                      <input
-                        placeholder="الموقع"
-                        className="bg-stone-800 px-1.5 py-1 w-20 rounded font-mono text-emerald-300"
-                        value={line.location}
-                        onChange={(e) =>
-                          patchLine(sheet.key, index, {
-                            location: e.target.value,
-                          })
-                        }
-                        title="الموقع"
-                      />
-                      <input
-                        placeholder="الكمية"
-                        type="number"
-                        min="0"
-                        step="1"
-                        className="bg-stone-800 px-1.5 py-1 w-16 rounded font-mono text-white"
-                        value={Number.isFinite(line.quantity) && line.quantity >= 0 ? line.quantity : ''}
-                        onChange={(e) =>
-                          patchLine(sheet.key, index, {
-                            quantity: e.target.value === '' ? Number.NaN : Number(e.target.value),
-                          })
-                        }
-                        title="الكمية"
-                      />
-                      <select
-                        className="bg-stone-800 px-1.5 py-1 rounded text-xs"
-                        value={line.check}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          const marks = interpretMark(val, line.remark);
-                          patchLine(sheet.key, index, {
-                            check: val,
-                            mark_symbol: marks.mark_symbol,
-                            audit_meaning: marks.audit_meaning,
-                          });
-                        }}
-                      >
-                        <option value="">غير مدققة</option>
-                        <option value="✓">✓ (القطع موجودة)</option>
-                        <option value="X">X (القطع غير موجودة)</option>
-                        <option value="F">F (تم نقل العدد الزائد إلى مكان آخر)</option>
-                        <option value="N">N (ناقص العدد)</option>
-                      </select>
-                      <input
-                        placeholder="ناقص -N"
-                        className="bg-stone-800 px-1.5 py-1 w-16 rounded font-mono text-amber-300"
-                        value={line.remark}
-                        onChange={(e) =>
-                          patchLine(sheet.key, index, {
-                            remark: e.target.value,
-                          })
-                        }
-                      />
+                {sheet.lines.map((line, index) => {
+                  const lineIsConsumable =
+                    line.is_consumable === 1 || isConsumableDescription(line.description_en);
+                  return (
+                    <div
+                      key={index}
+                      className="border border-stone-800 py-1.5 px-2 rounded-lg bg-stone-900/50 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <input
+                          placeholder="رقم القطعة"
+                          pattern="[0-9]{10}"
+                          className="bg-stone-800 px-1.5 py-1 w-28 rounded font-mono text-amber-300"
+                          value={line.part_number}
+                          onChange={(e) =>
+                            patchLine(sheet.key, index, {
+                              part_number: e.target.value,
+                            })
+                          }
+                          title="رقم القطعة"
+                        />
+                        <input
+                          placeholder="الموقع"
+                          className="bg-stone-800 px-1.5 py-1 w-20 rounded font-mono text-emerald-300"
+                          value={line.location}
+                          onChange={(e) =>
+                            patchLine(sheet.key, index, {
+                              location: e.target.value,
+                            })
+                          }
+                          title="الموقع"
+                        />
+                        <input
+                          placeholder="الكمية"
+                          type="number"
+                          min="0"
+                          step="1"
+                          className="bg-stone-800 px-1.5 py-1 w-16 rounded font-mono text-white"
+                          value={Number.isFinite(line.quantity) && line.quantity >= 0 ? line.quantity : ''}
+                          onChange={(e) =>
+                            patchLine(sheet.key, index, {
+                              quantity: e.target.value === '' ? Number.NaN : Number(e.target.value),
+                            })
+                          }
+                          title="الكمية"
+                        />
+                        <select
+                          className="bg-stone-800 px-1.5 py-1 rounded text-xs"
+                          value={line.check}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            const marks = interpretMark(val, line.remark);
+                            patchLine(sheet.key, index, {
+                              check: val,
+                              mark_symbol: marks.mark_symbol,
+                              audit_meaning: marks.audit_meaning,
+                            });
+                          }}
+                        >
+                          <option value="">غير مدقق (افتراضي)</option>
+                          <option value="✓">✓ مدقق (دققته بنفسي)</option>
+                          <option value="X">X (القطع غير موجودة)</option>
+                          <option value="N">N (ناقص العدد)</option>
+                        </select>
+                        <input
+                          placeholder="ناقص -N"
+                          className="bg-stone-800 px-1.5 py-1 w-16 rounded font-mono text-amber-300"
+                          value={line.remark}
+                          onChange={(e) =>
+                            patchLine(sheet.key, index, {
+                              remark: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="flex items-center gap-2 text-[11px] text-neutral-300">
+                        {lineIsConsumable && (
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-950/90 text-cyan-200 border border-cyan-500/50 font-black text-[10px]">
+                            🔄 استهلاكية (⬅ A/FL)
+                          </span>
+                        )}
+                        <span className="truncate max-w-[180px]">{line.description_ar || line.description_en}</span>
+                        <button
+                          type="button"
+                          className="px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 hover:bg-red-900 cursor-pointer"
+                          onClick={() =>
+                            patch(sheet.key, {
+                              lines: sheet.lines.filter((_, i) => i !== index),
+                            })
+                          }
+                        >
+                          ×
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 text-[11px] text-neutral-300">
-                      <span className="truncate max-w-[180px]">{line.description_ar || line.description_en}</span>
-                      <button
-                        type="button"
-                        className="px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 hover:bg-red-900 cursor-pointer"
-                        onClick={() =>
-                          patch(sheet.key, {
-                            lines: sheet.lines.filter((_, i) => i !== index),
-                          })
-                        }
-                      >
-                        ×
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           );

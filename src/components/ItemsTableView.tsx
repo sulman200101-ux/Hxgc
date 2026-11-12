@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { InventoryItem } from '../types';
-import { exportInventoryListToPdfFile } from '../utils/pdfExportUtil';
+import { exportInventoryListToPdfFile, buildInventoryWhatsAppSummary } from '../utils/pdfExportUtil';
 import { exportAndShareForEditing } from '../utils/csvExportUtil';
+import { estimatePartSizeProfile } from '../services/transferSuggestions';
 import {
   Edit3,
   Trash2,
@@ -15,6 +16,7 @@ import {
   XCircle,
   ChevronRight,
   ChevronLeft,
+  MessageCircle,
 } from 'lucide-react';
 
 interface ItemsTableViewProps {
@@ -38,6 +40,7 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
 }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [lastWhatsappUrl, setLastWhatsappUrl] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
 
   useEffect(() => {
@@ -49,15 +52,23 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
   const startIndex = (safePage - 1) * PAGE_SIZE;
   const pageItems = items.slice(startIndex, startIndex + PAGE_SIZE);
 
-  const handleExportTablePdf = async () => {
+  const handleExportTablePdf = async (sendViaWhatsApp = true) => {
     setIsExporting(true);
     try {
-      await exportInventoryListToPdfFile({
-        items: items,
-        title: `تقرير جرد الأصناف المعروضة (${items.length.toLocaleString()} صنف)`,
+      const title = `تقرير جرد الأصناف المعروضة (${items.length.toLocaleString()} صنف)`;
+      const file = await exportInventoryListToPdfFile({
+        items,
+        title,
+        sendViaWhatsApp,
       });
-      setExportNotice('تم تصدير وحفظ ملف PDF بنجاح! 📥');
-      setTimeout(() => setExportNotice(null), 4000);
+      const summary = buildInventoryWhatsAppSummary(items, title, file.name);
+      setLastWhatsappUrl(`https://wa.me/?text=${encodeURIComponent(summary)}`);
+      setExportNotice(
+        sendViaWhatsApp
+          ? 'تم تصدير ملف PDF وتجهيز إرساله عبر واتساب بنجاح! 📲'
+          : 'تم تصدير وحفظ ملف PDF بنجاح! 📥'
+      );
+      setTimeout(() => setExportNotice(null), 6000);
     } catch (err) {
       console.error('PDF export error:', err);
       setExportNotice('تعذر تصدير PDF. حاول مرة أخرى؛ لم تتغير بيانات المخزون.');
@@ -99,14 +110,36 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
             </span>
           )}
 
+          {lastWhatsappUrl && (
+            <a
+              href={lastWhatsappUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 rounded-xl bg-[#25D366] hover:bg-[#1da851] text-white text-xs font-black flex items-center gap-1.5 shadow-md"
+            >
+              <MessageCircle className="w-3.5 h-3.5" />
+              <span>فتح واتساب الآن 📲</span>
+            </a>
+          )}
+
           <button
             type="button"
-            onClick={handleExportTablePdf}
+            onClick={() => handleExportTablePdf(true)}
             disabled={isExporting}
-            className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-700 to-emerald-800 hover:from-emerald-600 hover:to-emerald-700 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-all cursor-pointer border border-emerald-500/40 active:scale-95"
+            className="px-3.5 py-1.5 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-md transition-all cursor-pointer border border-emerald-400/50 active:scale-95"
+          >
+            {isExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MessageCircle className="w-3.5 h-3.5" />}
+            <span>تصدير PDF وإرسال واتساب 📲</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleExportTablePdf(false)}
+            disabled={isExporting}
+            className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-emerald-700 to-emerald-800 hover:from-emerald-600 hover:to-emerald-700 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-all cursor-pointer border border-emerald-500/40 active:scale-95"
           >
             {isExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
-            <span>تصدير PDF 📥</span>
+            <span>تنزيل PDF 📥</span>
           </button>
 
           <button
@@ -146,9 +179,16 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
           <tbody className="divide-y divide-[#3A271F]">
             {pageItems.map((item, idx) => {
               const isMissing = item.is_missing === 1 || item.status === 'غير موجودة';
-              const isVerified = !isMissing && item.status === 'مدقق';
-              const isMoved = item.is_moved === 1 || item.status === 'تم النقل' || item.status === 'منقول';
+              // لا تظهر مدقق إلا إذا دققها المستخدم بنفسه
+              const isVerified = !isMissing && item.user_verified === 1 && item.status === 'مدقق';
+              // لا تظهر منقول إلا إذا نقلها المستخدم بنفسه
+              const isMoved =
+                !isMissing &&
+                item.is_moved === 1 &&
+                (item.status === 'تم النقل' || item.status === 'منقول');
               const isGin = Boolean(item.gin_code && item.gin_code.trim());
+              const sizeProf = estimatePartSizeProfile(item);
+              const isConsumable = sizeProf.isConsumable;
 
               return (
                 <tr
@@ -165,6 +205,11 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                 >
                   <td className="py-3 px-4 font-mono font-bold text-amber-300">
                     <div>{item.part_number}</div>
+                    {isConsumable && (
+                      <span className="mt-1 mr-1 px-2 py-0.5 rounded-md text-[10px] font-black bg-cyan-950 text-cyan-200 border border-cyan-500/70 inline-block">
+                        🔄 استهلاكية ⬅ {sizeProf.consumableTargetType}
+                      </span>
+                    )}
                     {isGin && (
                       <span className="mt-1 px-2 py-0.5 rounded-md text-[10px] font-black bg-gradient-to-r from-purple-700 to-fuchsia-700 text-white border border-purple-300 inline-block">
                         🔖 قين{item.gin_code !== 'قين' ? `: ${item.gin_code}` : ''}
@@ -176,7 +221,7 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                       <MapPin className="w-3 h-3 text-amber-500" />
                       {item.location_code}
                     </span>
-                    {item.old_location && (
+                    {isMoved && item.old_location && (
                       <span className="text-[10px] text-neutral-500 block font-normal">
                         السابق: {item.old_location}
                       </span>
@@ -225,9 +270,9 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                         غير مدقق
                       </span>
                     )}
-                    {isMoved && !isMissing && (
+                    {isMoved && (
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-500/60 inline-flex items-center gap-1 mt-1">
-                        تم النقل 🟢
+                        منقول 🟢
                       </span>
                     )}
                   </td>
@@ -241,7 +286,7 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                               isVerified ? 'غير مدقق' : 'مدقق'
                             )
                           }
-                          title="اضغط لتحويل القطعة إلى اللون الأخضر مدقق ✓"
+                          title="اضغط لتدقيق القطعة بنفسك وتحويلها إلى اللون الأخضر مدقق ✓"
                           className={`px-2.5 py-1 rounded-lg text-[11px] font-black border flex items-center gap-1 transition-all cursor-pointer active:scale-95 ${
                             isVerified
                               ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-md shadow-emerald-950/60'
@@ -256,7 +301,8 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                         onClick={() =>
                           onMarkItemStatus(
                             item.part_number,
-                            isMissing ? 'مدقق' : 'غير موجودة'
+                            // عند إلغاء علامة غير موجودة تعود إلى غير مدقق حتى يدققها المستخدم بنفسه
+                            isMissing ? 'غير مدقق' : 'غير موجودة'
                           )
                         }
                         className={`px-2 py-1 rounded text-[11px] font-bold border cursor-pointer transition-all ${
@@ -266,7 +312,7 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                         }`}
                         title="تبديل علامة × غير موجودة"
                       >
-                        {isMissing ? 'تغيير المشرف ✓' : '× غير موجودة'}
+                        {isMissing ? 'إلغاء علامة ×' : '× غير موجودة'}
                       </button>
                       {onToggleGin && (
                         <button
@@ -288,7 +334,7 @@ export const ItemsTableView: React.FC<ItemsTableViewProps> = ({
                         title="نقل موقع القطعة 🟢"
                       >
                         <ArrowRightLeft className="w-3 h-3 text-emerald-400" />
-                        <span>نقل 🟢</span>
+                        <span>{isConsumable ? `نقل (${sizeProf.consumableTargetType}) 🟢` : 'نقل 🟢'}</span>
                       </button>
                       <button
                         onClick={() => onEditItem(item)}

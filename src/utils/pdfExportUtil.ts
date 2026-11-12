@@ -4,6 +4,7 @@ import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import type { InventoryItem, LocationSummary } from '../types';
+import { isConsumablePart, isFLLocation, isALocation } from '../services/transferSuggestions';
 export { exportAndShareForEditing } from './csvExportUtil';
 
 export interface PdfExportOptions {
@@ -43,6 +44,91 @@ const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 function progress(done: number, total: number, callback?: PdfProgress) {
   callback?.(done, total);
   window.dispatchEvent(new CustomEvent('asmo-pdf-progress', { detail: { done, total } }));
+}
+
+function getStrictItemStatusLabel(item: InventoryItem): string {
+  if (item.is_missing === 1 || item.status === 'غير موجودة' || item.status === 'مفقود') {
+    return '× غير موجودة';
+  }
+  const parts: string[] = [];
+  if (item.user_verified === 1 && item.status === 'مدقق') {
+    parts.push('✓ مدقق');
+  } else {
+    parts.push('غير مدقق');
+  }
+  if (item.is_moved === 1 && (item.status === 'منقول' || item.status === 'تم النقل')) {
+    parts.push(`منقول من ${item.old_location || 'السابق'}`);
+  }
+  if (isConsumablePart(item)) {
+    const targetShelf = isFLLocation(item.location_code)
+      ? 'FL'
+      : isALocation(item.location_code)
+      ? 'A'
+      : 'A/FL';
+    parts.push(`استهلاكية (${targetShelf})`);
+  }
+  return parts.join(' | ');
+}
+
+export function buildInventoryWhatsAppSummary(
+  items: InventoryItem[],
+  title: string,
+  filename?: string
+): string {
+  const dateStr = new Date().toLocaleDateString('ar-SA', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const totalQty = items.reduce((acc, i) => acc + (Number(i.qty_remaining) || 0), 0);
+  const consumableCount = items.filter((i) => isConsumablePart(i)).length;
+  const movedCount = items.filter(
+    (i) => i.is_moved === 1 && (i.status === 'منقول' || i.status === 'تم النقل')
+  ).length;
+  const verifiedCount = items.filter((i) => i.user_verified === 1 && i.status === 'مدقق').length;
+
+  const headerLines = [
+    `📋 *${title}*`,
+    `🏭 مستودع قطع الغيار — أسمو (ASMO)`,
+    `📅 التاريخ: ${dateStr}`,
+    `📦 إجمالي الأصناف: *${items.length}* صنف (المتبقي: *${totalQty}* وحدة)`,
+    consumableCount > 0 ? `🔄 القطع الاستهلاكية (إلى A أو FL): *${consumableCount}* صنف` : '',
+    movedCount > 0 ? `🟢 القطع المنقولة من قِبل المستخدم: *${movedCount}* صنف` : '',
+    verifiedCount > 0 ? `✅ القطع المدققة من قِبل المستخدم: *${verifiedCount}* صنف` : '',
+    filename ? `📎 مرفق ملف PDF: *${filename}*` : '',
+    `━━━━━━━━━━━━━━━━━━━━`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const previewRows = items
+    .slice(0, 20)
+    .map((item, idx) => {
+      const consTag = isConsumablePart(item) ? ' [🔄 استهلاكية ⬅ A/FL]' : '';
+      const moveTag =
+        item.is_moved === 1 && (item.status === 'منقول' || item.status === 'تم النقل')
+          ? ` (منقول من ${item.old_location || 'السابق'} ⬅ ${item.location_code})`
+          : ` [${item.location_code}]`;
+      const auditTag =
+        item.is_missing === 1 || item.status === 'غير موجودة'
+          ? '× غير موجودة'
+          : item.user_verified === 1 && item.status === 'مدقق'
+          ? '✓ مدقق'
+          : 'غير مدقق';
+      return (
+        `${idx + 1}) *${item.part_number}*${consTag}\n` +
+        `   🔹 ${item.description_ar || item.description_en}\n` +
+        `   📍 الموقع: *${ moveTag.trim() }* | المتبقي: *${item.qty_remaining}* | الحالة: ${auditTag}`
+      );
+    })
+    .join('\n\n');
+
+  const extra =
+    items.length > 20
+      ? `\n\n... بالإضافة إلى *${items.length - 20}* صنفاً آخر مدرجاً بالكامل في ملف الـ PDF المرفق.`
+      : '';
+
+  return `${headerLines}\n${previewRows}${extra}`;
 }
 
 export async function createTablePdf({
@@ -140,7 +226,28 @@ export async function createTablePdf({
   }
 }
 
-export async function savePdfFile(file: File): Promise<void> {
+/**
+ * فتح رابط خارجي (مثل واتساب أو البريد) بأمان داخل بيئة العرض دون استخدام window.open المحظور
+ */
+export function triggerExternalShareLink(url: string): void {
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.target = '_blank';
+  anchor.rel = 'noopener noreferrer';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+export async function savePdfFile(
+  file: File,
+  whatsappOptions?: { sendViaWhatsApp?: boolean; title?: string; text?: string }
+): Promise<string | undefined> {
+  const summaryText =
+    whatsappOptions?.text ||
+    `📋 *${whatsappOptions?.title || 'تقرير PDF — مستودع أسمو ASMO'}*\n📎 الملف المرفق: ${file.name}`;
+  const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(summaryText)}`;
+
   if (Capacitor.isNativePlatform()) {
     const result = await Filesystem.writeFile({
       path: `reports/${file.name}`,
@@ -149,12 +256,14 @@ export async function savePdfFile(file: File): Promise<void> {
       recursive: true,
     });
     await Share.share({
-      title: 'تقرير PDF',
+      title: whatsappOptions?.title || 'تقرير PDF — ASMO',
+      text: summaryText,
       url: result.uri,
-      dialogTitle: 'حفظ أو مشاركة التقرير',
+      dialogTitle: 'إرسال تقرير PDF عبر واتساب 📲',
     });
-    return;
+    return whatsappUrl;
   }
+
   const url = URL.createObjectURL(file);
   const link = document.createElement('a');
   link.href = url;
@@ -163,16 +272,38 @@ export async function savePdfFile(file: File): Promise<void> {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+  if (whatsappOptions?.sendViaWhatsApp) {
+    if (navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({
+          files: [file],
+          title: whatsappOptions.title || file.name,
+          text: summaryText,
+        });
+        return whatsappUrl;
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') {
+          return whatsappUrl;
+        }
+      }
+    }
+    triggerExternalShareLink(whatsappUrl);
+  }
+
+  return whatsappUrl;
 }
 
 async function inventoryFile(
   items: InventoryItem[],
   title: string,
-  onProgress?: PdfProgress
+  onProgress?: PdfProgress,
+  sendViaWhatsApp = false
 ): Promise<File> {
+  const filename = `ASMO-${Date.now()}.pdf`;
   const file = await createTablePdf({
     title,
-    filename: `ASMO-${Date.now()}.pdf`,
+    filename,
     onProgress,
     headers: [
       '#',
@@ -182,20 +313,25 @@ async function inventoryFile(
       'الإجمالي',
       'المصروف',
       'المتبقي',
-      'الحالة / الموقع السابق',
+      'الحالة / استهلاكية / الموقع السابق',
     ],
     rows: items.map((item, index) => [
       String(index + 1),
       item.part_number,
-      `${item.description_ar || ''}\n${item.description_en || ''}`,
+      `${item.description_ar || ''}${isConsumablePart(item) ? ' [قطعة استهلاكية A/FL]' : ''}\n${item.description_en || ''}`,
       item.location_code,
       String(item.qty_total),
       String(item.qty_out),
       String(item.qty_remaining),
-      `${item.status}${item.is_moved ? ` — من ${item.old_location || ''}` : ''}`,
+      getStrictItemStatusLabel(item),
     ]),
   });
-  await savePdfFile(file);
+  const summaryText = buildInventoryWhatsAppSummary(items, title, filename);
+  await savePdfFile(file, {
+    sendViaWhatsApp,
+    title,
+    text: summaryText,
+  });
   return file;
 }
 
@@ -203,12 +339,14 @@ export async function exportCategoryToPdfFile({
   categoryName,
   items,
   onProgress,
+  sendViaWhatsApp = false,
 }: {
   categoryName: string;
   items: InventoryItem[];
   onProgress?: PdfProgress;
+  sendViaWhatsApp?: boolean;
 }): Promise<File> {
-  return inventoryFile(items, `تقرير تصنيف: ${categoryName}`, onProgress);
+  return inventoryFile(items, `تقرير تصنيف: ${categoryName}`, onProgress, sendViaWhatsApp);
 }
 
 export async function exportLocationToPdfFile({
@@ -216,25 +354,29 @@ export async function exportLocationToPdfFile({
   items,
   summary,
   onProgress,
+  sendViaWhatsApp = false,
 }: {
   locationCode: string;
   items: InventoryItem[];
   summary?: LocationSummary;
   onProgress?: PdfProgress;
+  sendViaWhatsApp?: boolean;
 }): Promise<File> {
-  return inventoryFile(items, `تقرير موقع: ${locationCode}`, onProgress);
+  return inventoryFile(items, `تقرير موقع: ${locationCode}`, onProgress, sendViaWhatsApp);
 }
 
 export async function exportInventoryListToPdfFile({
   items,
   title = 'تقرير الجرد الشامل',
   onProgress,
+  sendViaWhatsApp = false,
 }: {
   items: InventoryItem[];
   title?: string;
   onProgress?: PdfProgress;
+  sendViaWhatsApp?: boolean;
 }): Promise<File> {
-  return inventoryFile(items, title, onProgress);
+  return inventoryFile(items, title, onProgress, sendViaWhatsApp);
 }
 
 export async function generateReportPdfBlob({
@@ -268,33 +410,22 @@ export async function generateReportPdfBlob({
   const dataUri = `data:application/pdf;base64,${base64(
     new Uint8Array(await pdfFile.arrayBuffer())
   )}`;
+  const downloadUrl = URL.createObjectURL(pdfFile);
+  setTimeout(() => URL.revokeObjectURL(downloadUrl), 120000);
   return {
     pdfBlob: pdfFile,
     pdfFile,
     filename: pdfFile.name,
     dataUri,
-    downloadUrl: URL.createObjectURL(pdfFile),
+    downloadUrl,
   };
-}
-
-/**
- * فتح رابط خارجي (مثل واتساب أو البريد) بأمان داخل بيئة العرض دون استخدام window.open المحظور
- */
-export function triggerExternalShareLink(url: string): void {
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.target = '_blank';
-  anchor.rel = 'noopener noreferrer';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
 }
 
 export async function sharePdfFile({
   reportElementId,
   title,
   text,
-  targetApp,
+  targetApp = 'whatsapp',
 }: {
   reportElementId: string;
   title: string;
@@ -302,6 +433,8 @@ export async function sharePdfFile({
   targetApp?: 'whatsapp' | 'email' | 'any';
 }): Promise<{ sharedViaFile: boolean; filename: string; downloadUrl: string; whatsappUrl?: string }> {
   const result = await generateReportPdfBlob({ reportElementId });
+  const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(text)}`;
+  const mailtoUrl = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`;
 
   if (Capacitor.isNativePlatform()) {
     const saved = await Filesystem.writeFile({
@@ -314,20 +447,18 @@ export async function sharePdfFile({
       title,
       text,
       url: saved.uri,
-      dialogTitle: targetApp === 'whatsapp' ? 'إرسال التقرير عبر واتساب' : 'مشاركة تقرير PDF',
+      dialogTitle: targetApp === 'whatsapp' ? 'إرسال التقرير عبر واتساب 📲' : 'مشاركة تقرير PDF',
     });
     return {
       sharedViaFile: true,
       filename: result.filename,
       downloadUrl: result.downloadUrl,
+      whatsappUrl,
     };
   }
 
   // تنزيل ملف الـ PDF تلقائياً للمستخدم
   await savePdfFile(result.pdfFile);
-
-  const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(text)}`;
-  const mailtoUrl = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`;
 
   if (navigator.canShare?.({ files: [result.pdfFile] })) {
     try {

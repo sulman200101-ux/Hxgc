@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { dbService } from '../services/db';
-import { generateReportPdfBlob, savePdfFile } from '../utils/pdfExportUtil';
+import { generateReportPdfBlob, savePdfFile, sharePdfFile } from '../utils/pdfExportUtil';
+import { isConsumablePart, isFLLocation, isALocation } from '../services/transferSuggestions';
 import {
   getCandidateApiUrls,
   isRunningInNativeApk,
@@ -20,6 +21,7 @@ import {
   EyeOff,
   Trash2,
   ClipboardPaste,
+  MessageCircle,
 } from 'lucide-react';
 
 interface EngineStatusState {
@@ -37,6 +39,7 @@ export function ReportsPanel() {
   const [kind, setKind] = useState('inventory');
   const [rows, setRows] = useState<string[][]>([]);
   const [message, setMessage] = useState('');
+  const [whatsappUrl, setWhatsappUrl] = useState<string | null>(null);
   const [customApiKey, setCustomApiKey] = useState<string>(() => getStoredCustomGeminiApiKey());
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [hasSavedCustomKey, setHasSavedCustomKey] = useState<boolean>(() =>
@@ -51,7 +54,7 @@ export function ReportsPanel() {
     checking: false,
     geminiActive: null,
     localOcrActive: true,
-    model: 'gemini-3-flash-preview',
+    model: 'gemini-2.5-flash',
     statusLabel: 'جاري التحقق...',
     details: 'اضغط على "فحص حالة محرك جمني الآن" أو أدخل مفتاح Gemini API واختبره.',
   });
@@ -66,7 +69,6 @@ export function ReportsPanel() {
     const activeCustomKey =
       overrideKey !== undefined ? overrideKey.trim() : getStoredCustomGeminiApiKey();
 
-    // إذا كان هناك مفتاح مخصص مدخل أو كنا داخل تطبيق الأندرويد (APK)، نفحص الاتصال المباشر بـ Google Gemini API أولاً
     if (activeCustomKey || isRunningInNativeApk()) {
       const directRes = await checkDirectGeminiStatusOnDevice(activeCustomKey || undefined);
       if (directRes.geminiActive) {
@@ -93,7 +95,6 @@ export function ReportsPanel() {
         return;
       }
 
-      // إذا أدخل المستخدم مفتاحاً مخصصاً وفشل الاختبار المباشر، نتحقق أيضاً عبر الخادم أو نعرض سبب الخطأ الدقيق
       if (activeCustomKey && directRes.errorReason && isRunningInNativeApk()) {
         setEngineStatus({
           checking: false,
@@ -266,38 +267,69 @@ export function ReportsPanel() {
   }, []);
 
   const titles: Record<string, string> = {
-    inventory: 'الجرد',
+    inventory: 'الجرد الشامل',
+    consumables: 'القطع الاستهلاكية (الموجهة إلى حرف A أو FL)',
     missing: 'النقص والمفقود',
     unverified: 'القطع غير المدققة',
     issue: 'الصرف',
     receipt: 'إدخال المخزون',
-    transfer: 'طلبات النقل والاعتماد',
+    transfer: 'قوائم النقل اليومية المحفوظة (مع إشارة الاستهلاكية A / FL)',
     audit: 'سجل العمليات',
   };
 
   const prepare = async () => {
+    setWhatsappUrl(null);
     const items = dbService.getAllItems();
     const docs = await dbService.getDocuments();
-    if (['inventory', 'missing', 'unverified'].includes(kind)) {
+    if (['inventory', 'consumables', 'missing', 'unverified'].includes(kind)) {
       const selected = items.filter((item) =>
-        kind === 'missing'
+        kind === 'consumables'
+          ? isConsumablePart(item)
+          : kind === 'missing'
           ? item.is_missing === 1 || /^-\s*\d+$/.test(item.remark || '')
           : kind === 'unverified'
-          ? item.status === 'غير مدقق'
+          ? item.user_verified !== 1 && item.is_missing !== 1
           : true
       );
       setRows([
-        ['رقم القطعة', 'الوصف', 'الموقع', 'الإجمالي', 'المصروف', 'المتبقي', 'الحالة', 'الملاحظات'],
-        ...selected.map((item) => [
-          item.part_number,
-          `${item.description_ar}\n${item.description_en}`,
-          item.location_code,
-          String(item.qty_total),
-          String(item.qty_out),
-          String(item.qty_remaining),
-          item.status,
-          item.remark || '',
-        ]),
+        [
+          'رقم القطعة',
+          'الوصف',
+          'الموقع',
+          'الإجمالي',
+          'المصروف',
+          'المتبقي',
+          'الاستهلاكية (A / FL)',
+          'الحالة',
+          'الملاحظات',
+        ],
+        ...selected.map((item) => {
+          const isCons = isConsumablePart(item);
+          const shelfTarget = isFLLocation(item.location_code)
+            ? 'FL'
+            : isALocation(item.location_code)
+            ? 'A'
+            : 'تنقل إلى A أو FL';
+          const strictStatus =
+            item.is_missing === 1 || item.status === 'غير موجودة'
+              ? '× غير موجودة'
+              : item.user_verified === 1 && item.status === 'مدقق'
+              ? '✓ مدقق'
+              : item.is_moved === 1 && (item.status === 'منقول' || item.status === 'تم النقل')
+              ? 'منقول'
+              : 'غير مدقق';
+          return [
+            item.part_number,
+            `${item.description_ar}\n${item.description_en}`,
+            item.location_code,
+            String(item.qty_total),
+            String(item.qty_out),
+            String(item.qty_remaining),
+            isCons ? `🔄 قطعة استهلاكية (${shelfTarget})` : 'اعتيادية',
+            strictStatus,
+            item.remark || '',
+          ];
+        }),
       ]);
     } else if (kind === 'audit') {
       const backup = JSON.parse(await dbService.exportBackup());
@@ -315,42 +347,82 @@ export function ReportsPanel() {
     } else {
       setRows([
         [
-          'رقم وتاريخ التقرير',
+          'قائمة النقل اليومية / التقرير',
           'المستند',
           'مقدم الطلب',
           'الحالة',
           'القطعة',
+          'إشارة الاستهلاكية',
           'الكمية',
           'الموقع القديم',
-          'الموقع الجديد',
+          'الموقع الجديد (A / FL)',
           'السبب',
-          'اعتماد المشرف',
           'وقت التنفيذ',
         ],
         ...docs
           .filter((doc) => doc.kind === kind)
           .flatMap((doc, docIdx) =>
-            doc.lines.map((line) => [
-              doc.reportTitle || (doc.kind === 'transfer' ? `تقرير ${docIdx + 1}` : doc.id),
-              doc.id,
-              doc.requester,
-              doc.status === 'approved' ? 'تم النقل والاعتماد' : 'بانتظار الاعتماد',
-              line.part_number,
-              String(line.quantity),
-              line.old_location || '',
-              line.location,
-              doc.reason,
-              doc.approvedBy || '',
-              doc.executedAt || doc.createdAt || '',
-            ])
+            doc.lines.map((line) => {
+              const existing = dbService.getItemByPartNumber(line.part_number);
+              const isCons =
+                line.is_consumable === 1 || (existing ? isConsumablePart(existing) : false);
+              return [
+                doc.reportTitle || (doc.kind === 'transfer' ? `قائمة نقل #${docIdx + 1}` : doc.id),
+                doc.id,
+                doc.requester,
+                doc.status === 'approved' ? 'تم النقل والاعتماد' : 'بانتظار الاعتماد',
+                line.part_number,
+                isCons ? '🔄 قطعة استهلاكية (إلى A/FL)' : 'قطعة اعتيادية/ثقيلة',
+                String(line.quantity),
+                line.old_location || '',
+                line.location,
+                doc.reason,
+                doc.executedAt || doc.createdAt || '',
+              ];
+            })
           ),
       ]);
     }
   };
 
+  const handleExportAndShareWhatsApp = async (sendViaWhatsApp: boolean) => {
+    try {
+      const reportTitle = `ASMO — ${titles[kind]}`;
+      const previewLines = rows
+        .slice(1, 16)
+        .map((r, idx) => `${idx + 1}) ${r.filter(Boolean).slice(0, 5).join(' | ')}`)
+        .join('\n');
+      const fullText =
+        `📋 *${reportTitle}*\n` +
+        `📅 التاريخ: ${new Date().toLocaleString('ar-SA', { timeZone: 'Asia/Riyadh' })}\n` +
+        `📦 عدد السجلات: ${Math.max(0, rows.length - 1)}\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `${previewLines}`;
+
+      if (sendViaWhatsApp) {
+        const res = await sharePdfFile({
+          reportElementId: 'asmo-operation-report',
+          title: reportTitle,
+          text: fullText,
+          targetApp: 'whatsapp',
+        });
+        setWhatsappUrl(res.whatsappUrl || `https://wa.me/?text=${encodeURIComponent(fullText)}`);
+        setMessage(`✅ تم تصدير ملف PDF (${res.filename}) وتجهيز إرساله عبر واتساب! 📲`);
+      } else {
+        const result = await generateReportPdfBlob({
+          reportElementId: 'asmo-operation-report',
+        });
+        await savePdfFile(result.pdfFile);
+        setWhatsappUrl(`https://wa.me/?text=${encodeURIComponent(fullText)}`);
+        setMessage(`✅ تم تنزيل ملف PDF (${result.filename}) بنجاح!`);
+      }
+    } catch (err) {
+      setMessage(String(err));
+    }
+  };
+
   return (
     <div className="m-4 space-y-3" dir="rtl">
-      {/* لوحة فحص حالة محرك جمني وإدخال المفتاح والاختبار داخل واجهة التقارير */}
       <div className="p-4 border border-amber-700/70 rounded-2xl bg-[#221611] shadow-lg space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
@@ -359,7 +431,7 @@ export function ReportsPanel() {
             </div>
             <div>
               <h3 className="text-sm sm:text-base font-extrabold text-white">
-                حالة محرك جمني (Gemini AI) ومحرك قراءة أوراق الجرد
+                حالة محرك جمني (Gemini AI) ومحرك قراءة أوراق الجرد بأعلى المعايير
               </h3>
               <p className="text-[11px] text-neutral-300">
                 يمكنك وضع مفتاح Gemini API الخاص بك بالأسفل وحفظه واختباره ليعمل جمني مباشرة في تطبيق الهاتف
@@ -378,7 +450,6 @@ export function ReportsPanel() {
           </button>
         </div>
 
-        {/* حقل إدخال مفتاح Gemini API مع الحفظ والاختبار المباشر */}
         <div className="p-3.5 rounded-xl bg-stone-900/95 border border-amber-600/50 space-y-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-amber-300 text-xs font-extrabold">
@@ -496,7 +567,7 @@ export function ReportsPanel() {
             <div className="flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
               <div>
-                <div className="font-bold text-white">محرك القراءة المحلي للهاتف (WASM SIMD + 37 سطراً)</div>
+                <div className="font-bold text-white">محرك القراءة المحلي للهاتف (WASM SIMD + دمج مزدوج)</div>
                 <div className="text-[11px] text-emerald-300">يعمل ونشط 100% (متصل وبدون إنترنت) 🟢</div>
               </div>
             </div>
@@ -512,11 +583,11 @@ export function ReportsPanel() {
         </p>
       </div>
 
-      {/* قسم تقارير PDF */}
+      {/* قسم تقارير PDF وإرسالها عبر واتساب */}
       <details open className="p-4 border border-amber-800 rounded-2xl bg-[#1E1410]" dir="rtl">
         <summary className="font-bold text-amber-300 cursor-pointer flex items-center gap-2">
           <FileText className="w-4 h-4" />
-          <span>تقارير PDF</span>
+          <span>تقارير PDF وإرسالها عبر واتساب 📲</span>
         </summary>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <select
@@ -525,6 +596,7 @@ export function ReportsPanel() {
             onChange={(e) => {
               setKind(e.target.value);
               setRows([]);
+              setWhatsappUrl(null);
             }}
           >
             {Object.entries(titles).map(([key, title]) => (
@@ -540,23 +612,33 @@ export function ReportsPanel() {
             إعداد التقرير
           </button>
           {rows.length > 0 && (
-            <button
-              className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-              onClick={async () => {
-                try {
-                  const result = await generateReportPdfBlob({
-                    reportElementId: 'asmo-operation-report',
-                  });
-                  await savePdfFile(result.pdfFile);
-                  URL.revokeObjectURL(result.downloadUrl);
-                } catch (err) {
-                  setMessage(String(err));
-                }
-              }}
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>تنزيل PDF</span>
-            </button>
+            <>
+              <button
+                className="px-3.5 py-2 rounded-xl bg-[#25D366] hover:bg-[#20bd5a] text-white text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-md"
+                onClick={() => handleExportAndShareWhatsApp(true)}
+              >
+                <MessageCircle className="w-3.5 h-3.5" />
+                <span>تصدير PDF وإرسال عبر واتساب 📲</span>
+              </button>
+              <button
+                className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                onClick={() => handleExportAndShareWhatsApp(false)}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>تنزيل PDF</span>
+              </button>
+              {whatsappUrl && (
+                <a
+                  href={whatsappUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-2 rounded-xl bg-emerald-950 text-emerald-300 border border-emerald-500/60 text-xs font-black flex items-center gap-1"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  <span>فتح واتساب الآن 📲</span>
+                </a>
+              )}
+            </>
           )}
         </div>
         {rows.length > 0 && (

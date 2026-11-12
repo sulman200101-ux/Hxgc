@@ -9,7 +9,11 @@ import {
   parseStrictAsmoTable,
   unionOrderedRowSequences,
 } from '../utils/strictTableParser';
-import { parseTableWithGeminiVision, performStrictOCR } from './geminiVisionService';
+import {
+  parseTableWithGeminiVision,
+  performStrictOCR,
+  enhanceExtractedRowsWithGemini,
+} from './geminiVisionService';
 export { performStrictOCR };
 export {
   extractSparePartData,
@@ -29,6 +33,7 @@ export interface ExtractedSparePart {
   qty_out: number;
   qty_remaining: number;
   is_missing?: number;
+  is_consumable?: number;
   remark?: string;
   mark_symbol?: '✓' | 'X' | 'F' | 'N' | null;
   audit_meaning?: string | null;
@@ -275,17 +280,12 @@ async function getImageDimensions(dataUrl: string): Promise<{ width: number; hei
   });
 }
 
-/**
- * قراءة أوراق الجرد الصارمة بطلب موحد واحد للصورة الكاملة بدون أي تقسيم:
- * - تمرير الصورة كاملة بدون أي تقسيم (بدون Split / Slice / Chunk).
- * - الاعتماد على الطلب الموحد الصارم (temperature: 0.0, topK: 1, topP: 0.1, responseMimeType: "application/json").
- */
 export async function processOcrFromImage(
   imageSource: string | File | Blob,
   onStatus?: (status: string) => void
 ): Promise<ExtractedSparePart[]> {
   try {
-    onStatus?.('جارٍ فحص الورقة واستخراج جدول القطع...');
+    onStatus?.('جارٍ معايرة الصورة وقراءة جدول القطع بأعلى دقة بمساعدة جمني...');
     await pauseUi(0);
 
     const sourceDataUrl =
@@ -301,10 +301,9 @@ export async function processOcrFromImage(
     const dims = await getImageDimensions(sourceDataUrl);
     const isFullSheetPhoto = dims.width >= 500 && dims.height >= 500;
 
-    // تجهيز الصورة الكاملة بدقة عالية وبسرعة فائقة بدون تدوير عشوائي
     const scaledNaturalSource = await prepareImageForAi(sourceDataUrl, {
       maxDimension: 1850,
-      minDimension: isFullSheetPhoto ? 1200 : 900,
+      minDimension: isFullSheetPhoto ? 1250 : 900,
       enhanceContrast: true,
       sharpenText: true,
       autoRotate: false,
@@ -312,9 +311,10 @@ export async function processOcrFromImage(
 
     let extracted: ExtractedSparePart[] = [];
 
-    // 1. القراءة الفورية عبر محرك الرؤية الذكي بالصورة الكاملة مباشرة دون تأخير المعالجة المسبقة الثقيلة
+    // 1. القراءة الفورية عالية الدقة عبر Gemini Vision مباشرة دون تعطيل المعالج الرئيسي
     if (typeof navigator === 'undefined' || navigator.onLine !== false) {
       try {
+        onStatus?.('جارٍ استخراج وتدقيق سطور الورقة عبر محرك Gemini Vision...');
         const visionResult = await parseTableWithGeminiVision(
           scaledNaturalSource,
           true
@@ -322,7 +322,7 @@ export async function processOcrFromImage(
         if (visionResult.success && isUsableExtraction(visionResult.items, 1)) {
           extracted = visionResult.items;
           if (extracted.length > 0) {
-            return extracted;
+            return await enhanceExtractedRowsWithGemini(extracted);
           }
         }
       } catch {
@@ -330,10 +330,8 @@ export async function processOcrFromImage(
       }
     }
 
-    // 2. القراءة المحلية للصورة الكاملة (تعمل فقط في الوضع غير المتصل بالإنترنت أو كاحتياطي)
-    onStatus?.('جارٍ القراءة بالمحرك البصري المحلي...');
-    await pauseUi(0);
-
+    // 2. القراءة المحلية للصورة الكاملة مع الدمج المزدوج (تعمل فقط عند انقطاع الإنترنت)
+    onStatus?.('جارٍ قراءة السطور بالمحرك البصري المحلي...');
     let preprocessedGridFree: string | null = null;
     if (isFullSheetPhoto) {
       try {
@@ -351,14 +349,16 @@ export async function processOcrFromImage(
       [worker] = await acquireOcrWorkerPool(1);
     }
 
-    const naturalText = await safeRecognizeText(worker, scaledNaturalSource, 20000);
-    const naturalRows = parseRawTextOcr(naturalText);
-    extracted = combineBestSheetExtractions(extracted, naturalRows);
-
-    if (preprocessedGridFree && extracted.length < 30) {
-      const shadowFreeText = await safeRecognizeText(worker, preprocessedGridFree, 20000);
+    if (preprocessedGridFree) {
+      const shadowFreeText = await safeRecognizeText(worker, preprocessedGridFree, 22000);
       const shadowFreeRows = parseRawTextOcr(shadowFreeText);
       extracted = combineBestSheetExtractions(extracted, shadowFreeRows);
+    }
+
+    if (extracted.length < 37) {
+      const naturalText = await safeRecognizeText(worker, scaledNaturalSource, 22000);
+      const naturalRows = parseRawTextOcr(naturalText);
+      extracted = combineBestSheetExtractions(extracted, naturalRows);
     }
 
     if (extracted.length < 2) {
@@ -392,7 +392,7 @@ export async function processOcrFromImage(
       }
     }
 
-    return extracted;
+    return await enhanceExtractedRowsWithGemini(extracted);
   } catch (err) {
     console.warn('Local OCR notice:', err);
     await releaseOcrWorkerNow();

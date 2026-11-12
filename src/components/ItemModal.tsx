@@ -1,7 +1,7 @@
 import { suggestTechnicalTranslation, suggestModelTranslation } from '../services/partTranslation';
 import React, { useState, useEffect, useMemo } from 'react';
 import { InventoryItem } from '../types';
-import { categorizeAndTranslate } from '../utils/translator';
+import { categorizeAndTranslate, isConsumableDescription } from '../utils/translator';
 import {
   analyzePartsWithGeminiAssistant,
   computeLocalPartEngineeringAnalysis,
@@ -55,7 +55,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
 
   useEffect(() => {
     setValidationError(null);
-    if (item) {
+    if (item && item.part_number) {
       setPartNumber(item.part_number);
       setLocationCode(item.location_code === 'عام' ? '' : item.location_code);
       setDescEn(item.description_en);
@@ -63,13 +63,21 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       setCategory(item.category === 'عام' ? 'قطع ميكانيكية متنوعة' : item.category);
       setQtyTotal(item.qty_total);
       setQtyOut(item.qty_out);
-      setStatus(item.is_missing === 1 ? 'غير موجودة' : item.status);
+      const strictStatus: InventoryItem['status'] =
+        item.is_missing === 1 || item.status === 'غير موجودة' || item.status === 'مفقود'
+          ? 'غير موجودة'
+          : (item.is_moved === 1 || item.user_moved === 1) && item.status === 'تم النقل'
+          ? 'تم النقل'
+          : item.user_verified === 1 && item.status === 'مدقق'
+          ? 'مدقق'
+          : 'غير مدقق';
+      setStatus(strictStatus);
       const hasGin = Boolean(item.gin_code && item.gin_code.trim());
       setUseGin(hasGin);
       setGinCode(item.gin_code && item.gin_code !== 'قين' ? item.gin_code : '');
     } else {
       setPartNumber('');
-      setLocationCode('');
+      setLocationCode(item?.location_code && item.location_code !== 'عام' ? item.location_code : '');
       setDescEn('');
       setDescAr('');
       setCategory('قطع ميكانيكية متنوعة');
@@ -80,6 +88,11 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       setGinCode('');
     }
   }, [item, isOpen]);
+
+  const isConsumable = useMemo(
+    () => isConsumableDescription(descEn, category),
+    [descEn, category]
+  );
 
   const liveAnalysis = useMemo(() => {
     if (!descEn.trim()) return null;
@@ -113,11 +126,11 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       return;
     }
 
-    const fallbackLoc = liveAnalysis?.recommended_bin || 'N01A1';
+    const fallbackLoc = liveAnalysis?.recommended_bin || (isConsumable ? 'N01A1' : 'N01C1');
     const rawLoc = locationCode.trim() ? locationCode : fallbackLoc;
     const cleanLoc = sanitizeLocationCode(rawLoc) || fallbackLoc;
     if (!isValidSpecificLocation(cleanLoc)) {
-      setValidationError('يجب إدخال اسم موقع محدد وفعلي (مثل N11C2 أو N06C1) — يمنع إدخال موقع "عام"');
+      setValidationError('يجب إدخال اسم موقع محدد وفعلي (مثل N11A1 أو N11FL1 أو N11C2) — يمنع إدخال موقع "عام"');
       return;
     }
 
@@ -146,6 +159,9 @@ export const ItemModal: React.FC<ItemModalProps> = ({
       setIsSubmitting(false);
     }
   };
+
+  const aislePrefixMatch = (locationCode || 'N11A1').trim().toUpperCase().match(/^([A-Z]\d{1,3})/);
+  const aislePrefix = aislePrefixMatch ? aislePrefixMatch[1] : 'N11';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
@@ -253,7 +269,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-neutral-300 font-semibold">اسم الموقع (Storage Bin)</label>
-                {item && onOpenRelocate && (
+                {item && item.part_number && onOpenRelocate && (
                   <button
                     type="button"
                     onClick={() => {
@@ -271,49 +287,80 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 type="text"
                 value={locationCode}
                 onChange={(e) => setLocationCode(e.target.value)}
-                placeholder="N11C2 أو N06C1 (تلقائي عند الترك)"
+                placeholder="N11A1 أو N11FL1 أو N11C2"
                 className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 font-mono font-bold focus:outline-none focus:border-amber-500"
               />
             </div>
           </div>
 
           <fieldset className="border border-amber-900 rounded-xl p-3 space-y-2">
-            <legend>اسم القطعة</legend>
-          {/* Description AR */}
-          <div>
-            <label className="block text-neutral-300 font-semibold mb-1">
-              اسم ووصف القطعة بالعربية
-            </label>
-            <input
-              type="text"
-              value={descAr}
-              onChange={(e) => setDescAr(e.target.value)}
-              placeholder="جازكيت حلزوني مدعم 3 بوصة..."
-              className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 font-bold focus:outline-none focus:border-amber-500"
-            />
-          </div>
-
-          {/* Description EN */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-neutral-300 font-semibold">
-                الوصف باللغة الإنجليزية (Material Description)
+            <legend className="flex items-center gap-2">
+              <span>اسم القطعة</span>
+              {isConsumable && (
+                <span className="px-2 py-0.5 rounded-full bg-cyan-950/90 text-cyan-200 border border-cyan-500/60 font-black text-[10px]">
+                  🔄 قطعة استهلاكية (تنقل إلى حرف A أو FL)
+                </span>
+              )}
+            </legend>
+            {/* Description AR */}
+            <div>
+              <label className="block text-neutral-300 font-semibold mb-1">
+                اسم ووصف القطعة بالعربية
               </label>
-              <span className="text-[10px] text-amber-400 flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> تعريب وتصنيف تلقائي
-              </span>
+              <input
+                type="text"
+                value={descAr}
+                onChange={(e) => setDescAr(e.target.value)}
+                placeholder="جازكيت حلزوني مدعم 3 بوصة..."
+                className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 font-bold focus:outline-none focus:border-amber-500"
+              />
             </div>
-            <input
-              type="text"
-              value={descEn}
-              onChange={(e) => handleDescEnChange(e.target.value)}
-              placeholder="e.g. GASKET SPIRAL WOUND 3 INCH 150#"
-              dir="ltr"
-              className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 font-sans focus:outline-none focus:border-amber-500"
-            />
-          </div>
 
+            {/* Description EN */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-neutral-300 font-semibold">
+                  الوصف باللغة الإنجليزية (Material Description)
+                </label>
+                <span className="text-[10px] text-amber-400 flex items-center gap-1">
+                  <Sparkles className="w-3 h-3" /> تعريب وتصنيف تلقائي
+                </span>
+              </div>
+              <input
+                type="text"
+                value={descEn}
+                onChange={(e) => handleDescEnChange(e.target.value)}
+                placeholder="e.g. GASKET SPIRAL WOUND 3 INCH 150#"
+                dir="ltr"
+                className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 font-sans focus:outline-none focus:border-amber-500"
+              />
+            </div>
           </fieldset>
+
+          {isConsumable && (
+            <div className="p-2.5 rounded-xl bg-cyan-950/50 border border-cyan-500/50 flex items-center justify-between flex-wrap gap-2">
+              <span className="text-[11px] text-cyan-200 font-bold">
+                🔄 تم التعرف على هذه القطعة كـ <strong>قطعة استهلاكية</strong> — يُوجه نقلها إلى حرف <strong>A</strong> أو <strong>FL</strong>:
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setLocationCode(`${aislePrefix}A1`)}
+                  className="px-2.5 py-1 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white font-black font-mono text-[11px] cursor-pointer"
+                >
+                  حرف A ({aislePrefix}A1)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLocationCode(`${aislePrefix}FL1`)}
+                  className="px-2.5 py-1 rounded-lg bg-amber-700 hover:bg-amber-600 text-white font-black font-mono text-[11px] cursor-pointer"
+                >
+                  حرف FL ({aislePrefix}FL1)
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
@@ -374,7 +421,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 <span className="text-emerald-300 font-bold flex items-center gap-1">
                   <MapPin className="w-3.5 h-3.5" />
                   <span>
-                    الرف المقترح للحجم والوزن: <strong className="font-mono">{liveAnalysis.recommended_bin}</strong> ({liveAnalysis.size_category})
+                    الرف المقترح: <strong className="font-mono">{liveAnalysis.recommended_bin}</strong> ({liveAnalysis.size_category})
                   </span>
                 </span>
                 {locationCode.trim().toUpperCase() !== liveAnalysis.recommended_bin && (
@@ -421,11 +468,10 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 onChange={(e) => setStatus(e.target.value as InventoryItem['status'])}
                 className="w-full px-3 py-2 rounded-xl bg-[#1F1511] border border-[#4A342B] text-neutral-100 focus:outline-none focus:border-amber-500"
               >
-                <option value="مضاف">✓ موجودة / مضاف</option>
+                <option value="غير مدقق">غير مدقق (افتراضي حتى أدققه بنفسي)</option>
+                <option value="مدقق">✓ مدقق (دققته بنفسي)</option>
                 <option value="غير موجودة">× غير موجودة (معلمة بـ × في الجدول)</option>
-                <option value="مدقق">مدقق</option>
-                <option value="غير مدقق">غير مدقق</option>
-                <option value="تم النقل">تم النقل 🟢</option>
+                <option value="تم النقل">منقول 🟢 (نقلته بنفسي)</option>
               </select>
             </div>
           </div>
@@ -483,7 +529,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               className="px-5 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-500 hover:to-amber-600 text-white font-bold flex items-center gap-1.5 shadow-md shadow-amber-900/40 disabled:opacity-50 cursor-pointer"
             >
               <Save className="w-4 h-4" />
-              <span>{item ? 'حفظ التعديلات' : 'إضافة القطعة'}</span>
+              <span>{item && item.part_number ? 'حفظ التعديلات' : 'إضافة القطعة'}</span>
             </button>
           </div>
         </form>

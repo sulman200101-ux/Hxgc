@@ -232,6 +232,8 @@ const TERM_TRANSLATIONS: Record<string, string> = {
   'RELIEVING': 'تصريف ضغط ذاتي',
   'IGNITER': 'مشعل شرارة (إجنيتر)',
   'GLOVES': 'قفازات وقاية صناعية',
+  'EARPLUG': 'سدادات أذن واقية',
+  'SHIM': 'رقائق ضبط ومعايرة (شيم)',
   'INSULATOR': 'عازل كهربائي/حراري',
   'TRANSMITTER': 'مرسل قياس (ترانسميتر)',
   'BELLOWS': 'منفاخ تمدد معدني (بيلوز)',
@@ -261,16 +263,76 @@ const TERM_TRANSLATIONS: Record<string, string> = {
   'METRIC': 'متري قياسي',
 };
 
-// ذاكرة تخزين مؤقت دائمة للترجمة والتصنيف (One-Time Processing Cache)
+// تجميع التعبيرات النمطية مسبقاً مرة واحدة عند بدء التشغيل لمنع أي بطء أو تعليق عند استيراد آلاف القطع
+const PRECOMPILED_EXACT_PHRASES: Array<{ regex: RegExp; ar: string }> = Object.keys(
+  EXACT_PHRASE_TRANSLATIONS
+)
+  .sort((a, b) => b.length - a.length)
+  .map((phrase) => ({
+    regex: new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
+    ar: EXACT_PHRASE_TRANSLATIONS[phrase],
+  }));
+
+const PRECOMPILED_TERMS: Array<{ regex: RegExp; ar: string }> = Object.keys(TERM_TRANSLATIONS)
+  .sort((a, b) => b.length - a.length)
+  .map((enWord) => ({
+    regex: new RegExp(`\\b${enWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'),
+    ar: TERM_TRANSLATIONS[enWord],
+  }));
+
+// ذاكرة تخزين مؤقت محكومة السعة للترجمة والتصنيف لمنع تسرب الذاكرة
+const MAX_TRANSLATION_CACHE_SIZE = 25000;
 const TRANSLATION_CACHE = new Map<string, { category: string; descAr: string }>();
+
+/**
+ * فحص ما إذا كانت القطعة من القطع الاستهلاكية الدورية (Consumable Spare Parts)
+ * مثل: المسامير، الصواميل، الوردات، الجازكيت، الأورينج، الحشوات، الفلاتر، الفيوزات، اللمبات، أربطة الكابلات، القفازات، الشيمات، إلخ.
+ */
+export function isConsumableDescription(descEn: string, category?: string): boolean {
+  const upper = (descEn || '').trim().toUpperCase();
+  const cat = (category || '').trim();
+  if (!upper && !cat) return false;
+
+  // استثناء المعدات الثقيلة الرئيسية من تصنيف الاستهلاكية المباشرة
+  if (
+    /\b(PUMP|COMPRESSOR|TURBINE|GEARBOX|TRANSFORMER|MOTOR|ACTUATOR|CASING|IMPELLER)\b/.test(upper) &&
+    !/\b(GASKET|O-RING|ORING|PACKING|SEAL|FILTER|KIT|BOLT|NUT|WASHER|SCREW|FUSE)\b/.test(upper)
+  ) {
+    return false;
+  }
+
+  if (
+    /\b(BOLT|NUT|WASHER|SCREW|STUD|PIN|RIVET|CLIP|CLAMP|ANCHOR|GASKET|O-RING|ORING|PACKING|SEAL|SHIM|FILTER|STRAINER|CARTRIDGE|ELEMENT|FUSE|LAMP|BULB|LIGHT|TIE|TAPE|GLOVES|EARPLUG|GOGGLES|MASK|BELT|HOSE|SPRING|BRUSH|IGNITER|CAP:\s*PROTECTIVE|REPAIR\s+KIT|SPARE\s+PART\s+KIT)\b/.test(
+      upper
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    cat === 'مسامير وروابط' ||
+    cat === 'جازكيت وموانع تسرب' ||
+    cat === 'فلاتر ومصافي'
+  ) {
+    return true;
+  }
+
+  return false;
+}
 
 export function categorizeAndTranslate(descEn: string): { category: string; descAr: string } {
   const normalizedKey = (descEn || '').trim().toUpperCase();
-  if (!normalizedKey || normalizedKey === 'غير محدد' || normalizedKey === 'SPARE PART ASMO' || normalizedKey === 'SPARE PART') {
+  if (
+    !normalizedKey ||
+    normalizedKey === 'غير محدد' ||
+    normalizedKey === 'SPARE PART ASMO' ||
+    normalizedKey === 'SPARE PART'
+  ) {
     return { category: '', descAr: '' };
   }
-  if (TRANSLATION_CACHE.has(normalizedKey)) {
-    return TRANSLATION_CACHE.get(normalizedKey)!;
+  const cached = TRANSLATION_CACHE.get(normalizedKey);
+  if (cached) {
+    return cached;
   }
 
   const upper = normalizedKey;
@@ -352,24 +414,16 @@ export function categorizeAndTranslate(descEn: string): { category: string; desc
 
   let descAr = descEn;
 
-  // 1. استبدال العبارات المركبة الطويلة أولاً لضمان دقة السياق الهندسي
-  const sortedExactPhrases = Object.keys(EXACT_PHRASE_TRANSLATIONS).sort(
-    (a, b) => b.length - a.length
-  );
-  for (const phrase of sortedExactPhrases) {
-    const arPhrase = EXACT_PHRASE_TRANSLATIONS[phrase];
-    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(escaped, 'gi');
-    descAr = descAr.replace(regex, arPhrase);
+  // 1. استبدال العبارات المركبة الطويلة أولاً باستخدام التعبيرات المترجمة مسبقاً
+  for (let i = 0; i < PRECOMPILED_EXACT_PHRASES.length; i++) {
+    const entry = PRECOMPILED_EXACT_PHRASES[i];
+    descAr = descAr.replace(entry.regex, entry.ar);
   }
 
   // 2. استبدال المصطلحات المفردة والمركبة
-  const sortedTerms = Object.keys(TERM_TRANSLATIONS).sort((a, b) => b.length - a.length);
-  for (const enWord of sortedTerms) {
-    const arWord = TERM_TRANSLATIONS[enWord];
-    const escaped = enWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
-    descAr = descAr.replace(regex, arWord);
+  for (let i = 0; i < PRECOMPILED_TERMS.length; i++) {
+    const entry = PRECOMPILED_TERMS[i];
+    descAr = descAr.replace(entry.regex, entry.ar);
   }
 
   // 3. تعريب وحدات القياس والاختصارات الفنية الشائعة بشكل واضح ومقروء
@@ -385,6 +439,10 @@ export function categorizeAndTranslate(descEn: string): { category: string; desc
     .replace(/\b(\d+)\s*VAC\b/gi, '$1 فولت متردد');
 
   const result = { category, descAr };
+  if (TRANSLATION_CACHE.size >= MAX_TRANSLATION_CACHE_SIZE) {
+    const firstKey = TRANSLATION_CACHE.keys().next().value;
+    if (firstKey !== undefined) TRANSLATION_CACHE.delete(firstKey);
+  }
   TRANSLATION_CACHE.set(normalizedKey, result);
   return result;
 }
