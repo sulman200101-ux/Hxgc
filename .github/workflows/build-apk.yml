@@ -1,0 +1,96 @@
+name: Build and Release Android APK
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Capacitor Android APK (v3.5.0 - Build 38)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Set up Node.js 22 (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci || npm install --legacy-peer-deps
+
+      - name: Clean Old APK Artifacts & Sync Fresh Web Build to Android
+        run: |
+          rm -rf dist public/*.apk public/downloads/*.apk android/app/src/main/assets/public
+          npm run build
+          npx cap sync android
+          ls -la android/app/src/main/assets/public/
+
+      - name: Build Android APK with Gradle (Conflict-Free Permanent Signing Key)
+        run: |
+          mkdir -p ~/.android
+          if [ -f android/app/asmo-signing.keystore ]; then
+            cp -f android/app/asmo-signing.keystore ~/.android/debug.keystore
+          fi
+          cd android
+          chmod +x gradlew
+          ./gradlew clean assembleDebug --no-daemon
+
+          rm -rf ../output_apk
+          mkdir -p ../output_apk
+          find app/build/outputs/apk/ -name "*.apk" -exec cp {} ../output_apk/ \; || true
+          cd ../output_apk
+          if [ -f app-debug.apk ]; then
+            cp -f app-debug.apk asmo-inventory-v3.5.0.apk
+            cp -f app-debug.apk asmo-inventory-v3.5.0-direct-install.apk
+            cp -f app-debug.apk asmo-inventory-v3.4.0.apk
+            cp -f app-debug.apk asmo-inventory-app.apk
+          fi
+          cd ..
+          echo "=== Generated Native APKs (v3.5.0 - Build 38) ==="
+          ls -lh output_apk/
+
+      - name: Delete All Old Releases and Tags
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null || true); do
+            gh release delete "$tag" --yes --cleanup-tag || true
+          done
+          for tag in v1.0.0 v1.1.0 v1.2.0 v1.3.0 v1.4.0 v1.5.0 v1.6.0 v1.6.1 v1.6.2 v1.6.3 v1.6.4 v1.6.5 v1.7.0 v1.8.0 v1.9.0 v2.0.0 v2.1.0 v2.2.0 v2.3.0 v2.4.0 v2.5.0 v2.6.0 v2.7.0 v2.8.0 v2.9.0 v3.0.0 v3.1.0 v3.2.0 v3.3.0 v3.4.0 v3.5.0; do
+            gh release delete "$tag" --yes --cleanup-tag || true
+            git push origin --delete "$tag" 2>/dev/null || true
+          done
+
+      - name: Create Fresh GitHub Release v3.5.0 (Direct APK Download)
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: v3.5.0
+          name: "ASMO Inventory App v3.5.0 (Build 38 — قاعدة بيانات الجرد الكاملة 2,796 قطعة لحرفي P و N من 55 ورقة قابلة للتعديل والمسح)"
+          body: |
+            ## 📱 تطبيق إدارة وجرد قطع الغيار - أسمو (الإصدار المحدّث v3.5.0 — Build 38)
+            - **إضافة وحفظ جميع الـ 55 ورقة لحرف P (1,508 قطعة من P01A1 إلى P17FL1) مع حرف N (1,288 قطعة) بإجمالي 2,796 قطعة**: محفوظة في مخزن البيانات الخارجي (`inventory-store.json` Revision 12) خارج أكواد البرمجة لسهولة التعديل والحذف والمسح الشامل في أي وقت.
+            - **مزامنة فورية وتوقيع دائم موحد (`asmo-signing.keystore`)**: يعمل مباشرة مع الهاتف دون تعارض تثبيت أو فقدان بيانات.
+          files: |
+            output_apk/asmo-inventory-v3.5.0.apk
+            output_apk/asmo-inventory-v3.5.0-direct-install.apk
+            output_apk/asmo-inventory-v3.4.0.apk
+            output_apk/asmo-inventory-app.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
